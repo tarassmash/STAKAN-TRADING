@@ -1,0 +1,11 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "node server.js"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+# Always bring the bot back, never put it to sleep, only one copy (two copies would double the orders)
+restartPolicyType = "ALWAYS"
+sleepApplication = false
+numReplicas = 1

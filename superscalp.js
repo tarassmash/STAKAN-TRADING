@@ -24,7 +24,10 @@ const DEFAULTS = {
   maxPositions: 2,
   cooldownSec: 60,
   dailyLossPct: 0,       // 0 = no daily loss limit (owner's choice); >0 stops new entries for the day after this loss, % of equity
-  ride: true,            // move the take further while the impulse goes on
+  ride: true,            // move the take further while the impulse goes on (old mode, used only when trail is off)
+  trail: true,           // trailing take: reaching the take does not close the trade; the take runs ahead of the price, the stop follows it in profit,
+                         // the exit comes only when the price pulls back by trailPct from its best point -> the whole impulse is taken
+  trailPct: 0,           // pull-back from the best point that ends the trade, % (0 = auto: half of the take, at least 0.04%)
   useIceberg: true, useAbsorption: true, useSpoof: true,
   // protection against the usual scalping losses
   needAgree: true,       // book and tape must point the same way
@@ -51,7 +54,7 @@ const DEFAULTS = {
 };
 // preset of the "book pressure" style: tiny takes just above the maker fees, quick exits when the pressure goes away
 const PRESSURE = { style: "pressure", tpPct: 0.08, slPct: 0.25, scoreIn: 0.55, entryWaitSec: 5, timeStopSec: 45, holdMaxSec: 120,
-  ride: false, adaptive: false, flipExit: true, cancelOnFade: true, needAgree: false, maxPositions: 3, cooldownSec: 20 };
+  ride: false, trail: true, adaptive: false, flipExit: true, cancelOnFade: true, needAgree: false, maxPositions: 3, cooldownSec: 20 };
 
 // host: functions of the environment. On the server they talk to the breakout engine (via ev); a standalone page passes its own.
 //   bx(path, opts) -> Bybit REST result, spec(sym) -> {tick, step, minQty, minNotional, maxLev}, align(v, step, up) -> string,
@@ -71,7 +74,8 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
   let ST_PICK_NOW = false;
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
-  if (P.v < 4) { P.dailyLossPct = 0; P.v = 4; }                 // the owner switched the daily limit off
+  if (P.v < 4) { P.dailyLossPct = 0; P.v = 4; }
+  if (P.v < 5) { P.trail = true; P.v = 5; }                     // the owner wants the take trailed to take the whole move                 // the owner switched the daily limit off
   if (P.v < 3) { if (!P.minTurnoverM || P.minTurnoverM < DEFAULTS.minTurnoverM) P.minTurnoverM = DEFAULTS.minTurnoverM; P.v = 3; ST_PICK_NOW = true; }
   const ST = { hedge: !!lsGet("ssHedge", false), trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
@@ -267,6 +271,42 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
       + (sig.iceBid || sig.iceAsk ? " · айсберг" : "") + (sig.absBull || sig.absBear ? " · поглинання" : "") + (sig.spoofBid || sig.spoofAsk ? " · спуфінг" : ""), "gold-t");
   }
 
+  // trailing take: runs every 0.5 s on the live price.
+  //  - below the take level: nothing changes (the normal stop protects the trade)
+  //  - the take level is reached: the stop jumps into profit (at least the fees), then follows the best point at a distance;
+  //    the resting limit take is kept one take ahead of the best point, so a spike is still caught
+  //  - the price pulls back by the gap from its best point: leave with a limit at the best price (maker); the stop backs it up
+  async function trailStep(p, mv) {
+    const long = p.side === "Buy";
+    p.peak = Math.max(p.peak || 0, mv);
+    if (!p.trailOn) {
+      if (p.peak < p.tpPct) return;
+      p.trailOn = true; p.rides = 0;
+      engineLog(`🎯 ${p.sym}: тейк +${p.tpPct}% досягнуто — не закриваю, тягну трейлінгом (вихід на відкаті ${p.gap}% від найкращої ціни)`, "up");
+    }
+    const m = M[p.sym];
+    if (mv <= p.peak - p.gap) {
+      const best = long ? m.ask : m.bid;
+      try {
+        await amend(p.sym, p.tpId, best); p.tp = best; p.trailExit = true; p.leaving = "трейлінг";
+        engineLog(`🎯 ${p.sym}: відкат від максимуму +${p.peak.toFixed(3)}% — забираю лімітом ${best} (≈ +${mv.toFixed(3)}%)`, "up");
+      } catch (e) { /* the take may have just filled */ }
+      return;
+    }
+    // stop: behind the best point by 1.5 gaps, never below the fees, only forward
+    const lock = Math.max(LOCK_MIN, p.peak - p.gap * 1.5);
+    if (p.lockPct == null || lock >= p.lockPct + Math.max(0.01, p.gap * 0.3)) {
+      const st = await alignP(p.entry * (1 + (long ? 1 : -1) * lock / 100), p.tick, long);
+      try { await setStop(p, st); p.sl = Number(st); p.lockPct = lock; p.beDone = true; } catch (e) { /* mark price already beyond: the limit exit handles it */ }
+    }
+    // keep the resting take one take ahead of the best point
+    const want = p.peak + p.tpPct, have = (long ? p.tp - p.entry : p.entry - p.tp) / p.entry * 100;
+    if (want > have + p.tpPct * 0.5) {
+      const ntp = await alignP(p.entry * (1 + (long ? 1 : -1) * want / 100), p.tick, long);
+      try { await amend(p.sym, p.tpId, ntp); p.tp = Number(ntp); p.rides = (p.rides || 0) + 1; } catch (e) { /* filled */ }
+    }
+  }
+
   async function onFilled(p, entryPx) {
     const long = p.side === "Buy";
     p.entry = entryPx; p.state = "open"; p.openedAt = Date.now();
@@ -280,14 +320,16 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     // the mirror of the normal trade: take and stop swap places
     const tpBase = p.inv ? P.slPct : P.tpPct, slBase = p.inv ? P.tpPct : P.slPct;
     p.tpPct = Math.max(P.style === "pressure" ? 0.06 : 0.1, +(tpBase * f).toFixed(3)); p.slPct = +(slBase * f).toFixed(3); p.f = f;
-    const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * p.tpPct / 100), p.tick, long);
+    // trailing: the resting limit take sits one more take further (it only catches a sudden spike); the real exit is the trailing below
+    p.trail = !!P.trail; p.peak = 0; p.gap = trailGap(p.tpPct);
+    const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * (p.trail ? p.tpPct * 2 : p.tpPct) / 100), p.tick, long);
     const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * p.slPct / 100), p.tick, !long);
-    p.tp = Number(tp); p.sl = Number(sl);
+    p.tp = Number(tp); p.sl = Number(sl); p.lockPct = null;
     try { await setStop(p, sl); }
     catch (e) { engineLog(`⚡⚡ ${p.sym}: стоп не поставився: ${e.message}`, "down"); }
     try { p.tpId = await limit(p.sym, long ? "Sell" : "Buy", tp, p.qty, true, "T"); }
     catch (e) { p.tpId = await limit(p.sym, long ? "Sell" : "Buy", tp, p.qty, true, "T", false).catch(() => null); }
-    engineLog(`⚡⚡ ${p.sym}: вхід виконано @ ${entryPx} · тейк лімітом ${tp} · стоп ${sl}`, long ? "up" : "down");
+    engineLog(`⚡⚡ ${p.sym}: вхід виконано @ ${entryPx} · ${p.trail ? `трейлінг тейку від +${p.tpPct}% (відкат ${p.gap}%)` : `тейк лімітом ${tp}`} · стоп ${sl}`, long ? "up" : "down");
   }
 
   async function record(p, closed) {
@@ -304,7 +346,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
       inv: !!p.inv, f: p.f || 1, path: (p.path || []).slice(-600),
       mfe: p.path && p.path.length ? Math.max(...p.path) : null, mae: p.path && p.path.length ? Math.min(...p.path) : null,
       feat: p.sig ? feat(p.sig, p.inv ? (p.side === "Buy" ? "Sell" : "Buy") : p.side) : null,
-      cfg: { tpPct: P.tpPct, slPct: P.slPct, scoreIn: P.scoreIn, burstX: P.burstX, ride: P.ride } };
+      cfg: { tpPct: P.tpPct, slPct: P.slPct, scoreIn: P.scoreIn, burstX: P.burstX, ride: P.ride, trail: !!p.trail }, peak: p.peak != null ? +p.peak.toFixed(3) : null };
     if (p.leaving) t.how = closed === "тейк" ? `вихід: ${p.leaving}` : closed;
     t.cfg.adaptiveTp = p.tpPct || null;
     ST.trades.push(t); ST.dayPnl += t.pnl; save();
@@ -353,13 +395,23 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     return { value: v / w, n: near.length };
   }
   // replay recorded price paths with another take/stop; fees: maker in, maker take out, taker stop out
-  const FEE_IN = 0.02, FEE_TP = 0.02, FEE_SL = 0.055 + 0.02;   // the stop is a market order: taker fee + ~0.02% slippage
+  const FEE_IN = 0.02, FEE_TP = 0.02, FEE_SL = 0.055 + 0.02;
+  const LOCK_MIN = 0.06;                                          // the trailing stop never locks less than the fees
+  function trailGap(tpPct) { return +(P.trailPct > 0 ? P.trailPct : Math.max(0.04, tpPct * 0.5)).toFixed(3); }   // the stop is a market order: taker fee + ~0.02% slippage
   function simulate(trades, tp, sl, adaptive) {
     let sum = 0, win = 0, gp = 0, gl = 0;
     for (const t of trades) {
       const k = adaptive ? (t.f || 1) : 1, T = Math.max(0.1, tp * k), S = sl * k;
       let r = null;
-      for (const x of t.path) { if (x >= T) { r = T - FEE_IN - FEE_TP; break; } if (x <= -S) { r = -S - FEE_IN - FEE_SL; break; } }
+      if (P.trail) {
+        // trailing: after the take level is reached, leave on a pull-back of the gap from the best point (limit, maker)
+        const g = trailGap(T); let peak = -Infinity, on = false;
+        for (const x of t.path) {
+          if (!on && x <= -S) { r = -S - FEE_IN - FEE_SL; break; }
+          if (x >= T) on = true;
+          if (on) { peak = Math.max(peak, x); if (x <= peak - g) { r = Math.max(peak - g, LOCK_MIN) - FEE_IN - FEE_TP; break; } }
+        }
+      } else for (const x of t.path) { if (x >= T) { r = T - FEE_IN - FEE_TP; break; } if (x <= -S) { r = -S - FEE_IN - FEE_SL; break; } }
       if (r == null) r = t.path[t.path.length - 1] - FEE_IN - FEE_TP;   // time exit with the limit near the market
       sum += r; if (r > 0) { win++; gp += r; } else gl -= r;
     }
@@ -510,6 +562,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
         const mv = (M[p.sym].last - p.entry) / p.entry * 100 * (p.side === "Buy" ? 1 : -1);
         (p.path = p.path || []).push(Math.round(mv * 1000) / 1000);
         if (p.path.length > 900) p.path = p.path.filter((_, i) => i % 2 === 0);   // keep it short for long trades
+        if (p.trail && p.tpId && !p.trailExit) await trailStep(p, mv);
       }
       // manage our entries / positions
       if (Object.keys(POSN).length && now - lastPoll >= 1500) {
@@ -540,12 +593,12 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
             if (now - p.at > P.entryWaitSec * 1000) { await cancel(p.sym, p.entryId); delete POSN[p.sym]; engineLog(`⚡⚡ ${p.sym}: вхід не виконався за ${P.entryWaitSec} с — знято`, "mute"); }
             continue;
           }
-          if (!ps) { await record(p, live.has(p.tpId) ? "стоп" : "тейк"); if (p.tpId) await cancel(p.sym, p.tpId); continue; }
+          if (!ps) { await record(p, p.trailOn ? "трейлінг" : live.has(p.tpId) ? "стоп" : "тейк"); if (p.tpId) await cancel(p.sym, p.tpId); continue; }
           const long = p.side === "Buy", px = sig ? sig.last : Number(ps.markPrice);
           const gone = (long ? px - p.entry : p.entry - px) / p.entry * 100;
           // ride the impulse: the take moves further and the stop goes to a small profit while the tape still pushes our way
           const push = sig && (long ? sig.delta > 0.3 && sig.burst >= P.burstX * 0.7 : sig.delta < -0.3 && sig.burst >= P.burstX * 0.7);
-          if (P.ride && !p.inv && p.tpId && !p.leaving && gone >= (p.tpPct || P.tpPct) * 0.7 && push) {
+          if (P.ride && !p.trail && !p.inv && p.tpId && !p.leaving && gone >= (p.tpPct || P.tpPct) * 0.7 && push) {
             const ntp = await alignP(p.tp * (1 + (long ? 1 : -1) * (p.tpPct || P.tpPct) / 200), p.tick, long);
             const be = await alignP(p.entry * (1 + (long ? 1 : -1) * 0.06 / 100), p.tick, long);
             try {
@@ -556,25 +609,25 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
           }
           // the flow turned against us: leave now with a limit at the best price on our side (maker), smaller loss than the stop
           const against = sig ? (long ? sig.short : sig.long) : 0;
-          if (P.flipExit && !p.inv && !p.leaving && sig && against >= P.scoreIn && (long ? sig.delta < -0.2 : sig.delta > 0.2)) {
+          if (P.flipExit && !p.trailOn && !p.inv && !p.leaving && sig && against >= P.scoreIn && (long ? sig.delta < -0.2 : sig.delta > 0.2)) {
             const best = long ? sig.ask : sig.bid;
             try { await amend(p.sym, p.tpId, best); p.tp = best; p.leaving = "розворот"; engineLog(`⚡⚡ ${p.sym}: потік розвернувся проти (${against.toFixed(2)}) — виходжу лімітом ${best}`, "mute"); } catch (e) { /* filled */ }
           }
           // pressure style: the book stopped leaning our way -> leave at once with a limit at the best price
-          if (P.style === "pressure" && !p.inv && !p.leaving && sig && sig.press && (long ? sig.press.lvl : 1 - sig.press.lvl) < 0.47) {
+          if (P.style === "pressure" && !p.trailOn && !p.inv && !p.leaving && sig && sig.press && (long ? sig.press.lvl : 1 - sig.press.lvl) < 0.47) {
             const best = long ? sig.ask : sig.bid;
             try { await amend(p.sym, p.tpId, best); p.tp = best; p.leaving = "тиск зник"; engineLog(`📊 ${p.sym}: тиск стакану зник (${sig.press.lvl}) — виходжу лімітом ${best}`, "mute"); } catch (e) { /* filled */ }
           }
           // no progress for timeStopSec: leave near break-even (entry + fees) with the limit take
           const tpPctNow = p.tpPct || P.tpPct;
-          if (!p.leaving && P.timeStopSec > 0 && now - p.openedAt > P.timeStopSec * 1000 && gone < tpPctNow * 0.3) {
+          if (!p.leaving && !p.trailOn && P.timeStopSec > 0 && now - p.openedAt > P.timeStopSec * 1000 && gone < tpPctNow * 0.3) {
             const beP = await alignP(p.entry * (1 + (long ? 1 : -1) * 0.05 / 100), p.tick, long);
             const best = sig ? (long ? sig.ask : sig.bid) : Number(beP);
             const target = long ? Math.max(Number(beP), best) : Math.min(Number(beP), best);
             try { await amend(p.sym, p.tpId, target); p.tp = target; p.leaving = "час"; engineLog(`⚡⚡ ${p.sym}: ${P.timeStopSec} с без руху — виходжу біля беззбитку ${target}`, "mute"); } catch (e) { /* filled */ }
           }
           // too long in the trade: pull the take to the best price (still a limit, maker) to get out
-          if (now - p.openedAt > P.holdMaxSec * 1000 && sig && !p.pulled) {
+          if (now - p.openedAt > P.holdMaxSec * 1000 && sig && !p.pulled && !p.trailOn) {
             const best = long ? sig.ask : sig.bid;
             try { await amend(p.sym, p.tpId, best); p.tp = best; p.pulled = true; engineLog(`⚡⚡ ${p.sym}: тримаю довше ${P.holdMaxSec} с — тейк підтягнуто до ринку ${best} (лімітом)`, "mute"); } catch (e) { /* ignore */ }
           }
@@ -658,7 +711,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], pressLevels: [1, 25], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], trailPct: [0, 2], pressLevels: [1, 25], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
   function setParams(o, caps = {}) {
     const changed = [];
     // coins named explicitly win over the automatic volatility pick
@@ -672,7 +725,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
         n = Math.max(NUM[k][0], Math.min(hi, n));
         if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec", "coinCount", "pickEveryMin"].includes(k)) n = Math.round(n);
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
-      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
+      } else if (["ride", "trail", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "style" && ["flow", "pressure"].includes(v)) {
         changed.push(...setStyle(v));
@@ -713,7 +766,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     return { learn: { on: P.learn, ready: withFeat >= P.learnMin, have: withFeat, need: P.learnMin, skipped: ST.skipped || 0, pf: pfAll, opt: ST.opt, optOn: P.optExits, paths: withPath },
       mode: { inverted: inverted(), setting: P.invert, normal: per(false), inv: per(true), judged: ST.judged, pausedUntil: ST.pausedUntil || 0 },
       noMoney: (ST.noMoneyUntil || 0) > Date.now() ? ST.noMoney : "", vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
-      live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
+      live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, trail: !!p.trailOn, peak: p.peak != null ? +p.peak.toFixed(3) : null, lock: p.lockPct != null ? +p.lockPct.toFixed(3) : null, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
       trades: ST.trades.slice(-15).reverse() };
   }
   function aiView() {

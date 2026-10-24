@@ -145,6 +145,9 @@ exit type (byExit), normal vs inverted (byMode), the exit optimizer ("optimizer"
 avg % per trade, win rate, profit factor), live signals per coin (imb = book imbalance 0..1, delta = tape buy-sell share, burst = 5 s volume
 vs normal, iceberg, absorption, spoof, press = top-level pressure and best-price queue, long/short scores, "why" = why there is no entry now,
 peakScore10min) and "volatilityTop" (rng1h = range of the last hour, %), plus the last trades.
+"trail" (default true): trailing take - reaching tpPct does not close the trade; the stop moves into profit and follows the best point,
+the trade ends on a pull-back of trailPct (0 = auto, half of the take) from the best point, so the whole impulse is taken; tpPct is then
+the level where trailing starts. Trades closed this way have how = "трейлінг" and "peak" = the best point in %.
 Styles: "flow" (book + tape + icebergs/absorption/spoof + impulse, the take follows the impulse) or "pressure" (book pressure only: heavier side
 for the last 2 s + longer best-price queue, tiny limit takes ~0.08%, exit as soon as the pressure goes away; high win rate, small wins).
 "invert": "off"|"on"|"auto" - mirror mode trades the opposite side with take and stop swapped; "auto" switches by itself when the current mode
@@ -156,14 +159,14 @@ if the bot makes no trades for a long time, lower scoreIn towards the typical pe
 Answer with ONE JSON object only, no text around it:
 {"regime":"calm|range|trend|volatile|chaotic","superscalp":{"on":true|false,"symbols":[optional],"params":{optional: style,tpPct,slPct,scoreIn,bandPct,
 burstX,wallX,spoofSec,icebergX,entryWaitSec,holdMaxSec,maxPositions,cooldownSec,margin,leverage,ride,useIceberg,useAbsorption,useSpoof,needAgree,
-cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune,autoCoins,coinCount,minTurnoverM,pickEveryMin,invert,invertMin,learn,optExits,pressLevels}},
+cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune,autoCoins,coinCount,minTurnoverM,pickEveryMin,invert,invertMin,learn,optExits,pressLevels,trail,trailPct}},
 "reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit order-book scalping app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
 transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
  "scalper": "start" | "stop"     (stop also switches the AI off)
  "ai": true | false              (AI autopilot on/off)
- "superscalp": {"on":true|false, "symbols":[...], "params":{style:"flow"|"pressure",tpPct,slPct,scoreIn,maxPositions,margin,leverage,autoCoins,coinCount,minTurnoverM,invert,learn,optExits,...}}
+ "superscalp": {"on":true|false, "symbols":[...], "params":{style:"flow"|"pressure",tpPct,slPct,scoreIn,maxPositions,margin,leverage,autoCoins,coinCount,minTurnoverM,invert,learn,optExits,trail,trailPct,...}}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
  "aiEveryMin": n                  (how often the AI decides)
  "optimize": true                 (re-tune take/stop on recorded trades now)

@@ -101,6 +101,8 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">Монети<select id="sCoins"><option value="auto">Авто: топ волатильності</option><option value="manual">Свої</option></select></label>
         <label class="f">Свої монети (через кому)<input id="sSyms" placeholder="BTCUSDT, ETHUSDT"></label>
         <label class="f">Мін. обіг 24 год, млн $<input id="sTurn" inputmode="decimal"></label>
+        <label class="f">Трейлінг тейку<select id="sTrail"><option value="on">Увімк — тягнути тейк, брати максимум</option><option value="off">Вимк — фіксований тейк</option></select></label>
+        <label class="f">Відкат для виходу, % (0 = авто)<input id="sGap" inputmode="decimal"></label>
       </div>
       <div style="margin-top:8px"><button class="btn" id="sSave">Зберегти</button> <span id="sOut" class="mute" style="font-size:13px"></span></div>
     </details>
@@ -160,7 +162,7 @@ $("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "a
 $("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
 $("sSave").onclick = async () => {
   const n = (id) => Number(String($(id).value).replace(",", "."));
-  const o = { margin: n("sMargin"), leverage: n("sLev"), maxPositions: n("sMax"), tpPct: n("sTp"), slPct: n("sSl"), scoreIn: n("sScore"), minTurnoverM: n("sTurn"), autoCoins: $("sCoins").value === "auto" };
+  const o = { margin: n("sMargin"), leverage: n("sLev"), maxPositions: n("sMax"), tpPct: n("sTp"), slPct: n("sSl"), scoreIn: n("sScore"), minTurnoverM: n("sTurn"), autoCoins: $("sCoins").value === "auto", trail: $("sTrail").value === "on", trailPct: n("sGap") };
   if ($("sCoins").value === "manual") o.symbols = $("sSyms").value.split(/[\s,;]+/).filter(Boolean).map(s => s.toUpperCase().endsWith("USDT") ? s.toUpperCase() : s.toUpperCase() + "USDT");
   $("sOut").textContent = await act({ what: "settings", o }); FILLED = false;
 };
@@ -168,6 +170,7 @@ $("opt").onclick = async () => { $("optOut").textContent = await act({ what: "op
 function fillSettings(P) {
   $("sMargin").value = P.margin; $("sLev").value = P.leverage; $("sMax").value = P.maxPositions; $("sTp").value = P.tpPct; $("sSl").value = P.slPct;
   $("sScore").value = P.scoreIn; $("sCoins").value = P.autoCoins ? "auto" : "manual"; $("sSyms").value = P.symbols.join(", "); $("sTurn").value = P.minTurnoverM;
+  $("sTrail").value = P.trail ? "on" : "off"; $("sGap").value = P.trailPct;
   $("aiEvery").value = String(S.ai.every); $("aiMaxM").value = S.ai.maxMargin || ""; $("aiMaxL").value = S.ai.maxLev || "";
 }
 
@@ -240,7 +243,7 @@ function paint() {
   $("connCard").style.display = S.keys && S.fal && S.password && !ACC.err ? "none" : "";
   $("dot").className = "dot" + (on ? " on" : "");
   $("status").textContent = !on ? "Зупинено" : !P.on ? "🧠 AI тримає паузу входів" : (AI.on ? "🧠 AI торгує " : "Торгую ") + (P.style === "pressure" ? "тиском стакану" : "потоком ордерів");
-  $("status2").textContent = (X.ws ? "дані стакану наживо ✓" : "підключаюсь до біржі…") + ` · тейк ${P.tpPct}% / стоп ${P.slPct}% · до ${P.maxPositions} угод · маржа ${P.margin} USDT × x${P.leverage} · сервер 24/7`;
+  $("status2").textContent = (X.ws ? "дані стакану наживо ✓" : "підключаюсь до біржі…") + ` · ${P.trail ? "🎯 трейлінг тейку від" : "тейк"} ${P.tpPct}% / стоп ${P.slPct}% · до ${P.maxPositions} угод · маржа ${P.margin} USDT × x${P.leverage} · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-style]").forEach(b => b.classList.toggle("on", b.dataset.style === P.style));
   $("styleHint").textContent = P.style === "pressure" ? "Бік, де стакан важчий 2 с, і довша черга на найкращій ціні; короткий тейк, вихід одразу, коли тиск зник." : "Стакан + стрічка + айсберги, поглинання, спуфінг, імпульс; тейк іде за імпульсом.";
@@ -277,7 +280,7 @@ function paint() {
     const sg = [l.iceBid ? "айсберг↑" : "", l.iceAsk ? "айсберг↓" : "", l.absBull ? "поглин.↑" : "", l.absBear ? "поглин.↓" : "", l.spoofBid ? "спуф bid" : "", l.spoofAsk ? "спуф ask" : ""].filter(Boolean).join(" ");
     return `<tr><td><b>${esc(l.sym)}</b></td><td>${l.press ? l.press.lvl + " · " + l.press.que : "—"}</td><td class="${l.imb >= 0.5 ? "up" : "down"}">${l.imb ?? "—"}</td><td class="${l.delta >= 0 ? "up" : "down"}">${l.delta ?? "—"}</td><td>${l.burst != null ? "×" + l.burst : "—"}</td><td>${sg || '<span class="mute">—</span>'}</td><td class="${l.long >= P.scoreIn ? "up" : ""}">${l.long ?? "—"}</td><td class="${l.short >= P.scoreIn ? "down" : ""}">${l.short ?? "—"}</td><td class="mute">${esc(l.why || "")}</td></tr>`;
   }).join("") || '<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
-  $("open").innerHTML = (X.open || []).map(o => `<tr><td><b>${esc(o.sym)}</b> <span class="${o.side === "Buy" ? "up" : "down"}">${o.side === "Buy" ? "лонг" : "шорт"}</span></td><td>${o.state === "entry" ? "чекає виконання ліміту" : "в угоді"}</td><td>${esc(o.entry)}</td><td>${esc(o.tp || "—")}</td><td>${esc(o.sl || "—")}</td><td>${o.sec}</td></tr>`).join("") || '<tr><td colspan="6" class="mute">Відкритих угод немає</td></tr>';
+  $("open").innerHTML = (X.open || []).map(o => `<tr><td><b>${esc(o.sym)}</b> <span class="${o.side === "Buy" ? "up" : "down"}">${o.side === "Buy" ? "лонг" : "шорт"}</span></td><td>${o.state === "entry" ? "чекає виконання ліміту" : o.trail ? `<span class="up">🎯 трейлінг: макс +${o.peak}%, стоп +${o.lock}%</span>` : "в угоді" + (o.peak != null ? ` (макс +${o.peak}%)` : "")}</td><td>${esc(o.entry)}</td><td>${esc(o.tp || "—")}</td><td>${esc(o.sl || "—")}</td><td>${o.sec}</td></tr>`).join("") || '<tr><td colspan="6" class="mute">Відкритих угод немає</td></tr>';
   const OP = L.opt;
   $("learn").innerHTML = `Фільтр схожих угод: ${L.on ? (L.ready ? `<span class="up">працює</span>, пропущено поганих сигналів ${L.skipped}` : `навчається (${L.have} з ${L.need} угод)`) : "вимкнено"} · траєкторій для оптимізатора: ${L.paths || 0}`
     + (OP && OP.best ? `<br>Оптимізатор (${OP.n} угод): зараз тейк ${OP.cur.tp}% / стоп ${OP.cur.sl}% → на угоду ${OP.cur.avg}%, win ${OP.cur.win}%, PF ${OP.cur.pf} · найкраще <b class="up">тейк ${OP.best.tp}% / стоп ${OP.best.sl}%</b> → ${OP.best.avg}%, win ${OP.best.win}%, PF ${OP.best.pf}${OP.applied ? ' · <span class="up">застосовано</span>' : ""}`

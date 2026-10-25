@@ -139,26 +139,30 @@ The owner only presses Start/Stop. Your only job is to grow the account. Every p
 Your results are measured: "yourTrackRecord" lists your previous decisions and the profit/loss made in the period after each of them.
 Learn from it: repeat what worked, stop what lost money, and say what you learned in "lesson". If your periods keep losing, the owner
 will switch you off, so do everything possible to make each period profitable.
+Trading NEVER stops: there is no pause and no daily limit; you cannot switch entries off - make every period profitable by tuning instead.
+Spoofing and absorption signals are switched off for good by the owner (they lost money); do not try to use them.
+"seriesFixer": after streakN (3) losing trades in a row the bot itself changes one thing (stricter entry filter, mirror, other style, shorter
+exits, wider stop, other coins, book+tape agreement) and scores each change by the next 5 trades ("resultsByChange"); "series" = current
+wins/losses in a row. Goal of the owner: long series of winning trades only. Use these results: keep what makes plus series.
 The bot ("superscalp") trades only the order book and the tape. It enters with LIMIT (PostOnly) orders at the best price, takes a short LIMIT
 take and keeps a stop on the exchange. Data you get: params, stats, results grouped by symbol (bySymbol), signal (bySignal), take size (byTp),
 exit type (byExit), normal vs inverted (byMode), the exit optimizer ("optimizer": current vs best take/stop on recorded price paths:
 avg % per trade, win rate, profit factor), live signals per coin (imb = book imbalance 0..1, delta = tape buy-sell share, burst = 5 s volume
-vs normal, iceberg, absorption, spoof, press = top-level pressure and best-price queue, long/short scores, "why" = why there is no entry now,
+vs normal, iceberg, press = top-level pressure and best-price queue, long/short scores, "why" = why there is no entry now,
 peakScore10min) and "volatilityTop" (rng1h = range of the last hour, %), plus the last trades.
 "trail" (default true): trailing take - reaching tpPct does not close the trade; the stop moves into profit and follows the best point,
 the trade ends on a pull-back of trailPct (0 = auto, half of the take) from the best point, so the whole impulse is taken; tpPct is then
 the level where trailing starts. Trades closed this way have how = "трейлінг" and "peak" = the best point in %.
-Styles: "flow" (book + tape + icebergs/absorption/spoof + impulse, the take follows the impulse) or "pressure" (book pressure only: heavier side
+Styles: "flow" (book + tape + icebergs + impulse, the take follows the impulse) or "pressure" (book pressure only: heavier side
 for the last 2 s + longer best-price queue, tiny limit takes ~0.08%, exit as soon as the pressure goes away; high win rate, small wins).
 "invert": "off"|"on"|"auto" - mirror mode trades the opposite side with take and stop swapped; "auto" switches by itself when the current mode
 loses over invertMin trades. "learn" (filter that skips setups whose most similar past trades lost) and "optExits" (auto take/stop) - keep on.
 With autoCoins the bot itself picks the most volatile liquid coins; send "symbols" only to override (max 12 liquid coins).
-Rules: tpPct must beat maker fees (0.04% round trip); never remove stops; "on": false pauses new entries (open trades finish) - use it only when
-the market is clearly bad for scalping; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
+Rules: tpPct must beat maker fees (0.04% round trip); never remove stops; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
 if the bot makes no trades for a long time, lower scoreIn towards the typical peakScore10min or pick more active coins.
 Answer with ONE JSON object only, no text around it:
-{"regime":"calm|range|trend|volatile|chaotic","superscalp":{"on":true|false,"symbols":[optional],"params":{optional: style,tpPct,slPct,scoreIn,bandPct,
-burstX,wallX,spoofSec,icebergX,entryWaitSec,holdMaxSec,maxPositions,cooldownSec,margin,leverage,ride,useIceberg,useAbsorption,useSpoof,needAgree,
+{"regime":"calm|range|trend|volatile|chaotic","superscalp":{"symbols":[optional],"params":{optional: style,tpPct,slPct,scoreIn,bandPct,
+burstX,wallX,icebergX,entryWaitSec,holdMaxSec,maxPositions,cooldownSec,margin,leverage,ride,useIceberg,needAgree,streakFix,streakN,
 cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune,autoCoins,coinCount,minTurnoverM,pickEveryMin,invert,invertMin,learn,optExits,pressLevels,trail,trailPct}},
 "reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit order-book scalping app. The owner speaks (or types) an instruction in Ukrainian,
@@ -199,13 +203,15 @@ function slimView() {
   const v = SS.aiView();
   return Object.assign({}, v, { last: (v.last || []).map(t => { const o = Object.assign({}, t); delete o.path; delete o.feat; return o; }) });
 }
-function applyDecision(d, caps) {
+function applyDecision(d, caps, owner) {
   const ch = [], s = d && d.superscalp;
   if (!s || typeof s !== "object") return ch;
   const p = Object.assign({}, s.params || {}); delete p.on;
   if (Array.isArray(s.symbols) && s.symbols.length) p.symbols = s.symbols;
   ch.push(...SS.setParams(p, caps));
-  if (typeof s.on === "boolean" && s.on !== !!SS.params.on) { SS.setOn(s.on); ch.push(s.on ? "входи увімкнено" : "нові входи на паузі"); }
+  // the AI may switch trading on, but never stops it (the owner wants trading never to stop; only the owner's Stop button stops it)
+  if (s.on === true && !SS.params.on && (owner || AI.on)) { SS.setOn(true); ch.push("входи увімкнено"); }
+  if (s.on === false && owner && SS.params.on) { SS.setOn(false); ch.push("скальпер зупинено"); }
   return ch;
 }
 async function aiTick(force) {
@@ -257,7 +263,7 @@ function applyCommand(id) {
     // the owner's own command may raise margin/leverage; the AI caps follow it
     if (Number(p.margin) > 0) AI.maxMargin = Math.max(AI.maxMargin || 0, Number(p.margin));
     if (Number(p.leverage) > 0) AI.maxLev = Math.max(AI.maxLev || 0, Math.round(Number(p.leverage)));
-    done.push(...applyDecision({ superscalp: a.superscalp }, {}));
+    done.push(...applyDecision({ superscalp: a.superscalp }, {}, true));
   }
   if (a.scalper === "start" && !SS.params.on) { if (HAS_KEYS) { SS.setOn(true); done.push("скальпер запущено"); } else done.push("немає ключів Bybit"); }
   if (a.scalper === "stop") { SS.setOn(false); aiSet(false); done.push("скальпер зупинено, AI вимкнено"); }

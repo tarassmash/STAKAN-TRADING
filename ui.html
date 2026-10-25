@@ -30,7 +30,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 <body>
 <div class="wrap">
   <h1>📊 Стакан-скальпер</h1>
-  <div class="mute" style="font-size:13px">Торгівля по стакану Bybit: тиск стакану, стрічка, айсберги, поглинання, спуфінг. Вхід і тейк — лімітки. Торгує сервер 24/7 — вкладку й комп'ютер можна закривати.</div>
+  <div class="mute" style="font-size:13px">Торгівля по стакану Bybit: тиск стакану, стрічка, айсберги. Вхід і тейк — лімітки. Торгує сервер 24/7 — вкладку й комп'ютер можна закривати.</div>
 
   <div class="card" id="connCard">
     <b>Підключення</b>
@@ -120,6 +120,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 
   <div class="card">
     <b>🎯 Навчання на своїх угодах</b>
+    <div id="series" style="font-size:13px;margin-top:6px"></div>
     <div id="learn" style="font-size:13px;margin-top:6px"></div>
     <div style="margin-top:8px"><button class="btn" id="opt">Оптимізувати тейк і стоп зараз</button> <span id="optOut" class="mute" style="font-size:13px"></span></div>
   </div>
@@ -246,7 +247,7 @@ function paint() {
   $("status2").textContent = (X.ws ? "дані стакану наживо ✓" : "підключаюсь до біржі…") + ` · ${P.trail ? "🎯 трейлінг тейку від" : "тейк"} ${P.tpPct}% / стоп ${P.slPct}% · до ${P.maxPositions} угод · маржа ${P.margin} USDT × x${P.leverage} · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-style]").forEach(b => b.classList.toggle("on", b.dataset.style === P.style));
-  $("styleHint").textContent = P.style === "pressure" ? "Бік, де стакан важчий 2 с, і довша черга на найкращій ціні; короткий тейк, вихід одразу, коли тиск зник." : "Стакан + стрічка + айсберги, поглинання, спуфінг, імпульс; тейк іде за імпульсом.";
+  $("styleHint").textContent = P.style === "pressure" ? "Бік, де стакан важчий 2 с, і довша черга на найкращій ціні; короткий тейк, вихід одразу, коли тиск зник." : "Стакан + стрічка + айсберги, імпульс; тейк іде трейлінгом за імпульсом.";
   const MD = X.mode || {};
   document.querySelectorAll("[data-inv]").forEach(b => b.classList.toggle("on", b.dataset.inv === P.invert));
   $("invHint").innerHTML = (MD.inverted ? '<b style="color:#f59e0b">Зараз усе навпаки: сигнал Buy → Sell, Sell → Buy</b>' : "Зараз звичайний напрямок")
@@ -255,7 +256,7 @@ function paint() {
   const w = [];
   if (X.noMoney) w.push("⏸ " + X.noMoney);
   if (X.err && !/WebSocket/.test(X.err)) w.push(X.err);
-  if (MD.pausedUntil > Date.now()) w.push("Пауза до " + new Date(MD.pausedUntil).toLocaleTimeString() + ": обидва напрямки в мінусі");
+  
   $("warn").innerHTML = w.map(x => `<div class="note">${esc(x)}</div>`).join("");
   // AI
   const b = $("aiBtn"); b.textContent = AI.on ? "🧠 AI увімкнено — вимкнути" : "🧠 Увімкнути AI"; b.style.background = AI.on ? "#7c3aed" : ""; b.style.color = AI.on ? "#fff" : ""; b.disabled = BUSY;
@@ -277,10 +278,15 @@ function paint() {
   $("pnl").innerHTML = `<span class="${ST.pnl >= 0 ? "up" : "down"}">${ST.pnl >= 0 ? "+" : ""}${f(ST.pnl, 3)}</span> · ${L.pf != null ? L.pf : "—"}`;
   $("coinsLine").textContent = P.autoCoins ? "· топ волатильності: " + ((X.vol || []).slice(0, P.coinCount).map(v => `${v.sym} ${v.rng1h}%/год`).join(", ") || P.symbols.join(", ")) : "· " + P.symbols.join(", ");
   $("live").innerHTML = (X.live || []).map(l => {
-    const sg = [l.iceBid ? "айсберг↑" : "", l.iceAsk ? "айсберг↓" : "", l.absBull ? "поглин.↑" : "", l.absBear ? "поглин.↓" : "", l.spoofBid ? "спуф bid" : "", l.spoofAsk ? "спуф ask" : ""].filter(Boolean).join(" ");
+    const sg = [l.iceBid ? "айсберг↑" : "", l.iceAsk ? "айсберг↓" : ""].filter(Boolean).join(" ");
     return `<tr><td><b>${esc(l.sym)}</b></td><td>${l.press ? l.press.lvl + " · " + l.press.que : "—"}</td><td class="${l.imb >= 0.5 ? "up" : "down"}">${l.imb ?? "—"}</td><td class="${l.delta >= 0 ? "up" : "down"}">${l.delta ?? "—"}</td><td>${l.burst != null ? "×" + l.burst : "—"}</td><td>${sg || '<span class="mute">—</span>'}</td><td class="${l.long >= P.scoreIn ? "up" : ""}">${l.long ?? "—"}</td><td class="${l.short >= P.scoreIn ? "down" : ""}">${l.short ?? "—"}</td><td class="mute">${esc(l.why || "")}</td></tr>`;
   }).join("") || '<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
   $("open").innerHTML = (X.open || []).map(o => `<tr><td><b>${esc(o.sym)}</b> <span class="${o.side === "Buy" ? "up" : "down"}">${o.side === "Buy" ? "лонг" : "шорт"}</span></td><td>${o.state === "entry" ? "чекає виконання ліміту" : o.trail ? `<span class="up">🎯 трейлінг: макс +${o.peak}%, стоп +${o.lock}%</span>` : "в угоді" + (o.peak != null ? ` (макс +${o.peak}%)` : "")}</td><td>${esc(o.entry)}</td><td>${esc(o.tp || "—")}</td><td>${esc(o.sl || "—")}</td><td>${o.sec}</td></tr>`).join("") || '<tr><td colspan="6" class="mute">Відкритих угод немає</td></tr>';
+  const FX = X.fix || {}, SR = FX.series || {};
+  $("series").innerHTML = `Серія зараз: ${SR.wins ? `<b class="up">${SR.wins} у плюсі поспіль</b>` : SR.losses ? `<b class="down">${SR.losses} у мінусі поспіль</b>` : "—"} · найдовша плюсова серія: <b>${SR.bestWins || 0}</b>`
+    + `<br>${FX.on ? `Після ${FX.n} мінусових поспіль бот сам щось міняє і перевіряє за 5 угод` : "Автозміна після серії мінусів вимкнена"}`
+    + (FX.active ? `<br>Зараз перевіряю: <b>${esc(FX.names[FX.active.key])}</b> — ${esc(FX.active.txt)}` : "")
+    + (Object.keys(FX.stats || {}).length ? "<br>Що допомагало: " + Object.entries(FX.stats).sort((a, b) => b[1].pnl / b[1].n - a[1].pnl / a[1].n).map(([k, v]) => `${esc(FX.names[k])} <span class="${v.pnl >= 0 ? "up" : "down"}">${v.pnl >= 0 ? "+" : ""}${v.pnl}</span> (${v.wins}/${v.trades} у плюсі, ${v.n}×)`).join(" · ") : "");
   const OP = L.opt;
   $("learn").innerHTML = `Фільтр схожих угод: ${L.on ? (L.ready ? `<span class="up">працює</span>, пропущено поганих сигналів ${L.skipped}` : `навчається (${L.have} з ${L.need} угод)`) : "вимкнено"} · траєкторій для оптимізатора: ${L.paths || 0}`
     + (OP && OP.best ? `<br>Оптимізатор (${OP.n} угод): зараз тейк ${OP.cur.tp}% / стоп ${OP.cur.sl}% → на угоду ${OP.cur.avg}%, win ${OP.cur.win}%, PF ${OP.cur.pf} · найкраще <b class="up">тейк ${OP.best.tp}% / стоп ${OP.best.sl}%</b> → ${OP.best.avg}%, win ${OP.best.win}%, PF ${OP.best.pf}${OP.applied ? ' · <span class="up">застосовано</span>' : ""}`

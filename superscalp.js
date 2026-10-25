@@ -28,7 +28,9 @@ const DEFAULTS = {
   trail: true,           // trailing take: reaching the take does not close the trade; the take runs ahead of the price, the stop follows it in profit,
                          // the exit comes only when the price pulls back by trailPct from its best point -> the whole impulse is taken
   trailPct: 0,           // pull-back from the best point that ends the trade, % (0 = auto: half of the take, at least 0.04%)
-  useIceberg: true, useAbsorption: true, useSpoof: true,
+  useIceberg: true, useAbsorption: false, useSpoof: false,   // spoofing and absorption gave losses: switched off for good (owner's choice)
+  streakFix: true,       // after streakN losing trades in a row something is changed (filter, mirror, style, exits, coins...); the bot learns which change brings a plus series
+  streakN: 3,
   // protection against the usual scalping losses
   needAgree: true,       // book and tape must point the same way
   cancelOnFade: true,    // pull an unfilled entry when the signal fades (avoids fills only when the price runs against us)
@@ -75,7 +77,9 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
   if (P.v < 4) { P.dailyLossPct = 0; P.v = 4; }
-  if (P.v < 5) { P.trail = true; P.v = 5; }                     // the owner wants the take trailed to take the whole move                 // the owner switched the daily limit off
+  if (P.v < 5) { P.trail = true; P.v = 5; }
+  if (P.v < 6) { P.useSpoof = false; P.useAbsorption = false; P.dailyLossPct = 0; P.streakFix = true; if (lsGet("ssPausedUntil", 0) > 0) { P.on = true; lsSet("ssPausedUntil", 0); } P.v = 6; }
+  P.useSpoof = false; P.useAbsorption = false; P.dailyLossPct = 0;   // never: the owner removed them (losses) and any stop of trading                     // the owner wants the take trailed to take the whole move                 // the owner switched the daily limit off
   if (P.v < 3) { if (!P.minTurnoverM || P.minTurnoverM < DEFAULTS.minTurnoverM) P.minTurnoverM = DEFAULTS.minTurnoverM; P.v = 3; ST_PICK_NOW = true; }
   const ST = { hedge: !!lsGet("ssHedge", false), trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
@@ -266,6 +270,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     if (Number(qty) < sp.minQty || Number(qty) * price < sp.minNotional) { ST.err = `${sym}: замала маржа для мін. ордера`; return; }
     try { await bx("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); } catch (e) { /* not modified */ }
     const id = await limit(sym, side, price, qty, false, "E");
+    ST.lastEntryAt = Date.now();
     POSN[sym] = { sym, side, state: "entry", entryId: id, price, qty, at: Date.now(), sig, tick: sp.tick, step: sp.step, inv: inverted() };
     engineLog(`⚡⚡ ${sym}: ${side === "Buy" ? "лонг" : "шорт"} лімітом ${price} × ${qty} · стакан ${sig.imb} · дельта ${sig.delta} · сплеск ×${sig.burst}`
       + (sig.iceBid || sig.iceAsk ? " · айсберг" : "") + (sig.absBull || sig.absBear ? " · поглинання" : "") + (sig.spoofBid || sig.spoofAsk ? " · спуфінг" : ""), "gold-t");
@@ -352,6 +357,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     ST.trades.push(t); ST.dayPnl += t.pnl; save();
     if (P.autoPrune) prune(p.sym);
     judgeMode();
+    streakCheck();
     if (P.optExits && ST.trades.filter(x => x.path && x.path.length).length % P.optEvery === 0) optimizeExits(false);
     engineLog(`⚡⚡ ${p.sym}: закрито (${closed}) PnL ${t.pnl >= 0 ? "+" : ""}${t.pnl} USDT за ${t.holdSec} с`, t.pnl >= 0 ? "up" : "down");
     COOL[p.sym] = Date.now() + (t.pnl < 0 ? P.cooldownSec * 2 : P.cooldownSec) * 1000;
@@ -472,17 +478,87 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     const other = ST.inv ? "normal" : "inverted";
     const otherBad = ST.judged[other] && ST.judged[other].pnl < 0 && Date.now() - ST.judged[other].at < 7 * 86400e3;
     if (otherBad) {
-      P.on = false; save();
-      ST.pausedUntil = Date.now() + 6 * 3600e3; lsSet("ssPausedUntil", ST.pausedUntil);
+      // both lost: no pause (trading never stops) - the series fixer changes filters/exits/coins; the modes are judged afresh
       ST.judged = {}; lsSet("ssJudged", ST.judged);
-      engineLog(`⚡⚡ І звичайний режим, і інверсія в мінусі (останні ${P.invertMin} угод кожен) — суперскальпінг на паузі 6 год: збиток дають комісії/шум, а не напрямок`, "down");
+      engineLog(`⚡⚡ І звичайний режим, і інверсія були в мінусі — не зупиняюсь: міняю фільтри/виходи/монети, режими оцінюю заново`, "gold-t");
+      streakFixNow("обидва режими в мінусі");
       return;
     }
     ST.inv = !ST.inv; lsSet("ssInv", ST.inv); lsSet("ssJudged", ST.judged);
     engineLog(`⚡⚡ ${mode === "normal" ? "Звичайний режим" : "Інверсія"} в мінусі (${pnl.toFixed(3)} USDT, ${Math.round(win * 100)}% у плюсі за ${P.invertMin} угод) — перемикаю на ${ST.inv ? "ІНВЕРСІЮ: торгую навпаки, тейк і стоп поміняні" : "звичайний режим"}`, "gold-t");
   }
-  ST.pausedUntil = lsGet("ssPausedUntil", 0);
-  setInterval(() => { if (!P.on && ST.pausedUntil && Date.now() > ST.pausedUntil) { ST.pausedUntil = 0; lsSet("ssPausedUntil", 0); P.on = true; save(); engineLog("⚡⚡ Пауза 6 год скінчилась — суперскальпінг знову працює (статистика режимів з нуля)", "up"); } }, 60000);
+  ST.pausedUntil = 0;
+
+  // ---------------- series fixer: 3 losing trades in a row -> change something; learn which change gives a plus series ----------------
+  // every change is scored by the next 5 trades (sum of PnL, wins); untried changes go first, then the ones that worked best
+  const FIX = Object.assign({ active: null, stats: {}, log: [] }, lsGet("ssFix", {}));
+  const saveFix = () => lsSet("ssFix", { active: FIX.active, stats: FIX.stats, log: FIX.log.slice(-40) });
+  const baseScore = () => (P.style === "pressure" ? PRESSURE.scoreIn : DEFAULTS.scoreIn);
+  const FIXES = {
+    filter: { name: "суворіший вхід", run: () => { if (P.scoreIn >= 0.85) return null; const o = P.scoreIn; P.scoreIn = +Math.min(0.85, P.scoreIn + 0.05).toFixed(2); return `поріг сигналу ${o}→${P.scoreIn}`; } },
+    mirror: { name: "навпаки", run: () => { if (P.invert === "auto") { ST.inv = !ST.inv; lsSet("ssInv", ST.inv); } else P.invert = P.invert === "on" ? "off" : "on"; return inverted() ? "торгую навпаки (Buy↔Sell)" : "торгую у звичайний бік"; } },
+    style: { name: "інший стиль", run: () => { const to = P.style === "pressure" ? "flow" : "pressure"; setStyle(to); P.trail = true; return to === "pressure" ? "стиль → тиск стакану" : "стиль → потік ордерів"; } },
+    exits: { name: "коротші виходи", run: () => { if (P.slPct <= 0.12 && P.tpPct <= 0.06) return null; const a = P.tpPct, b = P.slPct; P.tpPct = +Math.max(0.06, P.tpPct * 0.85).toFixed(3); P.slPct = +Math.max(0.12, P.slPct * 0.8).toFixed(3); return `тейк ${a}→${P.tpPct}%, стоп ${b}→${P.slPct}%`; } },
+    wider: { name: "ширший стоп", run: () => { if (P.slPct >= 0.6) return null; const b = P.slPct; P.slPct = +Math.min(0.6, P.slPct * 1.3).toFixed(3); return `стоп ${b}→${P.slPct}% (менше вибиває шумом)`; } },
+    coins: { name: "інші монети", run: (losers) => { for (const s2 of losers) COOL[s2] = Date.now() + 1800e3; if (P.autoCoins) pickCoins(true); return `пауза 30 хв для ${losers.join(", ")}` + (P.autoCoins ? ", беру інші монети" : ""); } },
+    agree: { name: "стакан і стрічка разом", run: () => { P.needAgree = !P.needAgree; return P.needAgree ? "вхід лише коли стакан і стрічка згодні" : "вхід і без згоди стрічки"; } },
+  };
+  function chooseFix(exclude) {
+    const keys = Object.keys(FIXES).filter(k => k !== exclude);
+    const untried = keys.filter(k => !FIX.stats[k] || !FIX.stats[k].n);
+    if (untried.length) return untried;
+    // best average PnL per try first; a change that keeps failing goes to the end
+    return keys.sort((a, b) => (FIX.stats[b].pnl / FIX.stats[b].n) - (FIX.stats[a].pnl / FIX.stats[a].n));
+  }
+  function streakFixNow(why) {
+    if (!P.streakFix) return;
+    const last = ST.trades.slice(-P.streakN);
+    const losers = [...new Set(last.filter(t => t.pnl <= 0).map(t => t.sym))];
+    if (FIX.active) scoreFix(true);                                  // the previous change did not help
+    for (const k of chooseFix(FIX.last)) {
+      const txt = FIXES[k].run(losers);
+      if (!txt) continue;
+      save();
+      FIX.active = { key: k, at: Date.now(), from: ST.trades.length, txt };
+      FIX.last = k;
+      FIX.log.push({ at: Date.now(), key: k, txt, why });
+      saveFix();
+      engineLog(`🔁 ${why} — міняю (${FIXES[k].name}): ${txt}. Оцінка за наступні 5 угод.`, "gold-t");
+      return;
+    }
+  }
+  function scoreFix(failed) {
+    const a = FIX.active; if (!a) return;
+    const after = ST.trades.slice(a.from);
+    const st = FIX.stats[a.key] = FIX.stats[a.key] || { n: 0, pnl: 0, wins: 0, trades: 0, good: 0 };
+    st.n++; st.trades += after.length; st.pnl = +(st.pnl + after.reduce((x, t) => x + t.pnl, 0)).toFixed(4); st.wins += after.filter(t => t.pnl > 0).length;
+    const good = !failed && after.reduce((x, t) => x + t.pnl, 0) > 0; if (good) st.good++;
+    const L = FIX.log[FIX.log.length - 1]; if (L && L.at === a.at) { L.result = +after.reduce((x, t) => x + t.pnl, 0).toFixed(4); L.wins = after.filter(t => t.pnl > 0).length; L.n = after.length; }
+    FIX.active = null; saveFix();
+    if (good) engineLog(`🔁 Зміна «${FIXES[a.key].name}» спрацювала: ${after.filter(t => t.pnl > 0).length}/${after.length} у плюсі — залишаю`, "up");
+  }
+  // called after every closed trade
+  function streakCheck() {
+    if (!P.streakFix) return;
+    const t = ST.trades, n = P.streakN;
+    if (FIX.active && t.length - FIX.active.from >= 5) scoreFix(false);
+    const tail = t.slice(-n);
+    const sinceFix = FIX.active ? t.length - FIX.active.from : Infinity;
+    if (tail.length === n && tail.every(x => x.pnl <= 0) && sinceFix >= n) streakFixNow(`${n} угоди поспіль у мінусі`);
+  }
+  // a stricter filter must not starve the bot: no entry for 15 min -> the threshold slowly goes back
+  setInterval(() => {
+    if (!P.on || P.scoreIn <= baseScore()) return;
+    if (Date.now() - (ST.lastEntryAt || Date.now()) < 15 * 60000 || Object.keys(POSN).length) return;
+    const o = P.scoreIn; P.scoreIn = +Math.max(baseScore(), P.scoreIn - 0.03).toFixed(2); ST.lastEntryAt = Date.now(); save();
+    engineLog(`🔁 15 хв без входів — поріг сигналу ${o}→${P.scoreIn}, щоб торгівля не стояла`, "mute");
+  }, 60000);
+  function series() {
+    const t = ST.trades; let wins = 0, losses = 0, best = 0, cur = 0;
+    for (let i = t.length - 1; i >= 0; i--) { if (t[i].pnl > 0) { if (losses) break; wins++; } else { if (wins) break; losses++; } }
+    for (const x of t) { cur = x.pnl > 0 ? cur + 1 : 0; best = Math.max(best, cur); }
+    return { wins, losses, bestWins: best };
+  }
 
   // ---------------- pick the most volatile coins ----------------
   // volatility = range of the last hour on 5-minute candles; only coins with enough turnover and a tight spread
@@ -527,7 +603,8 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
   // drop what loses: a coin with a losing recent run pauses for an hour; a signal type that keeps losing is switched off
   function prune(sym) {
     const last = ST.trades.filter(x => x.sym === sym).slice(-8);
-    if (last.length >= 6 && last.reduce((a, x) => a + x.pnl, 0) < 0 && last.filter(x => x.pnl < 0).length >= 5) {
+    const free = P.symbols.filter(x => x !== sym && (COOL[x] || 0) < Date.now()).length;
+    if (free >= 2 && last.length >= 6 && last.reduce((a, x) => a + x.pnl, 0) < 0 && last.filter(x => x.pnl < 0).length >= 5) {
       COOL[sym] = Date.now() + 3600e3;
       engineLog(`⚡⚡ ${sym}: ${last.filter(x => x.pnl < 0).length} збиткових з ${last.length} — монета на паузі 1 год`, "down");
     }
@@ -551,7 +628,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
       if (ST.day !== day) { ST.day = day; ST.dayPnl = 0; ST.stoppedForDay = false; }
       if (P.on && !ST.stoppedForDay) {
         const eq = Number(H.equity()) || 0;
-        if (P.dailyLossPct > 0 && eq > 0 && ST.dayPnl <= -eq * P.dailyLossPct / 100) {
+        if (false && eq > 0 && ST.dayPnl <= -eq * P.dailyLossPct / 100) {   // no daily stop: the owner wants trading never to stop
           ST.stoppedForDay = true;
           engineLog(`⚡⚡ Суперскальпінг: денний збиток ${ST.dayPnl.toFixed(2)} USDT ≥ ${P.dailyLossPct}% капіталу — нові входи до завтра вимкнено`, "down");
         }
@@ -711,12 +788,13 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], trailPct: [0, 2], pressLevels: [1, 25], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], trailPct: [0, 2], streakN: [2, 10], pressLevels: [1, 25], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
   function setParams(o, caps = {}) {
     const changed = [];
     // coins named explicitly win over the automatic volatility pick
     if (o && Array.isArray(o.symbols) && o.symbols.length && o.autoCoins === undefined && P.autoCoins) { o = Object.assign({}, o, { autoCoins: false }); }
     for (const [k, v] of Object.entries(o || {})) {
+      if (k === "useSpoof" || k === "useAbsorption" || k === "dailyLossPct") continue;   // locked by the owner: spoof/absorption off, no daily stop
       if (NUM[k]) {
         let n = Number(v); if (!Number.isFinite(n)) continue;
         let hi = NUM[k][1];
@@ -725,7 +803,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
         n = Math.max(NUM[k][0], Math.min(hi, n));
         if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec", "coinCount", "pickEveryMin"].includes(k)) n = Math.round(n);
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
-      } else if (["ride", "trail", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
+      } else if (["ride", "trail", "streakFix", "useIceberg", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "style" && ["flow", "pressure"].includes(v)) {
         changed.push(...setStyle(v));
@@ -763,7 +841,8 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     const per = (inv) => { const a = ST.trades.filter(t => !!t.inv === inv); return { n: a.length, pnl: +a.reduce((s, t) => s + t.pnl, 0).toFixed(4), win: a.length ? Math.round(a.filter(t => t.pnl > 0).length / a.length * 100) : null }; };
     const withPath = ST.trades.filter(t => t.path && t.path.length >= 3).length, withFeat = ST.trades.filter(t => t.feat).length;
     const pfAll = (() => { const a = ST.trades.slice(-200), gp = a.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0), gl = -a.filter(t => t.pnl < 0).reduce((s, t) => s + t.pnl, 0); return gl > 0 ? +(gp / gl).toFixed(2) : null; })();
-    return { learn: { on: P.learn, ready: withFeat >= P.learnMin, have: withFeat, need: P.learnMin, skipped: ST.skipped || 0, pf: pfAll, opt: ST.opt, optOn: P.optExits, paths: withPath },
+    const fixView = { on: P.streakFix, n: P.streakN, series: series(), active: FIX.active, stats: FIX.stats, log: FIX.log.slice(-8).reverse(), names: Object.fromEntries(Object.entries(FIXES).map(([k, v]) => [k, v.name])) };
+    return { fix: fixView, learn: { on: P.learn, ready: withFeat >= P.learnMin, have: withFeat, need: P.learnMin, skipped: ST.skipped || 0, pf: pfAll, opt: ST.opt, optOn: P.optExits, paths: withPath },
       mode: { inverted: inverted(), setting: P.invert, normal: per(false), inv: per(true), judged: ST.judged, pausedUntil: ST.pausedUntil || 0 },
       noMoney: (ST.noMoneyUntil || 0) > Date.now() ? ST.noMoney : "", vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
       live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, trail: !!p.trailOn, peak: p.peak != null ? +p.peak.toFixed(3) : null, lock: p.lockPct != null ? +p.lockPct.toFixed(3) : null, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
@@ -773,11 +852,11 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket
     // what the AI needs: parameters, results, live signals and the last trades with the signals they were taken on
     const by = (f) => { const g = {}; for (const t of ST.trades.slice(-300)) { const k = f(t); if (k == null) continue; (g[k] = g[k] || []).push(t); }
       return Object.entries(g).map(([k, a]) => ({ value: k, n: a.length, win: Math.round(a.filter(x => x.pnl > 0).length / a.length * 100), pnl: +a.reduce((s, x) => s + x.pnl, 0).toFixed(4) })); };
-    return { optimizer: ST.opt, learnedFilter: { on: P.learn, skipped: ST.skipped || 0 }, inverted: inverted(), byMode: by(t => t.inv ? "inverted" : "normal"), volatilityTop: ST.vol, params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
+    return { seriesFixer: { on: P.streakFix, afterLosses: P.streakN, series: series(), active: FIX.active, resultsByChange: FIX.stats, recent: FIX.log.slice(-6) }, optimizer: ST.opt, learnedFilter: { on: P.learn, skipped: ST.skipped || 0 }, inverted: inverted(), byMode: by(t => t.inv ? "inverted" : "normal"), volatilityTop: ST.vol, params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
       byTp: by(t => t.cfg && t.cfg.tpPct), byExit: by(t => t.how), last: ST.trades.slice(-20) };
   }
-  return { setStyle, optimizeNow: () => optimizeExits(true), view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades, judgeMode, ST, inverted, optimizeExits, expect, feat, simulate } };
+  return { setStyle, optimizeNow: () => optimizeExits(true), view, aiView, setParams, setOn, params: P, signals, _test: { streakCheck, FIX, series, M, POSN, applyBook, applyTrades, judgeMode, ST, inverted, optimizeExits, expect, feat, simulate } };
 }
 
 module.exports = { create, DEFAULTS };

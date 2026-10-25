@@ -148,9 +148,10 @@ function create(host) {
     return (FEES[sym] = { maker, taker });
   }
   // ---------------- choose coin and step ----------------
-  async function plan() {
+  async function plan(opt = {}) {
     let cands;
-    if (P.autoCoin) {
+    if (opt.sym) cands = [{ sym: opt.sym }];
+    else if (P.autoCoin) {
       const r2 = await bx("/v5/market/tickers", { query: { category: "linear" } });
       const busy = host.busySyms ? host.busySyms() : [];
       cands = (r2.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !busy.includes(x.symbol))
@@ -182,11 +183,11 @@ function create(host) {
     ST.bt = { at: now(), days: P.btDays, results };
     const best = results.find(x => x.roi != null);
     if (!best) throw new Error(results.map(x => `${x.sym}: ${x.err}`).join("; ") || "немає кандидатів");
-    if (P.autoTune && P.btNeedPlus && best.roi <= 0) throw Object.assign(new Error(`жодна монета не заробила б пробійною сіткою за ${P.btDays} дні (найкраща ${best.sym} ${best.roi}%) — чекаю 15 хв`), { wait: 15 });
+    if (!opt.force && P.autoTune && P.btNeedPlus && best.roi <= 0) throw Object.assign(new Error(`жодна монета не заробила б пробійною сіткою за ${P.btDays} дні (найкраща ${best.sym} ${best.roi}%) — чекаю 15 хв`), { wait: 15 });
     return best;
   }
-  async function start() {
-    const pl = await plan();
+  async function start(opt = {}) {
+    const pl = await plan(opt);
     const s = await spec(pl.sym);
     ST.spec = { tickStr: s.tick, step: s.step, minQty: Number(s.minQty || 0), minNotional: Number(s.minNotional || 5), maxLev: Number(s.maxLev || 10) };
     try { ST.hedge = ((await api("/v5/position/list", { query: { category: "linear", symbol: pl.sym }, auth: true })).list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { ST.hedge = false; }
@@ -206,7 +207,9 @@ function create(host) {
     try {
       const dd = dirOf(await candles5m(B.sym, 200));
       B.dirInfo = dd;
+      if (B.manual && dd.d !== -B.d) { saveB(); return; }          // a direction set by hand holds until the trend turns clearly the other way
       if (dd.d !== B.d) {
+        if (B.manual) { B.manual = false; engineLog(`🧭 ${B.sym}: тренд розвернувся проти ручного входу`, "gold-t"); }
         const old = B.d; B.d = dd.d; saveB();
         if (old !== 0 && B.units.length) { engineLog(`🔀 ${B.sym}: напрям змінився (${dd.why}) — закриваю всі юніти`, "gold-t"); for (const u of B.units.slice()) await closeUnit(u, "розворот"); }
         else engineLog(`🧭 ${B.sym}: ${dd.why}`, "mute");
@@ -221,6 +224,43 @@ function create(host) {
     saveB();
   }
 
+  async function openAt(j, way, why) {
+    const out = [];
+    const microN = B.units.filter(u => !u.runner).length;
+    if (microN < B.maxUnits && !B.units.some(u => !u.runner && u.j === j)) {
+      const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", tp: L(j + B.d), sl: L(j - B.d * P.stopSteps), way };
+      B.units.push(u); saveB();
+      try { await market(u, "o", u.d > 0 ? "Buy" : "Sell", false); out.push("юніт"); engineLog(`⚡ ${B.sym}: ${why || (way === B.d ? "рух" : "відкат")} через ${fmt(L(j))} — ${u.d > 0 ? "лонг" : "шорт"} ${u.qty}, тейк ${fmt(u.tp)}`, "mute"); }
+      catch (e) { B.units = B.units.filter(z => z !== u); saveB(); setErr("вхід юніта: " + e.message); }
+    }
+    if (P.runner && way === B.d && !B.units.some(u => u.runner)) {
+      const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", runner: true, sl: L(j - B.d * P.trailSteps), tp: null };
+      B.units.push(u); saveB();
+      try { await market(u, "o", u.d > 0 ? "Buy" : "Sell", false); out.push("бігун"); engineLog(`🏃 ${B.sym}: бігун ${u.d > 0 ? "лонг" : "шорт"} — трейлінг-стоп ${P.trailSteps} рівні за найкращою ціною`, "up"); }
+      catch (e) { B.units = B.units.filter(z => z !== u); saveB(); }
+    }
+    return out;
+  }
+  // "enter now": the owner sets the direction; the breakout grid opens at once on the current/given coin (no waiting for a signal or for a plus on history)
+  async function enterNow(dir, symIn) {
+    if (!keys || !keys.key) return "Немає ключів Bybit";
+    const sym = symIn ? (symIn.toUpperCase().endsWith("USDT") ? symIn.toUpperCase() : symIn.toUpperCase() + "USDT") : null;
+    while (ST.busy) await new Promise(r2 => setTimeout(r2, 100));
+    ST.busy = true;
+    try {
+      if (B && sym && B.sym !== sym) { if (B.units.length) return `Зараз відкриті юніти на ${B.sym} — спершу «Закрити все»`; B = null; }
+      if (B && B.d === -dir && B.units.length) { for (const u of B.units.slice()) await closeUnit(u, "ручний розворот"); }
+      if (!B) await start({ force: true, sym: sym || (P.autoCoin ? null : P.symbol || null) });
+      if (!B) return "Не вдалося відкрити пробійну сітку: " + ST.err;
+      P.on = true; save();
+      if (!ST.price || now() - ST.priceAt > 5000) await ticker(B.sym);
+      B.d = dir; B.manual = true; B.last = idxOf(ST.price); B.idleAt = now(); saveB();
+      const opened = await openAt(B.last, dir, "ручний вхід");
+      engineLog(`👆 ${B.sym}: ручний вхід ${dir > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} зараз (${opened.join(" + ") || "уже відкрито"}) — далі сітка веде сама в цей бік, доки тренд явно не розвернеться`, dir > 0 ? "up" : "down");
+      return `${B.sym}: ${dir > 0 ? "лонг" : "шорт"} відкрито (${opened.join(" + ") || "юніти вже є"})`;
+    } catch (e) { return "Помилка: " + e.message; }
+    finally { ST.busy = false; }
+  }
   // ---------------- the loop: every 500 ms ----------------
   async function loop() {
     if (ST.busy) return; ST.busy = true;
@@ -260,21 +300,7 @@ function create(host) {
         for (let j = B.last + 1; j <= i && j <= B.last + 3; j++) crossed.push([j, 1]);
         for (let j = B.last; j > i && j > B.last - 3; j--) crossed.push([j, -1]);
         B.last = i; saveB();
-        if (P.on && B.d !== 0) for (const [j, way] of crossed) {
-          const microN = B.units.filter(u => !u.runner).length;
-          if (microN < B.maxUnits && !B.units.some(u => !u.runner && u.j === j)) {
-            const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", tp: L(j + B.d), sl: L(j - B.d * P.stopSteps), way };
-            B.units.push(u); saveB();
-            try { await market(u, "o", u.d > 0 ? "Buy" : "Sell", false); engineLog(`⚡ ${B.sym}: ${way === B.d ? "рух" : "відкат"} через ${fmt(L(j))} — ${u.d > 0 ? "лонг" : "шорт"} ${u.qty}, тейк ${fmt(u.tp)}`, "mute"); }
-            catch (e) { B.units = B.units.filter(z => z !== u); saveB(); setErr("вхід юніта: " + e.message); }
-          }
-          if (P.runner && way === B.d && !B.units.some(u => u.runner)) {
-            const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", runner: true, sl: L(j - B.d * P.trailSteps), tp: null };
-            B.units.push(u); saveB();
-            try { await market(u, "o", u.d > 0 ? "Buy" : "Sell", false); engineLog(`🏃 ${B.sym}: бігун ${u.d > 0 ? "лонг" : "шорт"} — трейлінг-стоп ${P.trailSteps} рівні за найкращою ціною`, "up"); }
-            catch (e) { B.units = B.units.filter(z => z !== u); saveB(); }
-          }
-        }
+        if (P.on && B.d !== 0) for (const [j, way] of crossed) await openAt(j, way);
       }
       if (B.pendingRestart && !B.units.length) { B = null; saveB(); ST.waitUntil = 0; return; }   // the scalping switch waits for the units to close
       if (B.units.length || B.d !== 0) B.idleAt = now();
@@ -335,7 +361,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -352,6 +378,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

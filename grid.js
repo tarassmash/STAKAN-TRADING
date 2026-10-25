@@ -203,7 +203,8 @@ function create(host) {
   // the coin for a grid: swings a lot within the day (range) but its 24 h change is small; enough turnover
   async function pickCoin() {
     const r = await api("/v5/market/tickers", { query: { category: "linear" } });
-    const rows = (r.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !((ST.cool[x.symbol] || 0) > now()))
+    const busy = host.busySyms ? host.busySyms() : [];
+    const rows = (r.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !((ST.cool[x.symbol] || 0) > now()) && !busy.includes(x.symbol))
       .map(x => { const range = (Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100, chg = Math.abs(Number(x.price24hPcnt || 0) * 100);
         return { sym: x.symbol, range, chg, score: range / (chg + 2) * Math.log10(Number(x.turnover24h)) }; })
       .filter(x => x.range >= 3 && x.range <= 40).sort((a, b) => b.score - a.score);

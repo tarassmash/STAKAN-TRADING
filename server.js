@@ -108,10 +108,19 @@ const GR = require("./grid").create({
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined,
   flush: () => { dirty = true; dump(); },
   trendEveryMs: Number(process.env.TEST_TREND_MS) || undefined,
+  busySyms: () => [BG && BG.sym()].filter(Boolean),            // the breakout grid's coin is not used by the grid
+});
+// ---------------- the breakout grid (second tab) ----------------
+const BG = require("./bgrid").create({
+  bx, spec, align, log: (...a) => log("bgrid", ...a), engineLog: (t, cls) => addLog("🚀 " + t, cls), lsGet, lsSet, env: ENV,
+  keys: HAS_KEYS ? { key: KEY } : null, sign: (s) => crypto.createHmac("sha256", SECRET).update(s).digest("hex"),
+  testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
+  flush: () => { dirty = true; dump(); },
+  busySyms: () => { const g = GR.view().grid; return g ? [g.sym] : []; },
 });
 
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
 async function act(b) {
   const what = String(b.what || "");
@@ -125,6 +134,11 @@ async function act(b) {
   if (what === "new") return await GR.newGrid();
   if (what === "close") return await GR.closeNow();
   if (what === "settings" && b.o && typeof b.o === "object") { const ch = GR.setParams(b.o); if (ch.length) addLog("⚙ Налаштування: " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") + " (діє для нової сітки — «Нова сітка зараз»)" : "Без змін"; }
+  if (what === "bg-start") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BG.setOn(true); return "Пробійну сітку запущено"; }
+  if (what === "bg-stop") { BG.setOn(false); return "Пробійну сітку зупинено (відкриті юніти доходять до тейку/стопу)"; }
+  if (what === "bg-close") return await BG.closeAll();
+  if (what === "bg-restart") return await BG.restart();
+  if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   return "невідома дія";
 }
 
@@ -170,6 +184,6 @@ http.createServer(async (req, res) => {
     lsSet("autostarted", true);
     addLog("AUTOSTART: перший запуск сервера — вмикаю грід-бота", "up");
     GR.setOn(true);
-  } else if (GR.params.on) addLog("Сервер перезапущено — грід-бот продовжує роботу", "up");
+  } else if (GR.params.on || BG.params.on) addLog("Сервер перезапущено — боти продовжують роботу", "up");
   else addLog("Сервер запущено. Натисніть «▶ Запустити» на сторінці.", "mute");
 })();

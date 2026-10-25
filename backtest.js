@@ -115,3 +115,47 @@ function simulate(c, o) {
 }
 
 module.exports = { ema, trendOf, simulate };
+
+// breakout grid (live engine bgrid.js): the direction comes from the breakout/trend on 5-minute candles (EMA fast vs slow with a band);
+// every level crossed - up or down - opens a unit in that direction with a micro take one level further; a pullback is bought (in an uptrend)
+// with a short take; one "runner" unit trails stopSteps behind the best price to take the whole trend; a direction flip closes everything.
+// direction-following breakout grid
+function simulateB2(c, o) {
+  const { stepPct, maxUnits = 6, investment, lev, maker = 0.02, taker = 0.055, stopSteps = 3, runner = true, trailSteps = 2, fast = 36, slow = 96, band = 0.002 } = o;
+  const r = 1 + stepPct / 100, a0 = c[0].o, lr = Math.log(r);
+  const L = (j) => a0 * Math.pow(r, j), idx = (x) => Math.floor(Math.log(x / a0) / lr);
+  const closes = c.map(k => k.c), ef = ema(closes, fast), es = ema(closes, slow);
+  let last = idx(a0), units = [], profit = 0, fees = 0, wins = 0, losses = 0, D = 0, run = null, flips = 0;
+  const q = investment * lev / (maxUnits + 1) / a0;
+  const unreal = (x) => units.reduce((s, u) => s + (x - u.e) * q * u.d, 0) + (run ? (x - run.e) * q * run.d : 0);
+  function closeAll(x) { for (const u of units) { profit += (x - u.e) * q * u.d; fees += q * x * taker / 100; (x - u.e) * u.d > 0 ? wins++ : losses++; } units = []; if (run) { profit += (x - run.e) * q * run.d; fees += q * x * taker / 100; run = null; } }
+  for (let t = 0; t < c.length; t++) {
+    const k = c[t], dNew = ef[t] > es[t] * (1 + band) ? 1 : ef[t] < es[t] * (1 - band) ? -1 : 0;
+    if (t > slow && dNew !== D) { if (D !== 0) { closeAll(k.o); flips++; } D = dNew; }
+    for (const x of (k.c >= k.o ? [k.o, k.l, k.h, k.c] : [k.o, k.h, k.l, k.c])) {
+      units = units.filter(u => {
+        if ((u.d > 0 && x >= u.tp) || (u.d < 0 && x <= u.tp)) { profit += (u.tp - u.e) * q * u.d; fees += q * u.tp * maker / 100; wins++; return false; }
+        if ((u.d > 0 && x <= u.sl) || (u.d < 0 && x >= u.sl)) { profit += (u.sl - u.e) * q * u.d; fees += q * u.sl * taker / 100; losses++; return false; }
+        return true; });
+      if (run) { run.pk = run.d > 0 ? Math.max(run.pk, x) : Math.min(run.pk, x); const st = run.d > 0 ? Math.max(run.sl, run.pk / Math.pow(r, trailSteps)) : Math.min(run.sl, run.pk * Math.pow(r, trailSteps)); run.sl = st;
+        if ((run.d > 0 && x <= st) || (run.d < 0 && x >= st)) { profit += (st - run.e) * q * run.d; fees += q * st * taker / 100; (st - run.e) * run.d > 0 ? wins++ : losses++; run = null; } }
+      const i = idx(x);
+      if (D !== 0) {
+        const crossed = []; for (let j = last + 1; j <= i && j <= last + 3; j++) crossed.push([j, 1]); for (let j = last; j > i && j > last - 3; j--) crossed.push([j, -1]);
+        for (const [j, way] of crossed) {
+          const lvl = way > 0 ? j : j; // the level crossed
+          const e = L(lvl);
+          if (units.length < maxUnits && !units.some(u => u.j === lvl)) {
+            const viaLimit = way !== D;                 // a pullback: the entry is a resting limit (maker); continuation: market (taker)
+            units.push({ d: D, j: lvl, e, tp: L(lvl + D), sl: L(lvl - D * stopSteps) }); fees += q * e * (viaLimit ? maker : taker) / 100;
+          }
+          if (runner && !run && way === D) { run = { d: D, e, pk: e, sl: L(lvl - D * trailSteps) }; fees += q * e * taker / 100; }
+        }
+      }
+      last = i;
+    }
+  }
+  const x = c[c.length - 1].c, net = profit - fees + unreal(x);
+  return { roi: +(net / investment * 100).toFixed(2), wins, losses, flips };
+}
+module.exports.simulateB2 = simulateB2;

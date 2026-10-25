@@ -40,7 +40,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div style="margin-top:12px"><button class="big go" id="main">▶ Запустити</button></div>
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="newGrid">🔄 Нова сітка зараз</button><button class="btn" id="closeGrid">✖ Закрити сітку і позицію</button></div>
     <div style="margin-top:12px;font-size:14px;font-weight:600">Режим сітки</div>
-    <div class="seg"><button data-mode="long">🔺 Лонг</button><button data-mode="neutral">↕ Нейтральна</button><button data-mode="short">🔻 Шорт</button></div>
+    <div class="seg"><button data-mode="auto">🤖 Авто</button><button data-mode="long">🔺 Лонг</button><button data-mode="neutral">↕ Нейтр.</button><button data-mode="short">🔻 Шорт</button></div>
     <div class="mute" id="modeHint" style="font-size:12px;margin-top:4px"></div>
     <div id="warn"></div>
   </div>
@@ -58,6 +58,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <b id="gTitle">Сітка</b>
     <div class="mute" id="gInfo" style="font-size:13px;margin-top:4px"></div>
     <svg id="ladder" viewBox="0 0 600 360" style="width:100%;height:auto;margin-top:8px;background:var(--bg);border-radius:10px"></svg>
+    <div id="gTrend" style="font-size:13px;margin-top:6px"></div>
     <div class="mute" style="font-size:11px;margin-top:4px">● зелені — чекають купівлі, ● червоні — чекають продажу, ■ заповнені — комірка тримає позицію і чекає закриття на сусідньому рівні; жовта лінія — ціна</div>
   </div>
 
@@ -78,10 +79,19 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">Нова сітка після стопу<select id="sRe"><option value="on">Так</option><option value="off">Ні</option></select></label>
         <label class="f">Пауза перед новою сіткою, хв<input id="sReM" inputmode="decimal"></label>
         <label class="f">Крок ≥ N × комісії<input id="sFee" inputmode="decimal"></label>
+        <label class="f">Перевірка на історії<select id="sTune"><option value="on">Так: вибрати монету, діапазон і сітки</option><option value="off">Ні</option></select></label>
+        <label class="f">Днів історії (1–3)<input id="sDays" inputmode="decimal"></label>
+        <label class="f">Без плюсу на історії — не торгувати<select id="sNeed"><option value="on">Так</option><option value="off">Ні</option></select></label>
+        <label class="f">Тренд: нахил EMA20 за 6 год від, %<input id="sTrend" inputmode="decimal"></label>
       </div>
       <div style="margin-top:8px"><button class="btn" id="sSave">Зберегти</button> <span id="sOut" class="mute" style="font-size:13px"></span></div>
     </details>
     <div id="picks" class="mute" style="font-size:12px;margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <b>🧪 Перевірка на історії перед сіткою</b> <span class="mute" id="btLine" style="font-size:12px"></span>
+    <div class="scroll"><table><thead><tr><th>Монета</th><th>Тренд</th><th>Режим</th><th>Діапазон</th><th>Сіток</th><th>Результат</th><th>Кіл</th><th>Стопів</th><th>Макс. просідання</th></tr></thead><tbody id="bt"></tbody></table></div>
   </div>
 
   <div class="card"><b>Закриті кола і сітки</b><div class="log" id="trades"></div></div>
@@ -106,17 +116,17 @@ $("main").onclick = () => S.gr.params.on ? act({ what: "stop" }, "Зупинит
 $("newGrid").onclick = () => act({ what: "new" }, "Закрити поточну сітку (позицію — ринком) і поставити нову навколо поточної ціни?");
 $("closeGrid").onclick = () => act({ what: "close" }, "Закрити сітку: зняти ордери і закрити позицію ринком?");
 document.querySelectorAll("[data-mode]").forEach(b => b.onclick = async () => { const t = await act({ what: "settings", o: { mode: b.dataset.mode } }); if (t.startsWith("Збережено") && S.gr.grid && confirm("Режим зміниться для нової сітки. Поставити нову сітку зараз?")) act({ what: "new" }); });
-const FIELDS = [["sInv", "investment"], ["sLev", "leverage"], ["sN", "grids"], ["sW", "rangePct"], ["sLow", "low"], ["sHigh", "high"], ["sSl", "slPct"], ["sReM", "restartMin"], ["sFee", "feeX"]];
+const FIELDS = [["sInv", "investment"], ["sLev", "leverage"], ["sN", "grids"], ["sW", "rangePct"], ["sLow", "low"], ["sHigh", "high"], ["sSl", "slPct"], ["sReM", "restartMin"], ["sFee", "feeX"], ["sDays", "btDays"], ["sTrend", "trendPct"]];
 $("sSave").onclick = async () => {
   const o = {};
   for (const [id, k] of FIELDS) { const v = Number(String($(id).value).replace(",", ".")); if (Number.isFinite(v) && $(id).value !== "") o[k] = v; }
-  o.autoCoin = $("sAuto").value === "auto"; o.symbol = $("sSym").value; o.autoRange = $("sAR").value === "auto"; o.trailing = $("sTrail").value === "on"; o.autoRestart = $("sRe").value === "on";
+  o.autoCoin = $("sAuto").value === "auto"; o.symbol = $("sSym").value; o.autoRange = $("sAR").value === "auto"; o.trailing = $("sTrail").value === "on"; o.autoRestart = $("sRe").value === "on"; o.autoTune = $("sTune").value === "on"; o.btNeedPlus = $("sNeed").value === "on";
   $("sOut").textContent = await act({ what: "settings", o }); FILLED = false;
 };
 function fill(P) {
   for (const [id, k] of FIELDS) $(id).value = P[k] || (k === "low" || k === "high" ? "" : P[k]);
   $("sAuto").value = P.autoCoin ? "auto" : "manual"; $("sSym").value = P.symbol || ""; $("sAR").value = P.autoRange ? "auto" : "manual";
-  $("sTrail").value = P.trailing ? "on" : "off"; $("sRe").value = P.autoRestart ? "on" : "off";
+  $("sTrail").value = P.trailing ? "on" : "off"; $("sRe").value = P.autoRestart ? "on" : "off"; $("sTune").value = P.autoTune ? "on" : "off"; $("sNeed").value = P.btNeedPlus ? "on" : "off";
 }
 function ladder(g, price) {
   if (!g) { $("ladder").innerHTML = '<text x="20" y="180" fill="#848e9c" font-size="14">Сітки ще немає</text>'; return; }
@@ -151,7 +161,8 @@ function paint() {
   $("status2").textContent = (g ? `ціна ${pr(X.price)} · ` : "") + `${P.mode === "long" ? "лонг" : P.mode === "short" ? "шорт" : "нейтральна"} · ${P.investment} USDT × x${P.leverage} · ${g ? g.n + " сіток" + (g.n < P.grids ? ` (з ${P.grids}: більше не дозволяє сума або крок ≥ комісій)` : "") : P.grids + " сіток"} · трейлінг ${P.trailing ? "так" : "ні"} · стоп ${P.slPct}% за краєм · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === P.mode));
-  $("modeHint").textContent = P.mode === "long" ? "Купує на рівнях нижче ціни, продає на рівень вище; на старті купує частку для рівнів над ціною. Заробляє на коливаннях і на рості."
+  $("modeHint").textContent = P.mode === "auto" ? "Режим за трендом монети (годинні свічки, EMA20/50): росте → лонг-сітка, падає → шорт-сітка, флет → нейтральна. Тренд перевіряється кожні 15 хв; якщо він розвернувся проти сітки (2 перевірки поспіль), сітка замінюється новою — за трендом."
+    : P.mode === "long" ? "Купує на рівнях нижче ціни, продає на рівень вище; на старті купує частку для рівнів над ціною. Заробляє на коливаннях і на рості."
     : P.mode === "short" ? "Продає на рівнях вище ціни, відкуповує на рівень нижче; на старті продає частку для рівнів під ціною. Заробляє на коливаннях і на падінні."
     : "Без стартової позиції: нижче ціни купує → продає на рівень вище, вище ціни продає → відкуповує на рівень нижче. Заробляє на коливаннях у діапазоні.";
   $("warn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
@@ -164,6 +175,13 @@ function paint() {
   $("gTitle").textContent = g ? `Сітка ${g.sym}` : "Сітка";
   $("gInfo").innerHTML = g ? `${pr(g.low)} – ${pr(g.high)} · ${g.n} сіток по ${g.stepPct}% · ${g.qty} на сітку · x${g.lev} · позиція сітки ${g.pos} · стоп ${g.pos > 0 ? "≤ " + pr(g.stopLow) : g.pos < 0 ? "≥ " + pr(g.stopHigh) : `≤ ${pr(g.stopLow)} / ≥ ${pr(g.stopHigh)}`} · з ${new Date(g.startedAt).toLocaleString()}` : (X.restartIn != null ? `нова сітка через ${X.restartIn} с` : "");
   ladder(g, X.price);
+  const MODE = { long: "🔺 лонг", short: "🔻 шорт", neutral: "↕ нейтр." };
+  $("gTrend").innerHTML = g ? (g.trend ? `Тренд ${esc(g.sym)}: <b class="${g.trend.mode === "long" ? "up" : g.trend.mode === "short" ? "down" : ""}">${esc(g.trend.why)}</b>${P.mode === "auto" ? (g.trend.mode !== g.mode ? ` · <span style="color:var(--gold)">сітка ${MODE[g.mode]}, тренд інший — перевіряю (заміна після 2 перевірок поспіль)</span>` : " · сітка за трендом ✓") : ""}` : "")
+    + (g.btr && g.btr.tested ? `<br><span class="mute">На історії за ${g.btr.days} дні ця сітка дала б ${g.btr.roi >= 0 ? "+" : ""}${g.btr.roi}% від суми, ${g.btr.cycles} кіл, стопів ${g.btr.stops}</span>` : "") : "";
+  const B = X.bt;
+  $("btLine").textContent = B ? `· ${new Date(B.at).toLocaleTimeString()}, свічки 5 хв за ${B.days} дні, з комісіями, трейлінгом і стопами` : "· ще не було";
+  $("bt").innerHTML = B ? B.results.map((r, i) => r.err ? `<tr><td><b>${esc(r.sym)}</b></td><td colspan="8" class="mute">${esc(r.err)}</td></tr>`
+    : `<tr${g && g.sym === r.sym && i === 0 ? ' style="background:rgba(14,203,129,.08)"' : ""}><td><b>${esc(r.sym)}</b>${i === 0 ? " ✓" : ""}</td><td class="${r.trend.mode === "long" ? "up" : r.trend.mode === "short" ? "down" : "mute"}">${r.trend.slope > 0 ? "+" : ""}${r.trend.slope}%</td><td>${MODE[r.mode]}</td><td>${r.w}%</td><td>${r.n}</td><td>${sgn(r.roi, 2)}%</td><td>${r.cycles}</td><td>${r.stops}</td><td>${r.maxDD != null ? "−" + r.maxDD + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="9" class="mute">Перевірка запуститься перед наступною сіткою</td></tr>';
   $("picks").textContent = X.picks.length ? "Найкращі монети для сітки зараз (рух за добу / зміна за добу): " + X.picks.map(p => `${p.sym} ${p.range}%/${p.chg}%`).join(", ") : "";
   $("trades").innerHTML = (X.trades || []).map(t => t.kind === "cell"
     ? `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.dir > 0 ? "купив" : "продав"} ${pr(t.open)} → ${t.dir > 0 ? "продав" : "купив"} ${pr(t.close)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`

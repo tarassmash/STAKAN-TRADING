@@ -107,6 +107,7 @@ const GR = require("./grid").create({
   testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined,
   flush: () => { dirty = true; dump(); },
+  trendEveryMs: Number(process.env.TEST_TREND_MS) || undefined,
 });
 
 function state() {

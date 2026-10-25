@@ -6,12 +6,17 @@
 //  • Стоп сітки: ціна пішла за межу на slPct — позиція закривається, ордери знімаються; з autoRestart через restartMin хв нова сітка навколо ціни.
 "use strict";
 const WebSocketNode = (() => { try { return require("ws"); } catch (e) { return null; } })();
+const BT = require("./backtest");
 
 const DEFAULTS = {
   on: false,
   autoCoin: true,          // the bot picks a coin that swings a lot but goes nowhere (best for a grid)
   symbol: "",              // the coin when autoCoin is off
-  mode: "neutral",         // "long" | "short" | "neutral"
+  mode: "auto",            // "auto" (by the trend) | "long" | "short" | "neutral"
+  trendPct: 0.8,           // EMA20 slope over 6 h (1-hour candles) that counts as a trend, %
+  autoTune: true,          // before every grid: test the best coins on the last btDays of 5-minute candles, take the coin/width/grids that earned most
+  btDays: 3,
+  btNeedPlus: true,        // no coin earned on history -> no grid, look again in 15 min
   investment: 20,          // USDT margin for the whole grid
   leverage: 3,
   grids: 20,               // number of grid cells
@@ -25,8 +30,8 @@ const DEFAULTS = {
   restartMin: 2,
   minTurnoverM: 50,
 };
-const NUM = { investment: [1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
-const BOOL = ["autoCoin", "autoRange", "trailing", "autoRestart"];
+const NUM = { trendPct: [0.1, 10], btDays: [1, 3.4], investment: [1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
+const BOOL = ["autoCoin", "autoRange", "trailing", "autoRestart", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -35,6 +40,7 @@ function create(host) {
   const PUB = host.testWs || (env === "testnet" ? "wss://stream-testnet.bybit.com/v5/public/linear" : "wss://stream.bybit.com/v5/public/linear");
   const PRIV = host.testPrivWs || (env === "testnet" ? "wss://stream-testnet.bybit.com/v5/private" : "wss://stream.bybit.com/v5/private");
   const now = () => Date.now();
+  const TREND_EVERY = host.trendEveryMs || 15 * 60000;   // shorter only in automated tests
 
   const P = Object.assign({}, DEFAULTS, lsGet("grid.p", {}));
   const save = () => lsSet("grid.p", P);
@@ -157,7 +163,7 @@ function create(host) {
     c.order = id; c.orderAt = now();
     try {
       await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: o.side, orderType: "Limit", qty: String(c.qty), price: String(o.price),
-        timeInForce: "PostOnly", orderLinkId: id, positionIdx: idx(c.dir), reduceOnly: ST.hedge || P.mode !== "neutral" ? o.reduce : false } });
+        timeInForce: "PostOnly", orderLinkId: id, positionIdx: idx(c.dir), reduceOnly: ST.hedge || G.mode !== "neutral" ? o.reduce : false } });
       c.fails = 0; saveG(); return true;
     } catch (e) {
       c.order = null; c.fails = (c.fails || 0) + 1; c.retryAt = now() + Math.min(60000, 1000 * 2 ** Math.min(6, c.fails));   // a failing cell retries ever more slowly
@@ -192,9 +198,70 @@ function create(host) {
       .map(x => { const range = (Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100, chg = Math.abs(Number(x.price24hPcnt || 0) * 100);
         return { sym: x.symbol, range, chg, score: range / (chg + 2) * Math.log10(Number(x.turnover24h)) }; })
       .filter(x => x.range >= 3 && x.range <= 40).sort((a, b) => b.score - a.score);
+    if (P.mode === "auto") {   // with the mode by the trend a trending coin is fine too: 3 best for a flat grid + 3 biggest movers, the history decides
+      const movers = rows.slice().sort((a, b) => b.range - a.range).filter(x => !rows.slice(0, 3).includes(x));
+      rows.splice(3, rows.length, ...rows.slice(3).filter(() => false), ...movers.slice(0, 3));
+    }
     ST.picks = rows.slice(0, 8).map(x => ({ sym: x.sym, range: +x.range.toFixed(1), chg: +x.chg.toFixed(1) }));
     if (!rows.length) throw new Error("немає монети для сітки (усі занадто спокійні або трендові)");
-    return rows[0];
+    return rows;
+  }
+  async function specOf(sym) {
+    const s = await spec(sym);
+    const o = { tickStr: s.tick, tick: Number(s.tick), step: s.step, minQty: Number(s.minQty || 0), minNotional: Number(s.minNotional || 5), maxLev: Number(s.maxLev || 10) };
+    try { const fr = ((await api("/v5/account/fee-rate", { query: { category: "linear", symbol: sym }, auth: true })).list || [])[0]; if (fr) o.maker = Number(fr.makerFeeRate) * 100; } catch (e) { /* default */ }
+    return o;
+  }
+  async function closes1h(sym) {
+    const k = await api("/v5/market/kline", { query: { category: "linear", symbol: sym, interval: "60", limit: "72" } });
+    return (k.list || []).map(x => Number(x[4])).reverse();
+  }
+  async function candles5m(sym, days) {
+    const need = Math.min(1000, Math.round(days * 288));
+    const k = await api("/v5/market/kline", { query: { category: "linear", symbol: sym, interval: "5", limit: String(need) } });
+    return (k.list || []).map(x => ({ o: Number(x[1]), h: Number(x[2]), l: Number(x[3]), c: Number(x[4]) })).reverse();
+  }
+  async function trendNow(sym) { return BT.trendOf(await closes1h(sym), P.trendPct); }
+  // the plan of the next grid: coin, mode (by the trend), width and number of grids - tested on history
+  async function plan() {
+    let cands = [];
+    if (P.autoCoin) cands = (await pickCoin()).slice(0, P.autoTune ? 6 : 1);
+    else if (P.symbol) { const t = await ticker(P.symbol); cands = [{ sym: P.symbol, range: (Number(t.highPrice24h) - Number(t.lowPrice24h)) / Number(t.lastPrice) * 100, chg: Math.abs(Number(t.price24hPcnt || 0) * 100) }]; }
+    else throw new Error("вкажіть монету або увімкніть автовибір");
+    const results = [];
+    for (const cd of cands) {
+      try {
+        const sp = await specOf(cd.sym);
+        const tr = await trendNow(cd.sym);
+        const mode = P.mode === "auto" ? tr.mode : P.mode;
+        const t = await ticker(cd.sym), price = Number(t.lastPrice), swing = (Number(t.highPrice24h) - Number(t.lowPrice24h)) / price * 100;
+        const lev = Math.min(P.leverage, Math.floor(sp.maxLev));
+        const minNotional = Math.max(sp.minNotional * 1.05, sp.minQty * price);
+        const maker = sp.maker != null ? sp.maker : MAKER, minStep = P.feeX * 2 * Math.max(0.01, maker);
+        const manual = !P.autoRange && P.low > 0 && P.high > P.low;
+        const widths = manual ? [(P.high / P.low - 1) * 100] : P.autoRange ? (P.autoTune ? [0.4, 0.6, 0.8, 1.0] : [0.7]).map(k => Math.max(3, Math.min(30, swing * k))) : [P.rangePct];
+        const counts = P.autoTune ? [10, 15, 20, 30, 40, Math.round(P.grids)] : [Math.round(P.grids)];
+        const candles = P.autoTune ? await candles5m(cd.sym, P.btDays) : [];
+        let best = null;
+        for (const w of [...new Set(widths.map(x => +x.toFixed(2)))]) {
+          const maxByStep = Math.floor(Math.log(1 + w / 100) / Math.log(1 + minStep / 100));
+          for (let n of [...new Set(counts)]) {
+            n = Math.min(n, maxByStep, Math.floor(P.investment * lev / minNotional));
+            if (n < 2) continue;
+            const r = candles.length > 50 ? BT.simulate(candles, { mode, widthPct: w, n, investment: P.investment, lev, maker, slPct: P.slPct, trailing: P.trailing, autoRestart: P.autoRestart, minNotional }) : { roi: 0, net: 0, cycles: 0, stops: 0 };
+            if (!best || r.roi > best.roi || (r.roi === best.roi && n > best.n)) best = Object.assign({ w, n }, r);
+          }
+        }
+        if (best) results.push({ sym: cd.sym, mode, trend: tr, w: +best.w.toFixed(2), n: best.n, roi: best.roi, net: best.net, cycles: best.cycles, stops: best.stops, maxDD: best.maxDD, swing: +swing.toFixed(1), chg: +cd.chg.toFixed(1), tested: candles.length });
+        else results.push({ sym: cd.sym, mode, trend: tr, err: `замало коштів (мін. ордер ${minNotional.toFixed(2)} USDT)` });
+      } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
+    }
+    results.sort((a, b) => (b.roi ?? -1e9) - (a.roi ?? -1e9));
+    ST.bt = { at: now(), days: P.btDays, results };
+    const best = results.find(x => x.roi != null);
+    if (!best) throw new Error(results.map(x => `${x.sym}: ${x.err}`).join("; ") || "немає кандидатів");
+    if (P.autoTune && P.btNeedPlus && best.roi <= 0) throw Object.assign(new Error(`жодна монета не заробила б сіткою за останні ${P.btDays} дні (найкраща ${best.sym} ${best.roi}%) — чекаю 15 хв`), { wait: 15 });
+    return best;
   }
   async function loadSpec(sym) {
     const s = await spec(sym);
@@ -203,21 +270,15 @@ function create(host) {
     try { const r = await api("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true }); ST.hedge = (r.list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { ST.hedge = false; }
   }
   async function build() {
-    let sym = P.symbol, info = null;
-    if (P.autoCoin) { info = await pickCoin(); sym = info.sym; }
-    if (!sym) throw new Error("вкажіть монету або увімкніть автовибір");
+    const pl = await plan(), sym = pl.sym, mode = pl.mode, info = pl;
     await loadSpec(sym);
     const t = await ticker(sym), price = Number(t.lastPrice);
-    // range
+    // range: the tested width centred on the price now (a manual low/high stays as given)
     let low, high;
     if (!P.autoRange && P.low > 0 && P.high > P.low) { low = P.low; high = P.high; }
-    else {
-      const swing = (Number(t.highPrice24h) - Number(t.lowPrice24h)) / price * 100;
-      const w = P.autoRange ? Math.max(3, Math.min(30, swing * 0.7)) : P.rangePct;
-      low = price * (1 - w / 200); high = price * (1 + w / 200);
-    }
+    else { low = price * (1 - pl.w / 200); high = price * (1 + pl.w / 200); }
     // cells: the step must pay feeX round-trip fees; the order must fit the exchange minimum
-    let n = Math.round(P.grids);
+    let n = pl.n;
     const minStep = P.feeX * rtFee();
     const maxByStep = Math.floor(Math.log(high / low) / Math.log(1 + minStep / 100));
     if (n > maxByStep) n = Math.max(2, maxByStep);
@@ -231,20 +292,20 @@ function create(host) {
     try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); }
     catch (e) { if (e.code !== 110043) log("leverage", e.message); }
     const id = now().toString(36).slice(-5);
-    G = { id, sym, mode: P.mode, low: L[0], high: L[n], levels: L, stepPct: +((r - 1) * 100).toFixed(3), qty, lev, startedAt: now(), startPrice: price, profit: 0, cycles: 0, fees: 0, trails: 0, cells: [] };
+    G = { id, sym, mode, trend: pl.trend, bt: { roi: pl.roi, cycles: pl.cycles, stops: pl.stops, days: P.btDays, tested: pl.tested }, low: L[0], high: L[n], levels: L, stepPct: +((r - 1) * 100).toFixed(3), qty, lev, startedAt: now(), startPrice: price, profit: 0, cycles: 0, fees: 0, trails: 0, cells: [] };
     // cells: long below the price (and above it in a long grid, bought at start), short above (and below in a short grid, sold at start)
     let initBuy = 0, initSell = 0;
     for (let i = 0; i < n; i++) {
       const lo = L[i], hi = L[i + 1], below = hi <= price, above = lo >= price;
       let dir, state = "open";
-      if (P.mode === "long") { dir = 1; if (!below) { state = "close"; initBuy += qty; } }
-      else if (P.mode === "short") { dir = -1; if (!above) { state = "close"; initSell += qty; } }
+      if (mode === "long") { dir = 1; if (!below) { state = "close"; initBuy += qty; } }
+      else if (mode === "short") { dir = -1; if (!above) { state = "close"; initSell += qty; } }
       else { dir = below || (!above && price - lo > hi - price) ? 1 : -1; }   // neutral: no position at the start
       G.cells.push({ k: i, i, lo, hi, dir, state, qty, order: null, openPx: state === "close" ? price : null, openFee: 0 });
     }
     saveG(); subPub();
-    engineLog(`🧱 Нова сітка ${sym}: ${P.mode === "long" ? "лонг" : P.mode === "short" ? "шорт" : "нейтральна"}, ${fmt(L[0])} – ${fmt(L[n])}, ${n} сіток по ${G.stepPct}% (≥ ${P.feeX}× комісії), ${qty} на сітку, x${lev}`
-      + (info ? ` · монета за 24 год ходить ${info.range.toFixed(1)}%, змінилась на ${info.chg.toFixed(1)}%` : ""), "up");
+    engineLog(`🧱 Нова сітка ${sym}: ${mode === "long" ? "лонг" : mode === "short" ? "шорт" : "нейтральна"}${P.mode === "auto" ? ` (тренд: ${pl.trend.why})` : ""}, ${fmt(L[0])} – ${fmt(L[n])}, ${n} сіток по ${G.stepPct}% (≥ ${P.feeX}× комісії), ${qty} на сітку, x${lev}`
+      + (pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}% від суми, ${pl.cycles} кіл, стопів ${pl.stops}` : ""), "up");
     // a long grid buys the cells above the price at once (market), a short grid sells those below
     const init = initBuy || initSell;
     if (init) {
@@ -269,13 +330,13 @@ function create(host) {
       const c = G.cells.filter(c => c.state === "open").sort((a, b) => a.lo - b.lo)[0];
       if (c && c.lo < G.low * r * r) {
         const lo = G.high, hi = Number(px(G.high * r, true));
-        moved = await move(c, lo, hi, P.mode === "long" ? 1 : -1, "вгору");
+        moved = await move(c, lo, hi, G.mode === "long" ? 1 : -1, "вгору");
       }
     } else if (p < G.low / r) {
       const c = G.cells.filter(c => c.state === "open").sort((a, b) => b.hi - a.hi)[0];
       if (c && c.hi > G.high / r / r) {
         const hi = G.low, lo = Number(px(G.low / r, false));
-        moved = await move(c, lo, hi, P.mode === "short" ? -1 : 1, "вниз");
+        moved = await move(c, lo, hi, G.mode === "short" ? -1 : 1, "вниз");
       }
     }
     if (moved) { ST.lastTrail = now(); G.cells.sort((a, b) => a.lo - b.lo).forEach((c, k) => c.i = k); G.low = G.cells[0].lo; G.high = G.cells[n - 1].hi; G.levels = G.cells.map(c => c.lo).concat([G.high]); G.trails = (G.trails || 0) + 1; saveG(); }
@@ -285,7 +346,7 @@ function create(host) {
     if (c.order) { await cancelOrder(c.order); c.order = null; }
     c.lo = lo; c.hi = hi; c.dir = dir; c.state = "open"; c.openPx = null; c.openFee = 0; c.moving = false;
     // a long grid trailing up needs the coin for the new top cell: bought at market (like Bybit's trailing up); short grid trailing down: sold
-    if ((P.mode === "long" && where === "вгору") || (P.mode === "short" && where === "вниз")) {
+    if ((G.mode === "long" && where === "вгору") || (G.mode === "short" && where === "вниз")) {
       try {
         await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: dir > 0 ? "Buy" : "Sell", orderType: "Market", qty: String(c.qty), orderLinkId: ("gi" + G.id + ".t" + (now() % 1e6).toString(36)).slice(0, 36), positionIdx: idx(dir), timeInForce: "IOC" } });
         c.state = "close"; c.openPx = ST.price; c.openFee = c.qty * ST.price * 0.00055;
@@ -334,7 +395,10 @@ function create(host) {
     try {
       if (!keys || !keys.key) return;
       if (!G) {
-        if (P.on && now() >= (ST.restartAt || 0)) { try { await build(); } catch (e) { setErr(e.message); ST.restartAt = now() + 60000; } }
+        if (P.on && now() >= (ST.restartAt || 0)) {
+          try { await build(); }
+          catch (e) { setErr(e.message); ST.restartAt = now() + (e.wait || 1) * 60000; if (e.wait && now() - (ST.waitLog || 0) > 10 * 60000) { ST.waitLog = now(); engineLog("⏸ " + e.message, "gold-t"); } }
+        }
         return;
       }
       if (!ST.spec) await loadSpec(G.sym);
@@ -383,6 +447,22 @@ function create(host) {
     } catch (e) { setErr("звірка: " + e.message); }
   }
   setInterval(reconcile, 5000);
+  // the trend is checked every 15 min; a grid against a clear trend (2 checks in a row, the grid older than 30 min) is replaced by one with the trend
+  async function trendWatch() {
+    if (!G || !P.on || P.mode !== "auto") return;
+    try {
+      const t = await trendNow(G.sym); G.trend = t; saveG();
+      const against = (G.mode === "long" && t.mode === "short") || (G.mode === "short" && t.mode === "long") || (G.mode === "neutral" && t.mode !== "neutral" && t.strong);
+      ST.against = against ? (ST.against || 0) + 1 : 0;
+      if (ST.against >= 2 && now() - G.startedAt > TREND_EVERY * 2) {
+        ST.against = 0;
+        const from = G.mode;
+        await closeGrid(`тренд змінився: ${t.why}; сітка ${from === "long" ? "лонг" : from === "short" ? "шорт" : "нейтральна"} → ${t.mode === "long" ? "лонг" : t.mode === "short" ? "шорт" : "нейтральна"}`, false);
+        ST.restartAt = 0;
+      }
+    } catch (e) { /* next time */ }
+  }
+  setInterval(trendWatch, TREND_EVERY);
   async function syncPosition() {
     const r = await api("/v5/position/list", { query: { category: "linear", symbol: G.sym }, auth: true });
     const ex = (r.list || []).reduce((s2, x) => s2 + Number(x.size || 0) * (x.side === "Buy" ? 1 : x.side === "Sell" ? -1 : 0), 0);
@@ -421,7 +501,7 @@ function create(host) {
     for (const [k, v] of Object.entries(o || {})) {
       if (NUM[k]) { let n = Number(v); if (!Number.isFinite(n)) continue; n = Math.max(NUM[k][0], Math.min(NUM[k][1], n)); if (["grids", "leverage"].includes(k)) n = Math.round(n); if (P[k] !== n) { ch.push(`${k} ${P[k]}→${n}`); P[k] = n; } }
       else if (BOOL.includes(k) && typeof v === "boolean") { if (P[k] !== v) { ch.push(`${k} ${P[k]}→${v}`); P[k] = v; } }
-      else if (k === "mode" && ["long", "short", "neutral"].includes(v)) { if (P.mode !== v) { ch.push(`режим ${P.mode}→${v}`); P.mode = v; } }
+      else if (k === "mode" && ["auto", "long", "short", "neutral"].includes(v)) { if (P.mode !== v) { ch.push(`режим ${P.mode}→${v}`); P.mode = v; } }
       else if (k === "symbol" && typeof v === "string") { const s2 = v.trim().toUpperCase(); const sym = s2 ? (s2.endsWith("USDT") ? s2 : s2 + "USDT") : ""; if (P.symbol !== sym) { ch.push(`монета ${sym || "—"}`); P.symbol = sym; } }
     }
     save();
@@ -434,9 +514,9 @@ function create(host) {
     let unreal = 0, pos = 0;
     if (g) for (const c of g.cells) if (c.state === "close" && c.openPx) { unreal += (p - c.openPx) * c.qty * c.dir; pos += c.qty * c.dir; }
     const cells = TR.filter(t => t.kind === "cell"), day = cells.filter(t => t.at >= now() - 86400e3);
-    return { params: P, ws: ST.pubUp, priv: ST.privUp, err: now() - ST.errAt < 120000 ? ST.err : "", price: p, picks: ST.picks || [], hedge: ST.hedge,
+    return { bt: ST.bt || null, params: P, ws: ST.pubUp, priv: ST.privUp, err: now() - ST.errAt < 120000 ? ST.err : "", price: p, picks: ST.picks || [], hedge: ST.hedge,
       restartIn: !g && P.on && ST.restartAt > now() ? Math.round((ST.restartAt - now()) / 1000) : null,
-      grid: g && { sym: g.sym, mode: g.mode, low: g.low, high: g.high, stepPct: g.stepPct, qty: g.qty, lev: g.lev, n: g.cells.length, startedAt: g.startedAt, profit: +(g.profit || 0).toFixed(4), cycles: g.cycles || 0,
+      grid: g && { trend: g.trend || null, btr: g.bt || null, sym: g.sym, mode: g.mode, low: g.low, high: g.high, stepPct: g.stepPct, qty: g.qty, lev: g.lev, n: g.cells.length, startedAt: g.startedAt, profit: +(g.profit || 0).toFixed(4), cycles: g.cycles || 0,
         trails: g.trails || 0, unreal: +unreal.toFixed(4), pos: +pos.toFixed(8), stopLow: +(g.low * (1 - P.slPct / 100)).toPrecision(6), stopHigh: +(g.high * (1 + P.slPct / 100)).toPrecision(6),
         cells: g.cells.map(c => ({ lo: c.lo, hi: c.hi, dir: c.dir, state: c.state, live: !!c.order, openPx: c.openPx })) },
       stats: { cycles: cells.length, profit: +cells.reduce((a, t) => a + t.pnl, 0).toFixed(4), day: +day.reduce((a, t) => a + t.pnl, 0).toFixed(4), dayCycles: day.length,

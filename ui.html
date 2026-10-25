@@ -116,6 +116,8 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
       <div style="font-size:19px;font-weight:700"><span class="dot" id="bDot"></span><span id="bStatus">Зупинено</span></div>
       <div class="mute" id="bStatus2" style="font-size:13px;margin-top:4px"></div>
       <div style="margin-top:12px"><button class="big go" id="bMain">▶ Запустити пробійну сітку</button></div>
+      <button class="big" id="bScalp" style="margin-top:10px;min-height:56px;font-size:18px">⚡ Суперскальпінг</button>
+      <div id="bScalpHint" style="font-size:12px;margin-top:4px"></div>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="bNew">🔄 Нова монета й крок</button><button class="btn" id="bClose">✖ Закрити все</button></div>
       <div class="mute" style="font-size:12px;margin-top:8px">Рівні кожні N % без меж — сітка йде за ціною. Напрям задає пробій (EMA 3 год проти 8 год на 5-хв свічках). Кожен перетин рівня — і рухом, і відкатом — відкриває угоду в бік пробою з мікро-тейком на наступному рівні; «бігун» з трейлінг-стопом забирає весь тренд. Розворот напряму закриває все. Працює паралельно зі звичайною сіткою, на іншій монеті.</div>
       <div id="bWarn"></div>
@@ -144,6 +146,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
           <label class="f">Сума, USDT<input id="bInv" inputmode="decimal"></label>
           <label class="f">Плече<input id="bLev" inputmode="decimal"></label>
           <label class="f">Крок між рівнями, %<input id="bStep" inputmode="decimal"></label>
+          <label class="f">Суперскальпінг: тейк, %<input id="bScStep" inputmode="decimal"></label>
           <label class="f">Юнітів одночасно<input id="bUnitsN" inputmode="decimal"></label>
           <label class="f">Стоп юніта, рівнів назад<input id="bStop" inputmode="decimal"></label>
           <label class="f">Бігун (трейлінг тренду)<select id="bRun"><option value="on">Так</option><option value="off">Ні</option></select></label>
@@ -265,8 +268,9 @@ document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { TAB = b
 showTab();
 // ---- breakout grid ----
 let BFILLED = false;
-const BF = [["bInv", "investment"], ["bLev", "leverage"], ["bStep", "stepPct"], ["bUnitsN", "maxUnits"], ["bStop", "stopSteps"], ["bTrail", "trailSteps"], ["bBand", "band"]];
+const BF = [["bScStep", "scalpStep"], ["bInv", "investment"], ["bLev", "leverage"], ["bStep", "stepPct"], ["bUnitsN", "maxUnits"], ["bStop", "stopSteps"], ["bTrail", "trailSteps"], ["bBand", "band"]];
 $("bMain").onclick = () => S.bg.params.on ? act({ what: "bg-stop" }, "Зупинити пробійну сітку? Нові юніти не відкриватимуться, відкриті дійдуть до тейку/стопу.") : act({ what: "bg-start" }, S.env === "mainnet" ? "Запустити пробійну сітку на реальному рахунку?" : "Запустити на testnet?");
+$("bScalp").onclick = () => act({ what: "bg-scalp", on: !S.bg.params.scalp }, S.bg.params.scalp ? "Вимкнути суперскальпінг (крок знову підбиратиметься на історії)?" : `Увімкнути суперскальпінг: тейки ${S.bg.params.scalpStep}% на кожному мікро-русі, завжди більші за комісії?`);
 $("bNew").onclick = () => act({ what: "bg-restart" }, "Підібрати нову монету й крок (перевірка на історії)?");
 $("bClose").onclick = () => act({ what: "bg-close" }, "Закрити всі юніти ринком?");
 $("bSave").onclick = async () => {
@@ -279,8 +283,13 @@ function paintBg() {
   if (!BFILLED) { for (const [id, k] of BF) $(id).value = P[k]; $("bAuto").value = P.autoCoin ? "auto" : "manual"; $("bSym").value = P.symbol || ""; $("bRun").value = P.runner ? "on" : "off"; $("bTune").value = P.autoTune ? "on" : "off"; $("bNeed").value = P.btNeedPlus ? "on" : "off"; BFILLED = true; }
   $("bDot").className = "dot" + (P.on ? " on" : "");
   $("bStatus").textContent = !P.on ? "Зупинено" : b ? `Пробійна сітка ${b.sym}` : X.waitIn != null ? `Пошук через ${X.waitIn} с` : "Підбираю монету…";
-  $("bStatus2").textContent = b ? `ціна ${pr(X.price)} · крок ${b.stepPct}% · до ${b.maxUnits} юнітів по ${b.qty} + бігун · x${b.lev}` : `${P.investment} USDT × x${P.leverage}`;
+  $("bStatus2").textContent = b ? `${b.scalp ? "⚡ суперскальпінг · " : ""}ціна ${pr(X.price)} · крок ${b.stepPct}% · до ${b.maxUnits} юнітів по ${b.qty} + бігун · x${b.lev}` : `${P.investment} USDT × x${P.leverage}`;
   const m = $("bMain"); m.textContent = BUSY ? "…" : P.on ? "■ Зупинити пробійну сітку" : "▶ Запустити пробійну сітку"; m.className = "big " + (P.on ? "stop" : "go"); m.disabled = BUSY;
+  const sb = $("bScalp"); sb.textContent = P.scalp ? `⚡ Суперскальпінг увімкнено — тейки ${P.scalpStep}% (вимкнути)` : `⚡ Суперскальпінг: тейки ${P.scalpStep}%`;
+  sb.style.background = P.scalp ? "#f7a600" : "var(--bg)"; sb.style.color = P.scalp ? "#111" : "var(--ink)"; sb.style.border = "1px solid " + (P.scalp ? "#f7a600" : "var(--line)"); sb.disabled = BUSY;
+  const fee = b && b.fee != null ? b.fee : 0.075;
+  $("bScalpHint").innerHTML = P.scalp ? `Кожен мікро-рух на ${b ? b.stepPct : P.scalpStep}% — тейк. Комісії за коло (вхід ринком + тейк лімітом) ≈ ${fee}% → <b class="up">чистими ≈ +${((b ? b.stepPct : P.scalpStep) - fee).toFixed(3)}% з кожного тейка</b>; тейк рахується від реальної ціни входу, тож у мінус на комісіях не йде.${b && b.pending ? ' <span style="color:var(--gold)">Увімкнеться, щойно закриються поточні юніти.</span>' : ""}`
+    : '<span class="mute">Тейки на кожному мікро-русі ціни (0.3%), у бік пробою. Тейк завжди більший за комісії.</span>';
   $("bWarn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
   $("bDir").innerHTML = b ? (b.d > 0 ? '<span class="up">▲ вгору (лонги)</span>' : b.d < 0 ? '<span class="down">▼ вниз (шорти)</span>' : '<span class="mute">— немає</span>') : "—";
   $("bProfit").innerHTML = b ? `${sgn(b.profit, 4)} · ${b.wins}/${b.losses}` : "—";

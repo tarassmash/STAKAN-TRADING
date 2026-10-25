@@ -21,9 +21,11 @@ const DEFAULTS = {
   autoTune: true, btDays: 3, btNeedPlus: true,
   minTurnoverM: 50,
   idleMin: 60,             // no direction and no units this long -> look for a better coin
+  scalp: false,            // ⚡ super scalping: takes of scalpStep % on every micro move (the step is fixed, the coin is still chosen on history)
+  scalpStep: 0.3,
 };
-const NUM = { investment: [1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["autoCoin", "runner", "autoTune", "btNeedPlus"];
+const NUM = { scalpStep: [0.1, 2], investment: [1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const BOOL = ["scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -138,6 +140,13 @@ function create(host) {
     await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: B.sym, side, orderType: "Market", qty: String(u.qty), orderLinkId: id, positionIdx: ix(u.d), reduceOnly: !!reduce, timeInForce: "IOC" } });
   }
 
+  const FEES = {};
+  async function feeOf(sym) {
+    if (FEES[sym]) return FEES[sym];
+    let maker = MAKER, taker = TAKER;
+    try { const f = ((await api("/v5/account/fee-rate", { query: { category: "linear", symbol: sym }, auth: true })).list || [])[0]; if (f) { maker = Math.max(0, Number(f.makerFeeRate) * 100); taker = Number(f.takerFeeRate) * 100; } } catch (e) { /* defaults */ }
+    return (FEES[sym] = { maker, taker });
+  }
   // ---------------- choose coin and step ----------------
   async function plan() {
     let cands;
@@ -152,19 +161,21 @@ function create(host) {
     const results = [];
     for (const cd of cands) {
       try {
-        const s = await spec(cd.sym), maker = MAKER, minStep = P.feeX * (TAKER + maker);
+        const s = await spec(cd.sym), fr = await feeOf(cd.sym), maker = fr.maker, taker = fr.taker;
+        // every take must clearly beat the round trip (market entry + limit take): the step ≥ feeX × fees, and in scalping at least 2 × fees
+        const minStep = P.scalp ? 2 * (taker + maker) : P.feeX * (taker + maker);
         const cs = await candles5m(cd.sym, P.autoTune ? Math.min(1000, Math.round(P.btDays * 288)) : 120);
         const price = cs.length ? cs[cs.length - 1].c : 0, lev = Math.min(P.leverage, Math.floor(Number(s.maxLev || 10)));
         const minNotional = Math.max(Number(s.minNotional || 5) * 1.05, Number(s.minQty || 0) * price);
         const units = Math.min(P.maxUnits, Math.floor(P.investment * lev / minNotional) - 1);
         if (units < 1) { results.push({ sym: cd.sym, err: `замало коштів (мін. ордер ${minNotional.toFixed(2)} USDT)` }); continue; }
-        const steps = P.autoTune ? [...new Set([0.3, 0.5, 0.8, 1.2, P.stepPct].map(x => Math.max(x, minStep)).map(x => +x.toFixed(2)))] : [Math.max(P.stepPct, minStep)];
+        const steps = P.scalp ? [+Math.max(P.scalpStep, minStep).toFixed(3)] : P.autoTune ? [...new Set([0.3, 0.5, 0.8, 1.2, P.stepPct].map(x => Math.max(x, minStep)).map(x => +x.toFixed(2)))] : [Math.max(P.stepPct, minStep)];
         let best = null;
         for (const st of steps) {
-          const res = cs.length > 120 && P.autoTune ? BT.simulateB2(cs, { stepPct: st, maxUnits: units, investment: P.investment, lev, maker, taker: TAKER, stopSteps: P.stopSteps, runner: P.runner, trailSteps: P.trailSteps, band: P.band / 100 }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
+          const res = cs.length > 120 && P.autoTune ? BT.simulateB2(cs, { stepPct: st, maxUnits: units, investment: P.investment, lev, maker, taker, stopSteps: P.stopSteps, runner: P.runner, trailSteps: P.trailSteps, band: P.band / 100 }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
           if (!best || res.roi > best.roi) best = Object.assign({ st }, res);
         }
-        results.push({ sym: cd.sym, step: best.st, units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
+        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
       } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
     }
     results.sort((a, b) => (b.roi ?? -1e9) - (a.roi ?? -1e9));
@@ -183,10 +194,10 @@ function create(host) {
     const lev = Math.min(P.leverage, Math.floor(ST.spec.maxLev));
     try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: pl.sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); } catch (e) { /* not modified */ }
     const qty = Math.max(qa(P.investment * lev / (pl.units + 1) / ST.price, false), qa(Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * ST.price) / ST.price, true));
-    B = { id: now().toString(36).slice(-5), sym: pl.sym, stepPct: pl.step, maxUnits: pl.units, qty, lev, anchor: ST.price, last: 0, d: 0, units: [], nextK: 1, profit: 0, wins: 0, losses: 0, startedAt: now(), idleAt: now(), bt: { roi: pl.roi, wins: pl.wins, losses: pl.losses, flips: pl.flips, days: P.btDays, tested: pl.tested } };
+    B = { scalp: P.scalp, fee: pl.fee, id: now().toString(36).slice(-5), sym: pl.sym, stepPct: pl.step, maxUnits: pl.units, qty, lev, anchor: ST.price, last: 0, d: 0, units: [], nextK: 1, profit: 0, wins: 0, losses: 0, startedAt: now(), idleAt: now(), bt: { roi: pl.roi, wins: pl.wins, losses: pl.losses, flips: pl.flips, days: P.btDays, tested: pl.tested } };
     B.last = idxOf(ST.price);
     saveB(); subPub();
-    engineLog(`🚀 Пробійна сітка ${pl.sym}: крок ${pl.step}%, до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
+    engineLog(`🚀 ${P.scalp ? "⚡ Суперскальпінг" : "Пробійна сітка"} ${pl.sym}: ${P.scalp ? `тейки ${pl.step}% (комісії за коло ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}% з тейка)` : `крок ${pl.step}%`}, до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
     await updateDir(true);
   }
   async function updateDir(force) {
@@ -265,6 +276,7 @@ function create(host) {
           }
         }
       }
+      if (B.pendingRestart && !B.units.length) { B = null; saveB(); ST.waitUntil = 0; return; }   // the scalping switch waits for the units to close
       if (B.units.length || B.d !== 0) B.idleAt = now();
       // a coin without direction and without units for idleMin -> another coin
       if (P.autoCoin && !B.units.length && now() - B.idleAt > P.idleMin * 60000) { engineLog(`🔄 ${B.sym}: ${P.idleMin} хв без напряму — шукаю іншу монету`, "mute"); B = null; saveB(); }
@@ -323,7 +335,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -333,6 +345,13 @@ function create(host) {
       trades: TR.slice(-30).reverse() };
   }
   boot();
-  return { params: P, setOn, setParams, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  function setScalp(on) {
+    P.scalp = !!on; save();
+    engineLog(on ? `⚡ Суперскальпінг увімкнено: тейки ${P.scalpStep}% на кожному мікро-русі, завжди більші за комісії` : "⚡ Суперскальпінг вимкнено: крок знову підбирається на історії", "up");
+    if (B && !B.units.length) { B = null; saveB(); ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено — підбираю монету" : "Вимкнено — підбираю монету й крок"; }
+    if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
+    ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
+  }
+  return { params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

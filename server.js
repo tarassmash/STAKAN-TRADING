@@ -148,7 +148,7 @@ async function act(b) {
   if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   if (what === "brain-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BR.setOn(true); return "Автоперемикач увімкнено — перший аналіз іде"; }
   if (what === "full-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err; if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок"; BR.setFull(true); return `Повний автомат увімкнено: баланс ${ACC.equity.toFixed(2)} USDT, плече до x50, мікро-тейки — перший аналіз іде`; }
-  if (what === "full-off") { BR.setFull(false); return "Повний автомат вимкнено"; }
+  if (what === "full-off") { await BR.setFull(false); return "Зупинено: нових угод немає"; }
   if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
   if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }
   if (what === "brain-settings" && b.o && typeof b.o === "object") { const ch = BR.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }

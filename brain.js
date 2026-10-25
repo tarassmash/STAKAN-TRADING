@@ -146,7 +146,7 @@ function create(host) {
   setInterval(() => { if (P.on && now() - ST.at >= P.everyMin * 60000) run("за розкладом"); }, 30000);
 
   function setOn(on) { P.on = !!on; if (!on) P.full = false; save(); note(on ? `Автоперемикач увімкнено: кожні ${P.everyMin} хв сам вибирає монети й стратегії` : "Автоперемикач вимкнено: боти працюють із поточними налаштуваннями", on ? "up" : "mute"); if (on) setTimeout(() => run("увімкнення"), 500); }
-  function setFull(on) {
+  async function setFull(on) {
     P.full = !!on;
     if (on) {
       GR.setParams(FULL_GRID); BG.setParams(FULL_BG); if (!BG.params.scalp) BG.setScalp(true);
@@ -154,7 +154,13 @@ function create(host) {
       const eq = acc().equity || 0;
       note(`🤖 ПОВНИЙ АВТОМАТ: плече до x50 (де біржа дозволяє), мікро-тейки (пробійна сітка ${FULL_BG.scalpStep}%, звичайна від ${(FULL_GRID.feeX * 0.04).toFixed(2)}%), розмір від балансу ${eq.toFixed(2)} USDT (90%, 10% — запас), сітка вузька (2%) зі стопом 0.5% за краєм, ринок перевіряю кожні ${P.everyMin} хв`, "up");
       setTimeout(() => run("повний автомат"), 500);
-    } else { save(); note("Повний автомат вимкнено (автоперемикач і налаштування лишаються, плече можна змінити на вкладках)", "mute"); }
+    } else {
+      // one button off = everything stops: no new trades; the grid closes (a grid position on x50 must not be left alone); open breakout units are still led to their take/stop
+      P.on = false; save();
+      const g = GR.view().grid; GR.setOn(false); if (g) await GR.closeNow();
+      BG.setOn(false);
+      note(`■ Повний автомат зупинено: нових угод немає${g ? `, сітку ${g.sym} закрито` : ""}${BG.view().b && BG.view().b.units.length ? ", відкриті юніти пробійної сітки доводжу до тейку/стопу" : ""}`, "mute");
+    }
   }
   function setParams(o) { const ch = []; for (const k of ["everyMin", "minTurnoverM", "coins"]) if (o && Number(o[k]) > 0 && P[k] !== Number(o[k])) { P[k] = Math.round(Number(o[k])); ch.push(`${k}→${P[k]}`); } save(); return ch; }
   function view() { return { equity: acc().equity || 0, budget: +budget().toFixed(2), gInv: GR.params.investment, bInv: BG.params.investment, params: P, busy: ST.busy, last: ST.last, next: P.on ? Math.max(0, Math.round((ST.at + P.everyMin * 60000 - now()) / 60000)) : null, log: ST.log.slice(-15).reverse() }; }

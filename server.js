@@ -127,7 +127,14 @@ const BR = require("./brain").create({ bx, spec, acc: () => ACC, engineLog: (t, 
 function state() {
   return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
+// "btc", "BTC", "btcusdt" -> "BTCUSDT"; checks that Bybit has such a futures coin
+async function coinOf(v) {
+  const s = String(v || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, ""); if (!s) return "";
+  const sym = s.endsWith("USDT") ? s : s + "USDT";
+  try { await spec(sym); return sym; } catch (e) { return { err: `На Bybit немає ф'ючерса ${sym}` }; }
+}
 async function act(b) {
+  const b0 = b;
   const what = String(b.what || "");
   if (what === "start") {
     if (!HAS_KEYS) return "Додайте BYBIT_API_KEY і BYBIT_API_SECRET у Railway → Variables";
@@ -155,11 +162,21 @@ async function act(b) {
     if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок";
     if (BR.params.on) BR.setOn(false);
     if (GR.params.on || GR.view().grid) { GR.setOn(false); if (GR.view().grid) await GR.closeNow(); }
-    BG.setParams({ flip: true, flipSteps: 0, scalp: true, scalpStep: 0.3, leverage: 50, autoCoin: true, autoTune: true, btNeedPlus: true, runner: true, autoInv: true });
+    const sym = await coinOf(b0.sym); if (sym && sym.err) return sym.err;
+    BG.setParams({ flip: true, flipSteps: 0, scalp: true, scalpStep: 0.3, leverage: 50, autoCoin: !sym, symbol: sym || "", autoTune: true, btNeedPlus: true, runner: true, autoInv: true });
     const b = BG.view().b;
-    if (b && !b.flip) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
+    if (b && (!b.flip || (sym && b.sym !== sym))) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
     BG.setOn(true);
-    return `Запущено: баланс ${ACC.equity.toFixed(2)} USDT, x50, тейки 0.3%, розворот замість стопу — підбираю монету`;
+    return `Запущено${sym ? " на " + sym : ""}: баланс ${ACC.equity.toFixed(2)} USDT, x50, тейки 0.3%, розворот замість стопу${sym ? "" : " — підбираю монету"}`;
+  }
+  // change the coin while running (empty = the bot picks)
+  if (what === "full-coin") {
+    const sym = await coinOf(b0.sym); if (sym && sym.err) return sym.err;
+    BG.setParams({ autoCoin: !sym, symbol: sym || "" });
+    const b = BG.view().b;
+    if (b && b.sym === sym) return "Уже торгую " + sym;
+    if (b) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
+    return sym ? `Переходжу на ${sym}${b && b.units.length ? " (спершу закриваю угоди на " + b.sym + ")" : ""}` : "Монету вибиратиму сам";
   }
   if (what === "full-off") { BG.setOn(false); if (BR.params.on) BR.setOn(false); return "Зупинено: нових угод немає; відкриті закриються на тейку або в точці розвороту"; }
   if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }

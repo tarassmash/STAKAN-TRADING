@@ -174,7 +174,7 @@ function create(host) {
         const cs = await candles5m(cd.sym, P.autoTune ? Math.min(1000, Math.round(P.btDays * 288)) : 120);
         const price = cs.length ? cs[cs.length - 1].c : 0, lev = Math.min(P.leverage, Math.floor(Number(s.maxLev || 10)));
         const minNotional = Math.max(Number(s.minNotional || 5) * 1.05, Number(s.minQty || 0) * price);
-        if (P.autoInv && host.equity) { const eq = host.equity(); if (eq > 0) P.investment = +Math.max(0.1, eq * 0.9).toFixed(2); }
+        if (P.autoInv && host.equity) { const eq = host.equity(); if (eq > 0) P.investment = +Math.max(0.1, eq * 0.75).toFixed(2);   /* 25% stays free: Bybit reserves margin for fees */ }
         const units = Math.min(P.maxUnits, Math.floor(P.investment * lev / minNotional) - 1);
         if (units < 1) { results.push({ sym: cd.sym, err: `замало коштів (мін. ордер ${minNotional.toFixed(2)} USDT)` }); continue; }
         const steps = P.scalp ? [+Math.max(P.scalpStep, minStep).toFixed(3)] : P.autoTune ? [...new Set([0.3, 0.5, 0.8, 1.2, P.stepPct].map(x => Math.max(x, minStep)).map(x => +x.toFixed(2)))] : [Math.max(P.stepPct, minStep)];
@@ -197,7 +197,7 @@ function create(host) {
     ST.bt = { at: now(), days: P.btDays, results };
     const best = results.find(x => x.roi != null);
     if (!best) throw new Error(results.map(x => `${x.sym}: ${x.err}`).join("; ") || "немає кандидатів");
-    if (!opt.force && P.autoTune && P.btNeedPlus && best.roi <= 0) throw Object.assign(new Error(`жодна монета не заробила б пробійною сіткою за ${P.btDays} дні (найкраща ${best.sym} ${best.roi}%) — чекаю 15 хв`), { wait: 15 });
+    if (!opt.force && P.autoCoin && P.autoTune && P.btNeedPlus && best.roi <= 0) throw Object.assign(new Error(`жодна монета не заробила б пробійною сіткою за ${P.btDays} дні (найкраща ${best.sym} ${best.roi}%) — чекаю 15 хв`), { wait: 15 });
     return best;
   }
   async function start(opt = {}) {
@@ -254,7 +254,7 @@ function create(host) {
       const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", tp: L(j + B.d), sl: L(j - B.d * P.stopSteps), way };
       B.units.push(u); saveB();
       try { await market(u, "o", u.d > 0 ? "Buy" : "Sell", false); out.push("юніт"); engineLog(`⚡ ${B.sym}: ${why || (way === B.d ? "рух" : "відкат")} через ${fmt(L(j))} — ${u.d > 0 ? "лонг" : "шорт"} ${u.qty}, тейк ${fmt(u.tp)}`, "mute"); }
-      catch (e) { B.units = B.units.filter(z => z !== u); saveB(); setErr("вхід юніта: " + e.message); }
+      catch (e) { B.units = B.units.filter(z => z !== u); saveB(); setErr(e.code === 110007 ? "маржі на ще одну угоду не вистачає — нові відкриються, коли закриються поточні" : "вхід юніта: " + e.message); }
     }
     if (P.runner && way === B.d && !B.units.some(u => u.runner)) {
       const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", runner: true, sl: L(j - B.d * P.trailSteps), tp: null };
@@ -436,7 +436,7 @@ function create(host) {
 
   async function boot() { connectPub(); connectPriv(); if (B) { B.resync = true; } if (B) engineLog(`↺ Пробійна сітка ${B.sym} продовжує роботу після перезапуску`, "mute"); }
   function setOn(on) { P.on = !!on; save(); engineLog(on ? "▶ Пробійна сітка запущена" : "■ Пробійна сітка зупинена: нових юнітів немає (відкриті доходять до тейку/стопу)", on ? "up" : "mute"); if (on) { ST.waitUntil = 0; lsSet("bg.wait", 0); } }
-  async function closeAll() { if (!B) return "Немає пробійної сітки"; if (B.straddle || B.rearm || B.box) { B.straddle = null; B.rearm = false; B.box = null; saveB(); } for (const u of B.units.slice()) { if (u.state === "open") await closeUnit(u, "закрито власником"); } const sym = B.sym; setTimeout(() => { if (B && !B.units.length) { B = null; saveB(); } }, 6000); return `Юніти ${sym} закриваються ринком`; }
+  async function closeAll() { if (!B) return "Немає пробійної сітки"; B.leaving = true; if (B.straddle || B.rearm || B.box) { B.straddle = null; B.rearm = false; B.box = null; saveB(); } for (const u of B.units.slice()) { if (u.state === "open") await closeUnit(u, "закрито власником"); } const sym = B.sym; setTimeout(() => { if (B && !B.units.length) { B = null; saveB(); } }, 6000); return `Юніти ${sym} закриваються ринком`; }
   async function restart() { if (B && B.units.length) return "Спершу закрийте юніти («Закрити все»)"; B = null; saveB(); ST.waitUntil = 0; return "Шукаю нову монету й крок"; }
   function setParams(o) {
     const ch = [];

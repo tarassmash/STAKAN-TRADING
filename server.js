@@ -143,6 +143,9 @@ The engine works in two modes (per coin; "mode": "auto" lets the engine choose p
    inventory cap, quotes shifted against the inventory (mmSkew), the side facing a toxic one-way flow (|score| >= mmToxic) is pulled, inventory
    stop mmStopPct, inventory older than mmMaxHoldSec is flattened at the touch. MM pays only where the spread/tick is wider than 2 maker fees.
 Little free money is fine: the engine sizes every order to the free balance ("avail") and raises a coin's leverage up to its max so that the exchange minimum order still fits; it never refuses to trade for lack of money while the minimum fits.
+FEES ARE THE MAIN ENEMY: a round trip with maker fees costs ~0.04% (taker 0.11%); "gross" vs "fees" per mode shows if fees eat the edge.
+Prefer fewer, stronger trades (higher thr), takes of several fee multiples (takePct), time to reach them (minHoldSec), breakeven stop (beAtPct),
+no taker exits (fastExit false). The engine itself raises the take / widens MM quotes when 10 trades of a coin were positive before fees but negative after.
 Fees: maker and taker in % ("fees"); every result is net of fees. Latency: wsLagMs (market data), orderMs (order round trip).
 Per-coin learning runs by itself (micro threshold up after 3 losses on a coin, MM edge wider after losing cycles, mode per coin by results).
 Use bySymbolMode/byMode/byExit/series to decide: which mode per coin, thresholds, take/stop, edges, coins (autoCoins picks MM coins with wide
@@ -150,7 +153,7 @@ ticks and micro coins with the busiest tapes; send "symbols" only to override, m
 Rules: never remove stops; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
 no trades for a long time -> lower thr or pick busier coins.
 Answer with ONE JSON object only, no text around it:
-{"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,stopPct,maxHoldSec,entryWaitSec,
+{"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,
 maxSpreadTicks,stepIn,cooldownSec,fastExit,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,mmMaxHoldSec,margin,leverage,maxPositions,autoCoins,coinCount,
 minTurnoverM,pickEveryMin,learn}},"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's fast Bybit order-book trading app. The owner speaks (or types) an instruction in Ukrainian,

@@ -49,7 +49,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div class="k"><span>За 24 год</span><b id="day">—</b></div>
     <div class="k"><span>Угод · win</span><b id="all">—</b></div>
     <div class="k"><span>PnL · PF</span><b id="pnl">—</b></div>
-    <div class="k"><span>Комісії</span><b id="fees">—</b></div>
+    <div class="k"><span>До комісій · комісії</span><b id="fees">—</b></div>
     <div class="k"><span>Серія зараз · рекорд</span><b id="ser">—</b></div>
     <div class="k"><span>Затримка дані · ордер</span><b id="lat">—</b></div>
     <div class="k"><span>Сер. утримання</span><b id="hold">—</b></div>
@@ -63,7 +63,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 
   <div class="card">
     <b>Режими: хто заробляє</b>
-    <div class="scroll"><table><thead><tr><th>Режим</th><th>Угод</th><th>Win</th><th>PnL</th><th>PF</th><th>Комісії</th><th>Утримання</th></tr></thead><tbody id="modes"></tbody></table></div>
+    <div class="scroll"><table><thead><tr><th>Режим</th><th>Угод</th><th>Win</th><th>До комісій</th><th>Комісії</th><th>PnL</th><th>PF</th><th>Утримання</th></tr></thead><tbody id="modes"></tbody></table></div>
     <div id="learnLine" class="mute" style="font-size:12px;margin-top:6px"></div>
   </div>
 
@@ -106,8 +106,9 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">Плече<input id="sLev" inputmode="decimal"></label>
         <label class="f">Позицій одночасно<input id="sMax" inputmode="decimal"></label>
         <label class="f">Мікро: поріг сигналу 0.3–0.95<input id="sThr" inputmode="decimal"></label>
-        <label class="f">Мікро: тейк, тіків<input id="sTake" inputmode="decimal"></label>
+        <label class="f">Мікро: тейк, %<input id="sTakeP" inputmode="decimal"></label>
         <label class="f">Мікро: стоп, %<input id="sStop" inputmode="decimal"></label>
+        <label class="f">Мікро: мін. час до виходу, с<input id="sMinHold" inputmode="decimal"></label>
         <label class="f">Мікро: макс. утримання, с<input id="sHold" inputmode="decimal"></label>
         <label class="f">MM: відступ від ціни, %<input id="sEdge" inputmode="decimal"></label>
         <label class="f">MM: розмір котирування, % ліміту<input id="sQty" inputmode="decimal"></label>
@@ -157,7 +158,7 @@ document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => act({ wh
 $("aiBtn").onclick = () => act({ what: S.ai.on ? "ai-off" : "ai-on" });
 $("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "ai-now" }); };
 $("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
-const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sMax", "maxPositions"], ["sThr", "thr"], ["sTake", "takeTicks"], ["sStop", "stopPct"], ["sHold", "maxHoldSec"],
+const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sMax", "maxPositions"], ["sThr", "thr"], ["sTakeP", "takePct"], ["sStop", "stopPct"], ["sMinHold", "minHoldSec"], ["sHold", "maxHoldSec"],
   ["sEdge", "mmEdgePct"], ["sQty", "mmQtyPct"], ["sTox", "mmToxic"], ["sMmStop", "mmStopPct"], ["sCount", "coinCount"], ["sTurn", "minTurnoverM"]];
 $("sSave").onclick = async () => {
   const o = {};
@@ -255,7 +256,7 @@ function paint() {
   $("day").innerHTML = `${sgn(D.pnl, 3)} · ${D.n || 0}`;
   $("all").textContent = (ST.n || 0) + (ST.win != null ? " · " + ST.win + "%" : "");
   $("pnl").innerHTML = `${sgn(ST.pnl, 3)} · ${ST.pf ?? "—"}`;
-  $("fees").textContent = f(ST.fees, 3);
+  $("fees").innerHTML = `${sgn(ST.gross, 3)} · <span class="down">−${f(ST.fees, 3)}</span>`;
   const SR = X.series || {};
   $("ser").innerHTML = (SR.wins ? `<span class="up">${SR.wins}+</span>` : SR.losses ? `<span class="down">${SR.losses}−</span>` : "—") + ` · ${SR.bestWins || 0}`;
   $("lat").textContent = `${X.lat.wsLagMs} · ${X.lat.orderMs} мс`;
@@ -268,11 +269,11 @@ function paint() {
     return `<tr><td><b>${esc(k.sym)}</b></td><td>${MODE[k.mode] || "—"}</td><td>${F.spreadTicks ?? "—"}</td><td>${k.tickPct ?? "—"}</td><td>${sgn(F.ofi)}</td><td>${sgn(F.microN)}</td><td>${sgn(F.imb)}</td><td>${sgn(F.tfi)}</td><td><b>${sgn(F.score)}</b> <span class="mute">/±${k.thr}</span></td><td>${pos}</td><td>${ords}</td><td class="mute">${esc(k.why || "")}</td></tr>`;
   }).join("") || '<tr><td colspan="12" class="mute">Чекаю дані стакану…</td></tr>';
   const BM = X.byMode || {};
-  $("modes").innerHTML = [["micro", "⚡ Мікроструктура"], ["mm", "🏦 Маркет-мейкінг"]].map(([k, n]) => { const s = BM[k] || {}; return `<tr><td>${n}</td><td>${s.n || 0}</td><td>${s.win ?? "—"}${s.win != null ? "%" : ""}</td><td>${sgn(s.pnl, 3)}</td><td>${s.pf ?? "—"}</td><td>${f(s.fees, 3)}</td><td>${s.avgHoldSec ?? "—"} с</td></tr>`; }).join("");
+  $("modes").innerHTML = [["micro", "⚡ Мікроструктура"], ["mm", "🏦 Маркет-мейкінг"]].map(([k, n]) => { const s = BM[k] || {}; return `<tr><td>${n}</td><td>${s.n || 0}</td><td>${s.win ?? "—"}${s.win != null ? "%" : ""}</td><td>${sgn(s.gross, 3)}</td><td class="down">−${f(s.fees, 3)}</td><td>${sgn(s.pnl, 3)}</td><td>${s.pf ?? "—"}</td><td>${s.avgHoldSec ?? "—"} с</td></tr>`; }).join("");
   const L = X.learn || {};
   const th = Object.entries(L.thr || {}).map(([s, v]) => `${s} ${v}`), ed = Object.entries(L.edge || {}).filter(([, v]) => v !== 1).map(([s, v]) => `${s} ×${v}`);
   $("learnLine").textContent = `Самонавчання ${P.learn ? "увімкнено" : "вимкнено"}: 3 мікро-угоди в мінусі на монеті — поріг вище; збиткові MM-цикли — котирування ширше; режим для монети — за результатами.`
-    + (th.length ? " Пороги: " + th.join(", ") + "." : "") + (ed.length ? " Ширина MM: " + ed.join(", ") + "." : "") + ` Комісії: maker ${X.fees.maker}%, taker ${X.fees.taker}%.`;
+    + (th.length ? " Пороги: " + th.join(", ") + "." : "") + (ed.length ? " Ширина MM: " + ed.join(", ") + "." : "") + (Object.keys(L.take || {}).length ? " Тейк збільшено: " + Object.entries(L.take).map(([s, v]) => `${s} ×${v}`).join(", ") + "." : "") + ` Комісії${X.fees.real ? " вашого рахунку" : ""}: maker ${X.fees.maker}%, taker ${X.fees.taker}%.`;
   // AI
   const b = $("aiBtn"); b.textContent = AI.on ? "🧠 AI увімкнено — вимкнути" : "🧠 Увімкнути AI"; b.style.background = AI.on ? "#7c3aed" : ""; b.style.color = AI.on ? "#fff" : ""; b.disabled = BUSY;
   const next = Math.max(0, Math.round((AI.last + AI.every * 60000 - Date.now()) / 60000));

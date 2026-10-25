@@ -34,7 +34,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 
   <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
 
-  <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="grid">🧱 Сітка</button><button data-tab="bg">🚀 Пробійна сітка</button></div>
+  <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="grid">🧱 Сітка</button><button data-tab="bg">🚀 Пробійна сітка</button><button data-tab="brain">🧠 Авто</button></div>
   <div id="tabGrid">
 
   <div class="card">
@@ -173,6 +173,34 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div class="card"><b>Угоди пробійної сітки</b><div class="log" id="bTrades"></div></div>
   </div>
 
+  <div id="tabBrain" style="display:none">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div><span class="dot" id="rDot"></span><b id="rStatus">Автоперемикач</b><div class="mute" style="font-size:13px" id="rStatus2"></div></div>
+      </div>
+      <button class="big go" id="rMain" style="margin-top:12px">▶ Увімкнути автоперемикач</button>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="rCheck">🔍 Перевірити ринок зараз</button><span id="rOut" class="mute" style="font-size:13px;align-self:center"></span></div>
+      <div class="mute" style="font-size:13px;margin-top:10px">Сам визначає, який зараз ринок на кожній монеті, і вмикає потрібний бот:
+        <b>флет</b> → 🧱 звичайна сітка · <b>тренд</b> → 🚀 пробійна сітка в бік тренду · <b>стиснення</b> → ↕ «обидва боки» · <b>хаос / пилка</b> → нічого не відкриває, чекає.
+        Монета береться, лише якщо стратегія дала плюс на 3 днях історії. Сітка міняється тільки після 2 перевірок поспіль не-флету; відкриті угоди пробійної сітки не перериваються.</div>
+    </div>
+    <div class="card"><b>Що вирішено</b> <span class="mute" id="rWhen" style="font-size:12px"></span><div id="rActs" style="font-size:13px;margin-top:6px"></div></div>
+    <div class="card"><b>Ринок по монетах</b> <span class="mute" id="rCounts" style="font-size:12px"></span>
+      <div class="scroll"><table><thead><tr><th>Монета</th><th>Режим</th><th>Ефект.</th><th>Нахил 6г</th><th>Волат.</th><th>Діап. 6г</th><th>Історія</th></tr></thead><tbody id="rCoins"></tbody></table></div>
+      <div class="mute" style="font-size:12px;margin-top:6px">Ефект. — наскільки рух прямий (1 = рівна лінія, 0 = туди-сюди). Волат. — коливання останніх 2 год відносно доби (менше 0.6 = стиснення). Історія — результат потрібної стратегії на 3 днях.</div>
+    </div>
+    <div class="card"><details><summary>Налаштування автоперемикача</summary>
+      <div class="grid" style="margin-top:10px">
+        <label class="f">Перевіряти кожні, хв<input id="rEvery" inputmode="decimal"></label>
+        <label class="f">Монет у скані<input id="rCoinsN" inputmode="decimal"></label>
+        <label class="f">Мін. обіг за добу, млн $<input id="rTurn" inputmode="decimal"></label>
+      </div>
+      <div style="margin-top:8px"><button class="btn" id="rSave">Зберегти</button> <span id="rSOut" class="mute" style="font-size:13px"></span></div>
+      <div class="mute" style="font-size:12px;margin-top:8px">Розмір угод, плече, стопи — беруться з налаштувань вкладок «Сітка» і «Пробійна сітка».</div>
+    </details></div>
+    <div class="card"><b>Журнал рішень</b><div class="log" id="rLog"></div></div>
+  </div>
+
   <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 </div>
 <script>
@@ -275,7 +303,7 @@ function paint() {
 }
 // ---- tabs ----
 let TAB = (() => { try { return localStorage.getItem("tab") || "grid"; } catch (e) { return "grid"; } })();
-function showTab() { $("tabGrid").style.display = TAB === "grid" ? "" : "none"; $("tabBg").style.display = TAB === "bg" ? "" : "none"; document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === TAB)); }
+function showTab() { $("tabGrid").style.display = TAB === "grid" ? "" : "none"; $("tabBg").style.display = TAB === "bg" ? "" : "none"; $("tabBrain").style.display = TAB === "brain" ? "" : "none"; document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === TAB)); }
 document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { TAB = b.dataset.tab; try { localStorage.setItem("tab", TAB); } catch (e) { /* private mode */ } showTab(); });
 showTab();
 // ---- breakout grid ----
@@ -326,7 +354,27 @@ function paintBg() {
     : `<tr><td><b>${esc(r.sym)}</b>${i === 0 ? " ✓" : ""}</td><td class="${r.dir.d > 0 ? "up" : r.dir.d < 0 ? "down" : "mute"}">${r.dir.d > 0 ? "▲" : r.dir.d < 0 ? "▼" : "—"} ${r.dir.diff ?? ""}%</td><td>${r.step}%</td><td>${r.units}</td><td>${sgn(r.roi, 2)}%</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.flips}</td></tr>`).join("") : '<tr><td colspan="8" class="mute">Запуститься при старті</td></tr>';
   $("bTrades").innerHTML = X.trades.map(t => `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.runner ? "🏃 бігун" : "⚡ юніт"} ${t.d > 0 ? "лонг" : "шорт"} ${pr(t.e)} → ${pr(t.x)} · ${esc(t.how)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } };
+// ---- regime switcher ----
+let RFILLED = false;
+const RNAME = { trend: "📈 тренд", flat: "↔ флет", squeeze: "🗜 стиснення", chaos: "🌪 хаос" };
+$("rMain").onclick = () => S.brain.params.on ? act({ what: "brain-off" }, "Вимкнути автоперемикач? Боти лишаться з поточними монетами й угодами.") : act({ what: "brain-on" }, `Увімкнути автоперемикач${S.env === "mainnet" ? " на реальному рахунку" : ""}? Він сам запускатиме й закриватиме сітку та пробійну сітку залежно від ринку.`);
+$("rCheck").onclick = async () => { $("rOut").textContent = "аналізую ~30 монет…"; $("rOut").textContent = await act({ what: "brain-check" }); };
+$("rSave").onclick = async () => { $("rSOut").textContent = await act({ what: "brain-settings", o: { everyMin: Number($("rEvery").value), coins: Number($("rCoinsN").value), minTurnoverM: Number($("rTurn").value) } }); RFILLED = false; };
+function paintBrain() {
+  const R = S.brain; if (!R) return; const P = R.params, L = R.last;
+  if (!RFILLED) { $("rEvery").value = P.everyMin; $("rCoinsN").value = P.coins; $("rTurn").value = P.minTurnoverM; RFILLED = true; }
+  $("rDot").className = "dot" + (P.on ? " on" : "");
+  $("rStatus").textContent = R.busy ? "Аналізую ринок…" : P.on ? "Автоперемикач працює" : "Автоперемикач вимкнено";
+  $("rStatus2").textContent = P.on ? `перевірка кожні ${P.everyMin} хв${R.next != null ? ` · наступна через ${R.next} хв` : ""}` : "боти працюють із налаштуваннями своїх вкладок";
+  const m = $("rMain"); m.textContent = BUSY ? "…" : P.on ? "■ Вимкнути автоперемикач" : "▶ Увімкнути автоперемикач"; m.className = "big " + (P.on ? "stop" : "go"); m.disabled = BUSY;
+  $("rCheck").disabled = BUSY || R.busy;
+  $("rWhen").textContent = L ? `· ${new Date(L.at).toLocaleString()} (${esc(L.why)})` : "";
+  $("rActs").innerHTML = L ? (L.acts.length ? L.acts.map(a => `<div style="padding:4px 0;border-bottom:1px solid var(--line)">${esc(a)}</div>`).join("") : '<span class="mute">без змін</span>') : '<span class="mute">Ще не було аналізу — натисніть «Перевірити ринок зараз»</span>';
+  $("rCounts").textContent = L ? `· тренд ${L.counts.trend} · флет ${L.counts.flat} · стиснення ${L.counts.squeeze} · хаос ${L.counts.chaos}` : "";
+  $("rCoins").innerHTML = L ? L.coins.map(c => `<tr title="${esc(c.why)}"><td><b>${esc(c.sym)}</b></td><td class="${c.regime === "trend" ? (c.dir > 0 ? "up" : "down") : c.regime === "chaos" ? "mute" : ""}">${RNAME[c.regime] || c.regime}${c.regime === "trend" ? (c.dir > 0 ? " ▲" : " ▼") : ""}</td><td>${f(c.er, 2)}</td><td>${sgn(c.slope, 2)}%</td><td>${f(c.atrRatio, 2)}×</td><td>${f(c.range6, 1)}%</td><td>${c.test ? sgn(c.test.roi, 2) + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">—</td></tr>';
+  $("rLog").innerHTML = R.log.map(l => `<div>${new Date(l.at).toLocaleString()} · ${esc(l.t)}</div>`).join("") || "<div>Ще немає</div>";
+}
+const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);
 </script>
 </body>

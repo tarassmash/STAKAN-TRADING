@@ -119,8 +119,12 @@ const BG = require("./bgrid").create({
   busySyms: () => { const g = GR.view().grid; return g ? [g.sym] : []; },
 });
 
+// ---------------- the regime switcher ("brain" over both bots) ----------------
+const BR = require("./brain").create({ bx, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
+  makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined });
+
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
 async function act(b) {
   const what = String(b.what || "");
@@ -142,6 +146,10 @@ async function act(b) {
   if (what === "bg-both") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.straddleNow(Number(b.pct) || 0, String(b.sym || "").trim()); }
   if (what === "bg-enter" && (b.dir === 1 || b.dir === -1)) { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.enterNow(b.dir, String(b.sym || "").trim()); }
   if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
+  if (what === "brain-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BR.setOn(true); return "Автоперемикач увімкнено — перший аналіз іде"; }
+  if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
+  if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }
+  if (what === "brain-settings" && b.o && typeof b.o === "object") { const ch = BR.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   return "невідома дія";
 }
 
@@ -187,6 +195,6 @@ http.createServer(async (req, res) => {
     lsSet("autostarted", true);
     addLog("AUTOSTART: перший запуск сервера — вмикаю грід-бота", "up");
     GR.setOn(true);
-  } else if (GR.params.on || BG.params.on) addLog("Сервер перезапущено — боти продовжують роботу", "up");
+  } else if (GR.params.on || BG.params.on || BR.params.on) addLog("Сервер перезапущено — боти продовжують роботу", "up");
   else addLog("Сервер запущено. Натисніть «▶ Запустити» на сторінці.", "mute");
 })();

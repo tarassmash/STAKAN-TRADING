@@ -159,3 +159,35 @@ function simulateB2(c, o) {
   return { roi: +(net / investment * 100).toFixed(2), wins, losses, flips };
 }
 module.exports.simulateB2 = simulateB2;
+
+// market regime of a coin from 5-minute candles (oldest first, ≥ 288 = 24 h) and 1-hour closes:
+//  er        efficiency ratio over 6 h: |net move| / sum of |moves| (1 = straight line, 0 = noise)
+//  slope     EMA20 slope on 1 h over 6 h, %
+//  atrRatio  average 5-min range of the last 2 h vs the last 24 h (< 0.6 = squeezing before a move)
+//  cross     how many times the price crossed its 6-hour average in the last 6 h
+//  range6    high-low of the last 6 h, %
+// -> "trend" (dir ±1) | "flat" | "squeeze" | "chaos"
+function regimeOf(c5, closes1h, o = {}) {
+  const thr = o.trendPct || 0.8;
+  if (!c5 || c5.length < 200) return { regime: "chaos", why: "мало історії" };
+  const n = c5.length, last6 = c5.slice(-72), last2 = c5.slice(-24);
+  const cl = last6.map(k => k.c);
+  let path = 0; for (let i = 1; i < cl.length; i++) path += Math.abs(cl[i] - cl[i - 1]);
+  const er = path ? Math.abs(cl[cl.length - 1] - cl[0]) / path : 0;
+  const atr = (a) => a.reduce((s, k) => s + (k.h - k.l) / k.c, 0) / a.length * 100;
+  const atr2 = atr(last2), atr24 = atr(c5.slice(-288)), atrRatio = atr24 ? atr2 / atr24 : 1;
+  const sma = cl.reduce((s, x) => s + x, 0) / cl.length;
+  let cross = 0; for (let i = 1; i < cl.length; i++) if ((cl[i] - sma) * (cl[i - 1] - sma) < 0) cross++;
+  const hi = Math.max(...last6.map(k => k.h)), lo = Math.min(...last6.map(k => k.l)), range6 = (hi / lo - 1) * 100;
+  const t = trendOf(closes1h || [], thr);
+  const m = { er: +er.toFixed(2), slope: t.slope, atr2: +atr2.toFixed(3), atrRatio: +atrRatio.toFixed(2), cross, range6: +range6.toFixed(2), move6: +((cl[cl.length - 1] / cl[0] - 1) * 100).toFixed(2) };
+  // order matters: a clean directional move first, then a squeeze, then a tradable range; everything else is chaos
+  if (er >= 0.3 && Math.abs(t.slope) >= thr && Math.sign(m.move6) === Math.sign(t.slope))
+    return Object.assign(m, { regime: "trend", dir: Math.sign(t.slope), why: `тренд ${t.slope > 0 ? "вгору" : "вниз"}: ефективність руху ${m.er}, нахил ${t.slope}% за 6 год` });
+  if (atrRatio <= 0.6 && er < 0.3 && range6 < 4)
+    return Object.assign(m, { regime: "squeeze", why: `стиснення: волатильність ${Math.round(atrRatio * 100)}% від добової, діапазон ${m.range6}% — чекаю вибуху` });
+  if (er < 0.25 && cross >= 3 && range6 >= 1.5 && range6 <= 15 && atrRatio <= 1.6)
+    return Object.assign(m, { regime: "flat", why: `флет: ${cross} перетинів середньої за 6 год, діапазон ${m.range6}%, ефективність ${m.er}` });
+  return Object.assign(m, { regime: "chaos", why: atrRatio > 1.6 ? `хаос: волатильність ${atrRatio.toFixed(1)}× від добової` : range6 < 1.5 ? `мертва: діапазон лише ${m.range6}%` : `пилка: ефективність ${m.er}, перетинів ${cross}` });
+}
+module.exports.regimeOf = regimeOf;

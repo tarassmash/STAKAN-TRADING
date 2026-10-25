@@ -30,7 +30,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 <body>
 <div class="wrap">
   <h1>🤖 АВТО-БОТ</h1>
-  <div class="mute" style="font-size:13px">Одна кнопка: бот сам вибирає монети, стратегію, плече й розмір угод і бере мікро-рухи як тейки. Торгує сервер 24/7, сторінку можна закрити.</div>
+  <div class="mute" style="font-size:13px">Пробій-бот: іде за ціною в будь-який бік, тейки по 0.3%, замість стопу — розворот. Торгує сервер 24/7, сторінку можна закрити.</div>
 
   <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
 
@@ -40,7 +40,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
   </div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
   <details id="manual" style="margin-top:18px"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
-  <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="grid">🧱 Сітка</button><button data-tab="bg">🚀 Пробійна сітка</button><button data-tab="brain">🧠 Авто</button></div>
+  <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="bg">🚀 Пробійна сітка — налаштування</button></div>
   <div id="tabGrid">
 
   <div class="card">
@@ -308,7 +308,7 @@ function paint() {
   $("log").innerHTML = (S.events || []).slice(0, 80).map(e => `<div class="${e[2] === "down" ? "down" : e[2] === "up" ? "up" : ""}">${new Date(e[0]).toLocaleTimeString()} · ${esc(e[1])}</div>`).join("");
 }
 // ---- tabs ----
-let TAB = (() => { try { return localStorage.getItem("tab") || "grid"; } catch (e) { return "grid"; } })();
+let TAB = "bg";
 function showTab() { $("tabGrid").style.display = TAB === "grid" ? "" : "none"; $("tabBg").style.display = TAB === "bg" ? "" : "none"; $("tabBrain").style.display = TAB === "brain" ? "" : "none"; document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === TAB)); }
 document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { TAB = b.dataset.tab; try { localStorage.setItem("tab", TAB); } catch (e) { /* private mode */ } showTab(); });
 showTab();
@@ -380,19 +380,20 @@ function paintBrain() {
   $("rCoins").innerHTML = L ? L.coins.map(c => `<tr title="${esc(c.why)}"><td><b>${esc(c.sym)}</b></td><td class="${c.regime === "trend" ? (c.dir > 0 ? "up" : "down") : c.regime === "chaos" ? "mute" : ""}">${RNAME[c.regime] || c.regime}${c.regime === "trend" ? (c.dir > 0 ? " ▲" : " ▼") : ""}</td><td>${f(c.er, 2)}</td><td>${sgn(c.slope, 2)}%</td><td>${f(c.atrRatio, 2)}×</td><td>${f(c.range6, 1)}%</td><td>${c.test ? sgn(c.test.roi, 2) + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">—</td></tr>';
   $("rLog").innerHTML = R.log.map(l => `<div>${new Date(l.at).toLocaleString()} · ${esc(l.t)}</div>`).join("") || "<div>Ще немає</div>";
 }
-$("fMain").onclick = () => S.brain.params.full ? act({ what: "full-off" }, "Зупинити бота? Нових угод не буде, сітка закриється, відкриті угоди пробійної сітки дійдуть до тейку/стопу.")
-  : act({ what: "full-on" }, `Запустити бота${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nВін усе робить сам: монети, стратегія, плече до x50, мікро-тейки, розмір від балансу.\nРизик високий: при x50 рух на 2% проти позиції — ліквідація, тому стопи короткі.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
+const FULL_ON = () => !!(S.bg.params.on && S.bg.params.flip);
+$("fMain").onclick = () => FULL_ON() ? act({ what: "full-off" }, "Зупинити бота? Нових угод не буде; відкриті закриються на тейку або в точці розвороту.")
+  : act({ what: "full-on" }, `Запустити бота${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nВін сам вибирає монету, іде за ціною в будь-який бік, бере тейки по 0.3%, а замість стопу розвертається. Плече до x50, розмір — від балансу.\nРизик: у «пилці» (дрібні смикання туди-сюди) розвороти дають збитки.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
 function paintFull() {
-  const R = S.brain; if (!R) return; const on = !!R.params.full, m = $("fMain");
+  const on = FULL_ON(), m = $("fMain"), X = S.bg, b = X.b, eq = S.acc.equity;
   m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.disabled = BUSY;
   m.style.background = on ? "var(--down)" : "var(--up)"; m.style.color = on ? "#fff" : "#06281b";
-  const day = (S.gr.stats ? S.gr.stats.day : 0) + (S.bg.stats ? S.bg.stats.day : 0), dayN = (S.gr.stats ? S.gr.stats.dayCycles : 0) + (S.bg.stats ? S.bg.stats.dayN : 0);
-  const g = S.gr.grid, b = S.bg.b;
-  $("fInfo").innerHTML = on
-    ? `<div style="display:flex;gap:18px;margin-bottom:8px"><div class="k"><b>${f(R.equity, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(day, 4)}</b><span>за добу · ${dayN} тейків</span></div></div><span class="dot on"></span><b>Працює сам.</b> Баланс <b>${f(R.equity, 2)}</b> USDT · у роботі до ${f(R.budget, 2)} (10% запас) · ринок перевіряю кожні ${R.params.everyMin} хв${R.next != null ? `, наступна через ${R.next} хв` : ""}<br>`
-      + `🧱 Сітка: ${g ? `<b>${esc(g.sym)}</b> · ${f(S.gr.params.investment, 2)} USDT × x${g.lev} · крок ${g.stepPct}% · ${sgn(g.profit, 4)}` : '<span class="mute">чекає флету</span>'}<br>`
-      + `🚀 Пробійна: ${b ? `<b>${esc(b.sym)}</b> · ${f(S.bg.params.investment, 2)} USDT × x${b.lev} · тейки ${b.stepPct}% · ${b.straddle ? "↕ чекає пробою" : b.d > 0 ? '<span class="up">▲ лонги</span>' : b.d < 0 ? '<span class="down">▼ шорти</span>' : "—"} · юнітів ${b.units.length} · ${sgn(b.profit, 4)}` : '<span class="mute">чекає тренду чи стиснення</span>'}`
-    : (R.equity ? `<div class="k" style="margin-bottom:8px"><b>${f(R.equity, 2)}</b><span>баланс, USDT</span></div>` : "") + '<span class="mute">Натисніть — і бот усе робить сам: щоразу вибирає монети, визначає ринок (флет / тренд / стиснення / хаос), запускає потрібну стратегію з плечем до x50 і бере мікро-рухи як тейки (завжди більші за комісії). Розмір угод рахується від вашого балансу, тож працює навіть з 1 USDT (мінімальний ордер Bybit ≈ 5 USDT — при x50 це 0.1 USDT маржі). Ризик високий: при x50 рух проти позиції на 2% = ліквідація, тому стопи короткі.</span>';
+  const kpi = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px"><div class="k"><b>${f(eq, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div></div>`;
+  if (!on) { $("fInfo").innerHTML = kpi + '<span class="mute">Натисніть — і бот усе робить сам: вибирає монету, що рухається, іде за ціною куди б вона не пішла, кожен рух на 0.3% забирає тейком (чистими після комісій), а замість стопу — розворот: якщо ціна відкотилась на кілька рівнів від найкращої точки, закриває все і йде в інший бік. Плече до x50, розмір від балансу — працює навіть з 1 USDT.</span>' + (b && b.units.length ? `<div style="margin-top:6px">Відкриті угоди: ${b.units.length} на ${esc(b.sym)} (закриються на тейку або розвороті)</div>` : ""); return; }
+  $("fInfo").innerHTML = kpi + (b ? `<span class="dot on"></span><b>${esc(b.sym)}</b> · ${b.d > 0 ? '<b class="up">▲ ЛОНГ</b>' : '<b class="down">▼ ШОРТ</b>'} · ціна ${pr(X.price)}<br>`
+      + `тейки ${b.stepPct}% · розворот при відкаті ${b.flipSteps} рівні (${(b.flipSteps * b.stepPct).toFixed(2)}%)${b.turnPx ? ` → у ${b.d > 0 ? "шорт нижче" : "лонг вище"} <b>${pr(b.turnPx)}</b>` : ""}<br>`
+      + `угод відкрито: ${b.units.length} · тейків ${b.wins} · розворотів ${b.flips} · на цій монеті ${sgn(b.profit, 4)} · x${b.lev}${b.leaving ? ' · <span style="color:var(--gold)">пилка — переходжу на іншу монету</span>' : ""}`
+    : `<span class="dot on"></span>${X.waitIn != null ? `Монет із плюсом на історії зараз немає — нова перевірка через ${Math.ceil(X.waitIn / 60)} хв` : "Підбираю монету…"}`)
+    + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
 }
 const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);

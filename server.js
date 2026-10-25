@@ -117,6 +117,7 @@ const BG = require("./bgrid").create({
   testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
   flush: () => { dirty = true; dump(); },
   busySyms: () => { const g = GR.view().grid; return g ? [g.sym] : []; },
+  equity: () => ACC.equity || 0,
 });
 
 // ---------------- the regime switcher ("brain" over both bots) ----------------
@@ -147,8 +148,20 @@ async function act(b) {
   if (what === "bg-enter" && (b.dir === 1 || b.dir === -1)) { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.enterNow(b.dir, String(b.sym || "").trim()); }
   if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   if (what === "brain-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BR.setOn(true); return "Автоперемикач увімкнено — перший аналіз іде"; }
-  if (what === "full-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err; if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок"; BR.setFull(true); return `Повний автомат увімкнено: баланс ${ACC.equity.toFixed(2)} USDT, плече до x50, мікро-тейки — перший аналіз іде`; }
-  if (what === "full-off") { await BR.setFull(false); return "Зупинено: нових угод немає"; }
+  // ONE BUTTON: only the breakout bot in the flip mode (follows the price, a pullback turns it around instead of a stop, takes 0.3%), size from the balance, x50
+  if (what === "full-on") {
+    if (!HAS_KEYS) return "Додайте ключі Bybit";
+    await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err;
+    if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок";
+    if (BR.params.on) BR.setOn(false);
+    if (GR.params.on || GR.view().grid) { GR.setOn(false); if (GR.view().grid) await GR.closeNow(); }
+    BG.setParams({ flip: true, flipSteps: 0, scalp: true, scalpStep: 0.3, leverage: 50, autoCoin: true, autoTune: true, btNeedPlus: true, runner: true, autoInv: true });
+    const b = BG.view().b;
+    if (b && !b.flip) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
+    BG.setOn(true);
+    return `Запущено: баланс ${ACC.equity.toFixed(2)} USDT, x50, тейки 0.3%, розворот замість стопу — підбираю монету`;
+  }
+  if (what === "full-off") { BG.setOn(false); if (BR.params.on) BR.setOn(false); return "Зупинено: нових угод немає; відкриті закриються на тейку або в точці розвороту"; }
   if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
   if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }
   if (what === "brain-settings" && b.o && typeof b.o === "object") { const ch = BR.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }

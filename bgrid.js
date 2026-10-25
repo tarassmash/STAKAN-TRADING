@@ -25,9 +25,13 @@ const DEFAULTS = {
   straddleRearm: true,     // after the breakout trades are closed the triggers are set again around the new price
   scalp: false,            // ⚡ super scalping: takes of scalpStep % on every micro move (the step is fixed, the coin is still chosen on history)
   scalpStep: 0.3,
+  flip: false,             // 🔁 no stops, no EMA: the price sets the direction; a pullback of flipSteps levels from the best price closes all and turns around
+  flipSteps: 0,            // 0 = chosen per coin on history (2-5 levels)
+  sawFlips: 4,             // this many turns within an hour = a saw -> leave the coin
+  autoInv: false,          // the size = 90% of the balance (taken at every new start)
 };
-const NUM = { straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
+const NUM = { flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const BOOL = ["flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -156,7 +160,7 @@ function create(host) {
     else if (P.autoCoin) {
       const r2 = await bx("/v5/market/tickers", { query: { category: "linear" } });
       const busy = host.busySyms ? host.busySyms() : [];
-      cands = (r2.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !busy.includes(x.symbol))
+      cands = (r2.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !busy.includes(x.symbol) && !(ST.cool && ST.cool[x.symbol] > now()))
         .map(x => ({ sym: x.symbol, range: (Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100, chg: Math.abs(Number(x.price24hPcnt || 0) * 100) }))
         .filter(x => x.range >= 3).sort((a, b) => (b.chg + b.range / 2) - (a.chg + a.range / 2)).slice(0, P.autoTune ? 6 : 1);   // movers: a breakout grid needs movement
     } else if (P.symbol) cands = [{ sym: P.symbol }];
@@ -170,15 +174,23 @@ function create(host) {
         const cs = await candles5m(cd.sym, P.autoTune ? Math.min(1000, Math.round(P.btDays * 288)) : 120);
         const price = cs.length ? cs[cs.length - 1].c : 0, lev = Math.min(P.leverage, Math.floor(Number(s.maxLev || 10)));
         const minNotional = Math.max(Number(s.minNotional || 5) * 1.05, Number(s.minQty || 0) * price);
+        if (P.autoInv && host.equity) { const eq = host.equity(); if (eq > 0) P.investment = +Math.max(0.1, eq * 0.9).toFixed(2); }
         const units = Math.min(P.maxUnits, Math.floor(P.investment * lev / minNotional) - 1);
         if (units < 1) { results.push({ sym: cd.sym, err: `замало коштів (мін. ордер ${minNotional.toFixed(2)} USDT)` }); continue; }
         const steps = P.scalp ? [+Math.max(P.scalpStep, minStep).toFixed(3)] : P.autoTune ? [...new Set([0.3, 0.5, 0.8, 1.2, P.stepPct].map(x => Math.max(x, minStep)).map(x => +x.toFixed(2)))] : [Math.max(P.stepPct, minStep)];
         let best = null;
-        for (const st of steps) {
+        if (P.flip) {   // the take is fixed (scalpStep, at least 2 × fees); the turn distance is chosen on history
+          const st = +Math.max(P.scalpStep, 2 * (taker + maker)).toFixed(3);
+          for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [2, 3, 4, 5]) {
+            const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { stepPct: st, flipSteps: fs, maxUnits: units, investment: P.investment, lev, maker, taker, runner: P.runner }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
+            if (!best || res.roi > best.roi) best = Object.assign({ st, fs }, res);
+          }
+        }
+        for (const st of P.flip ? [] : steps) {
           const res = cs.length > 120 && P.autoTune ? BT.simulateB2(cs, { stepPct: st, maxUnits: units, investment: P.investment, lev, maker, taker, stopSteps: P.stopSteps, runner: P.runner, trailSteps: P.trailSteps, band: P.band / 100 }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
           if (!best || res.roi > best.roi) best = Object.assign({ st }, res);
         }
-        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
+        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, fs: best.fs || 0, units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
       } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
     }
     results.sort((a, b) => (b.roi ?? -1e9) - (a.roi ?? -1e9));
@@ -199,12 +211,20 @@ function create(host) {
     const qty = Math.max(qa(P.investment * lev / (pl.units + 1) / ST.price, false), qa(Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * ST.price) / ST.price, true));
     B = { scalp: P.scalp, fee: pl.fee, id: now().toString(36).slice(-5), sym: pl.sym, stepPct: pl.step, maxUnits: pl.units, qty, lev, anchor: ST.price, last: 0, d: 0, units: [], nextK: 1, profit: 0, wins: 0, losses: 0, startedAt: now(), idleAt: now(), bt: { roi: pl.roi, wins: pl.wins, losses: pl.losses, flips: pl.flips, days: P.btDays, tested: pl.tested } };
     B.last = idxOf(ST.price);
+    if (P.flip) {   // the first direction: the EMA if it has one, else the last hour's move
+      const cs = await candles5m(pl.sym, 200), dd = dirOf(cs), h = cs.length > 12 ? cs[cs.length - 1].c - cs[cs.length - 13].c : 1;
+      Object.assign(B, { flip: true, flipSteps: pl.fs || 3, d: dd.d || (h < 0 ? -1 : 1), ext: ST.price, flipAt: [] });
+    }
     saveB(); subPub();
+    if (B.flip) {
+      engineLog(`🔁 Пробій-розворот ${pl.sym}: тейки ${pl.step}% (комісії ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}%), розворот при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * pl.step).toFixed(2)}%), до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, розворотів ${pl.flips}` : ""} · старт ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, "up");
+      await openAt(B.last, B.d, "старт"); return;
+    }
     engineLog(`🚀 ${P.scalp ? "⚡ Суперскальпінг" : "Пробійна сітка"} ${pl.sym}: ${P.scalp ? `тейки ${pl.step}% (комісії за коло ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}% з тейка)` : `крок ${pl.step}%`}, до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
     await updateDir(true);
   }
   async function updateDir(force) {
-    if (!B || (!force && now() - ST.dirAt < 60000)) return;
+    if (!B || B.flip || (!force && now() - ST.dirAt < 60000)) return;
     ST.dirAt = now();
     try {
       const dd = dirOf(await candles5m(B.sym, 200));
@@ -321,8 +341,28 @@ function create(host) {
       // both sides again: the breakout trades are done -> new triggers around the price
       if (B.rearm && B.manual && !B.units.length && B.wasBusy && P.on) { B.wasBusy = false; B.box = null; arm(); return; }
       if (B.units.length) B.wasBusy = true;   // after a restart: continue from the price now (no catch-up of missed levels)
-      // stops and the runner's trailing stop
-      for (const u of B.units.slice()) {
+      if (B.flip) {
+        // units left from the old direction (their entry was still in flight at the turn) are closed
+        for (const u of B.units.slice()) if (u.d !== B.d && u.state === "open" && !u.closing) await closeUnit(u, "розворот");
+        B.ext = B.d > 0 ? Math.max(B.ext || x, x) : Math.min(B.ext || x, x);
+        const back = Math.pow(r(), B.flipSteps);
+        if ((B.d > 0 && x <= B.ext / back) || (B.d < 0 && x >= B.ext * back)) {
+          const nd = -B.d, was = B.ext;
+          for (const u of B.units.slice()) await closeUnit(u, "розворот");
+          B.d = nd; B.ext = x; B.last = idxOf(x); B.flips = (B.flips || 0) + 1;
+          B.flipAt = (B.flipAt || []).filter(t => now() - t < 3600e3).concat(now()); saveB();
+          engineLog(`🔁 ${B.sym}: відкат ${B.flipSteps} рівні від ${fmt(was)} — розворот у ${nd > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} (${fmt(x)})`, nd > 0 ? "up" : "down");
+          if (P.autoCoin && B.flipAt.length >= P.sawFlips) {   // a saw: the price twitches less than the turn distance -> another coin
+            engineLog(`🪚 ${B.sym}: ${B.flipAt.length} розворотів за годину — це пилка, закриваю і шукаю іншу монету`, "gold-t");
+            B.leaving = true; saveB(); ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3;
+            return;
+          }
+          if (P.on) await openAt(B.last, nd, "розворот");
+          return;
+        }
+      }
+      // stops and the runner's trailing stop (the flip mode has none: the turn replaces them)
+      for (const u of B.flip ? [] : B.units.slice()) {
         if (u.state !== "open" || u.closing) continue;
         if (u.runner) {
           u.pk = u.d > 0 ? Math.max(u.pk || u.e, x) : Math.min(u.pk || u.e, x);
@@ -348,9 +388,9 @@ function create(host) {
         for (let j = B.last + 1; j <= i && j <= B.last + 3; j++) crossed.push([j, 1]);
         for (let j = B.last; j > i && j > B.last - 3; j--) crossed.push([j, -1]);
         B.last = i; saveB();
-        if (P.on && B.d !== 0) for (const [j, way] of crossed) await openAt(j, way);
+        if (P.on && B.d !== 0 && !B.leaving) for (const [j, way] of crossed) await openAt(j, way);
       }
-      if (B.pendingRestart && !B.units.length) { B = null; saveB(); ST.waitUntil = 0; return; }   // the scalping switch waits for the units to close
+      if ((B.pendingRestart || B.leaving) && !B.units.length) { B = null; saveB(); ST.waitUntil = 0; return; }   // the scalping switch waits for the units to close
       if (B.units.length || B.d !== 0) B.idleAt = now();
       // a coin without direction and without units for idleMin -> another coin
       if (P.autoCoin && !B.units.length && now() - B.idleAt > P.idleMin * 60000) { engineLog(`🔄 ${B.sym}: ${P.idleMin} хв без напряму — шукаю іншу монету`, "mute"); B = null; saveB(); }
@@ -409,7 +449,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };

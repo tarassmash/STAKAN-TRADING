@@ -35,7 +35,8 @@ const DEFAULTS = {
   maxSpreadTicks: 2,       // wider spread -> no micro entry
   stepIn: true,            // spread ≥ 2 ticks: stand one tick inside the spread (first in the queue)
   cooldownSec: 15,
-  fastExit: false,         // market exit when the touch exit does not fill (taker fee) - off: costs fees
+  fastExit: false,
+  revExit: false,          // exit at the touch on a strong flow reversal - off: it cut trades that would have recovered (owner)         // market exit when the touch exit does not fill (taker fee) - off: costs fees
   // market making
   mmEdgePct: 0.05,         // min distance of each quote from the fair price, % (round trip must beat 2 × maker fee)
   mmQtyPct: 30,            // size of each quote, % of the inventory cap
@@ -49,7 +50,7 @@ const DEFAULTS = {
 const NUM = { coinCount: [1, 10], minTurnoverM: [5, 5000], pickEveryMin: [2, 240], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 10],
   thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], feeX: [1, 30], stopPct: [0.05, 20], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
   cooldownSec: [0, 600], mmEdgePct: [0.01, 1], mmQtyPct: [5, 100], mmSkew: [0, 3], mmToxic: [0.2, 1], mmStopPct: [0.1, 20], mmMaxHoldSec: [10, 3600] };
-const BOOL = ["autoCoins", "stepIn", "fastExit", "learn", "on"];
+const BOOL = ["revExit", "autoCoins", "stepIn", "fastExit", "learn", "on"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -69,6 +70,7 @@ function create(host) {
   if (!(P.v >= 5)) { Object.assign(P, { feeX: 10, beAtPct: Math.max(P.beAtPct || 0, 0.15), minHoldSec: Math.max(P.minHoldSec || 0, 30), maxHoldSec: Math.max(P.maxHoldSec || 0, 900), mmMaxHoldSec: Math.max(P.mmMaxHoldSec || 0, 600) }); P.v = 5; lsSet("fx", P); }
   if (!(P.v >= 6)) { Object.assign(P, { coinCount: 5, maxPositions: 5, pickEveryMin: 3, minTurnoverM: Math.min(P.minTurnoverM || 50, 50), autoCoins: true }); P.v = 6; lsSet("fx", P); ST_PICK = true; }
   if (!(P.v >= 7)) { P.stopPct = 5; P.mmStopPct = 5; P.v = 7; lsSet("fx", P); }
+  if (!(P.v >= 8)) { P.revExit = false; P.v = 8; lsSet("fx", P); }
   const save = () => lsSet("fx", P);
   const TR = lsGet("fxTrades", []);                     // closed round trips
   const LEARN = Object.assign({ thr: {}, edge: {}, modeStat: {} }, lsGet("fxLearn", {}));
@@ -458,7 +460,7 @@ function create(host) {
     const grown = held >= P.minHoldSec;
     const leave = !P.on ? "зупинка"
       : grown && mv >= half && against >= thr * 0.6 ? "потік розвернувся (у плюсі)"
-      : grown && against >= Math.min(0.95, thr * 1.2) ? "сильний розворот"
+      : P.revExit && grown && against >= Math.min(0.95, thr * 1.2) ? "сильний розворот"
       : held > P.maxHoldSec && mv >= half ? "час (у плюсі)"
       : held > P.maxHoldSec * 3 ? "час" : "";
     if (leave && !exits.length) {

@@ -138,7 +138,7 @@ The engine works in two modes (per coin; "mode": "auto" lets the engine choose p
  - "micro" (microstructure): score -1..1 = 0.35*OFI (order-flow imbalance at the touch over ofiSec) + 0.25*microprice skew + 0.2*imbalance of
    5 levels + 0.2*tape imbalance, weakened when the tape is quiet. |score| >= thr -> PostOnly limit entry at the best price (stepIn: one tick
    inside a 2+ tick spread), take = takeTicks (never less than the maker fees), exchange stop stopPct, exit at the touch as soon as the flow turns
-   (score against >= 0.6*thr) or after maxHoldSec; fastExit crosses the spread if the touch exit does not fill in 3 s while losing.
+   (score against >= 0.6*thr) or after maxHoldSec; the strong-reversal exit (revExit) is OFF by the owner's choice (it cut trades that recovered) - keep it off; fastExit crosses the spread if the touch exit does not fill in 3 s while losing.
  - "mm" (market making): quotes on both sides around the microprice, at least mmEdgePct from it (learned multiplier per coin), size mmQtyPct of the
    inventory cap, quotes shifted against the inventory (mmSkew), the side facing a toxic one-way flow (|score| >= mmToxic) is pulled, inventory
    stop mmStopPct, inventory older than mmMaxHoldSec is flattened at the touch. MM pays only where the spread/tick is wider than 2 maker fees.

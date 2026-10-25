@@ -41,6 +41,9 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div style="margin-top:12px;font-size:14px;font-weight:600">Сценарій</div>
     <div class="seg" id="stratSeg"><button data-strat="both">🤖 Обидва</button><button data-strat="trend">📈 За трендом</button><button data-strat="squeeze">🧲 Сквіз</button></div>
     <div class="mute" id="stratHint" style="font-size:12px;margin-top:4px"></div>
+    <div style="margin-top:12px;font-size:14px;font-weight:600">Бік</div>
+    <div class="seg" id="sideSeg"><button data-side="sell">🔻 Тільки Sell</button><button data-side="both">↕ Обидва</button><button data-side="buy">🔺 Тільки Buy</button></div>
+    <div class="mute" id="sideHint" style="font-size:12px;margin-top:4px"></div>
     <div id="warn"></div>
   </div>
 
@@ -113,6 +116,9 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">Тренд: рух ціни за 15 хв від, %<input id="sPx" inputmode="decimal"></label>
         <label class="f">Сквіз: ціна стоїть (до, %)<input id="sFlat" inputmode="decimal"></label>
         <label class="f">Сквіз: фінансування від, %<input id="sFund" inputmode="decimal"></label>
+        <label class="f">Добір: скільки лімітів<input id="sDcaN" inputmode="decimal"></label>
+        <label class="f">Добір: крок від входу, %<input id="sDcaS" inputmode="decimal"></label>
+        <label class="f">Добір: обсяг × входу<input id="sDcaM" inputmode="decimal"></label>
         <label class="f">Тейк, %<input id="sTake" inputmode="decimal"></label>
         <label class="f">Стоп, %<input id="sStop" inputmode="decimal"></label>
         <label class="f">Трейлінг з прибутку, %<input id="sTrS" inputmode="decimal"></label>
@@ -161,11 +167,12 @@ $("main").onclick = () => {
   else act({ what: "start" }, (S.env === "mainnet" ? "Запустити торгівлю за відкритим інтересом на реальному рахунку?" : "Запустити на testnet?") + (S.fal ? " AI (fal.ai) вирішуватиме, який сценарій працює." : ""));
 };
 document.querySelectorAll("[data-strat]").forEach(b => b.onclick = () => act({ what: "strategy", strategy: b.dataset.strat }));
+document.querySelectorAll("[data-side]").forEach(b => b.onclick = () => act({ what: "settings", o: { sideMode: b.dataset.side } }));
 $("aiBtn").onclick = () => act({ what: S.ai.on ? "ai-off" : "ai-on" });
 $("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "ai-now" }); };
 $("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
 const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sMax", "maxPositions"], ["sOi", "oiMin"], ["sOi5", "oiMin5"], ["sPx", "pxMin"], ["sFlat", "pxFlat"], ["sFund", "fundMin"],
-  ["sTake", "takePct"], ["sStop", "stopPct"], ["sTrS", "trailStart"], ["sTrG", "trailGap"], ["sOiX", "oiExit"], ["sHold", "maxHoldMin"], ["sCool", "cooldownMin"], ["sTurn", "minTurnoverM"], ["sCvdMin", "cvdMin"], ["sCvdX", "cvdExit"]];
+  ["sTake", "takePct"], ["sStop", "stopPct"], ["sTrS", "trailStart"], ["sTrG", "trailGap"], ["sOiX", "oiExit"], ["sHold", "maxHoldMin"], ["sCool", "cooldownMin"], ["sTurn", "minTurnoverM"], ["sCvdMin", "cvdMin"], ["sCvdX", "cvdExit"], ["sDcaN", "dcaLevels"], ["sDcaS", "dcaStepPct"], ["sDcaM", "dcaMult"]];
 $("sSave").onclick = async () => {
   const o = {};
   for (const [id, k] of FIELDS) { const v = Number(String($(id).value).replace(",", ".")); if (Number.isFinite(v) && $(id).value !== "") o[k] = v; }
@@ -251,12 +258,16 @@ function paint() {
   $("dot").className = "dot" + (on ? " on" : "");
   $("status").textContent = !on ? "Зупинено" : (AI.on ? "🧠 AI торгує · " : "Торгую · ") + (P.strategy === "both" ? "тренд + сквіз" : P.strategy === "trend" ? "за трендом" : "сквіз");
   const ago = X.scanAt ? Math.round((Date.now() - X.scanAt) / 1000) : null;
-  $("status2").innerHTML = `сканую ${X.coinsScanned} монет${ago != null ? ` (${ago} с тому)` : ""} · позицій ${(X.positions || []).length}/${P.maxPositions} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.takePct}% · стоп ${P.stopPct}% · трейлінг з +${P.trailStart}% · сервер 24/7`;
+  $("status2").innerHTML = `${P.sideMode === "sell" ? "🔻 тільки Sell · " : P.sideMode === "buy" ? "🔺 тільки Buy · " : ""}сканую ${X.coinsScanned} монет${ago != null ? ` (${ago} с тому)` : ""} · позицій ${(X.positions || []).length}/${P.maxPositions} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.takePct}% · стоп ${P.stopPct}% · трейлінг з +${P.trailStart}% · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-strat]").forEach(b => b.classList.toggle("on", b.dataset.strat === P.strategy));
   $("stratHint").textContent = P.strategy === "trend" ? "OI росте разом із ціною, а CVD показує, що ринкові покупці (продавці) тиснуть у той самий бік: входимо туди ж."
     : P.strategy === "squeeze" ? "OI росте, ціна стоїть, натовп б'є ринком (CVD у бік натовпу, видно і з фінансування), але ціну не зрушує: входимо проти нього."
     : "Обидва сценарії: береться найсильніший сигнал; збитковий сценарій вимикається сам, AI перемикає за результатами.";
+  document.querySelectorAll("[data-side]").forEach(b => b.classList.toggle("on", b.dataset.side === P.sideMode));
+  const lvls = Array.from({ length: P.dcaLevels }, (_, i) => P.dcaStepPct * (i + 1));
+  $("sideHint").textContent = (P.sideMode === "sell" ? "Лише шорти: заробіток на падінні." : P.sideMode === "buy" ? "Лише лонги." : "І лонги, і шорти.")
+    + (P.dcaLevels > 0 ? ` Одразу після входу — лімітки на добір ${P.sideMode === "buy" ? "нижче" : P.sideMode === "sell" ? "вище" : "проти руху"}: ${lvls.map(v => (P.sideMode === "buy" ? "−" : "+") + v + "%").join(", ")} (×${P.dcaMult} обсягу); тейк рахується від середньої, стоп — за останнім добором (${(P.stopPct + P.dcaStepPct * P.dcaLevels).toFixed(1)}% від входу).` : " Добір вимкнено.");
   $("warn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
   $("eq").textContent = f(ACC.equity) + " · " + f(X.avail ?? ACC.available);
   $("day").innerHTML = `${sgn(D.pnl, 3)} · ${D.n || 0}`;
@@ -264,7 +275,7 @@ function paint() {
   $("pnl").innerHTML = `${sgn(ST.pnl, 3)} · ${ST.pf ?? "—"}`;
   $("fees").innerHTML = `${sgn(ST.gross, 3)} · <span class="down">−${f(ST.fees, 3)}</span>`;
   $("hold").textContent = ST.avgHoldMin != null ? ST.avgHoldMin + " хв" : "—";
-  $("pos").innerHTML = (X.positions || []).map(p => `<tr><td><b>${esc(p.sym)}</b></td><td>${STRAT[p.strategy] || "—"}</td><td class="${p.side === "Buy" ? "up" : "down"}">${p.side === "Buy" ? "лонг" : "шорт"}</td><td>${p.avg}</td><td>${sgn(p.mv)}%</td><td>+${p.peak}%</td><td>${esc(p.stop || "—")}${p.trailing ? " 🛡" : ""}</td><td>${p.oi && p.oi.oi5 != null ? sgn(p.oi.oi5) + "%" : "—"}</td><td>${cvdTd(p.oi && p.oi.cvd5)}</td><td>${p.min}</td><td>${sgn(p.pnl, 3)}</td></tr>`).join("") || '<tr><td colspan="11" class="mute">Відкритих позицій немає</td></tr>';
+  $("pos").innerHTML = (X.positions || []).map(p => `<tr><td><b>${esc(p.sym)}</b></td><td>${STRAT[p.strategy] || "—"}</td><td class="${p.side === "Buy" ? "up" : "down"}">${p.side === "Buy" ? "лонг" : "шорт"}</td><td>${p.avg}</td><td>${sgn(p.mv)}%</td><td>+${p.peak}%</td><td>${esc(p.stop || "—")}${p.trailing ? " 🛡" : ""}${p.dca && p.dca.length ? `<br><span class="mute">добір: ${p.dca.join(", ")}</span>` : ""}${p.dcaFilled ? `<br><span class="up">добрано ×${p.dcaFilled}</span>` : ""}</td><td>${p.oi && p.oi.oi5 != null ? sgn(p.oi.oi5) + "%" : "—"}</td><td>${cvdTd(p.oi && p.oi.cvd5)}</td><td>${p.min}</td><td>${sgn(p.pnl, 3)}</td></tr>`).join("") || '<tr><td colspan="11" class="mute">Відкритих позицій немає</td></tr>';
   $("pending").innerHTML = (X.pending || []).map(o => `⏳ ${esc(o.sym)} ${o.side === "Buy" ? "лонг" : "шорт"} лімітом ${o.price} · ${o.sec} с · ${esc(o.sig ? o.sig.why : "")}`).join("<br>");
   $("scanLine").textContent = `· топ за ростом OI, обіг від ${P.minTurnoverM} млн $`;
   $("cands").innerHTML = (X.cands || []).map(k => `<tr><td><b>${esc(k.sym)}</b></td><td>${sgn(k.oi15)}%</td><td>${k.oi5 != null ? sgn(k.oi5) + "%" : "—"}</td><td>${k.oi60 != null ? sgn(k.oi60) + "%" : "—"}</td><td>${sgn(k.px15)}%</td><td>${k.px5 != null ? sgn(k.px5) + "%" : "—"}</td><td>${cvdTd(k.cvd5)}</td><td>${cvdTd(k.cvd15)}${k.cvd15usd != null ? ` <span class="mute">${fmtUsd(k.cvd15usd)}</span>` : ""}</td><td>${k.funding != null ? sgn(k.funding, 4) + "%" : "—"}</td><td>${k.oiUsdM}</td><td>${k.sig ? `<b class="${k.sig.side === "Buy" ? "up" : "down"}">${STRAT[k.sig.strategy]} ${k.sig.side === "Buy" ? "лонг" : "шорт"}</b> <span class="mute">${k.sig.score}</span>` : `<span class="mute">${esc(k.wait || "—")}</span>`}</td></tr>`).join("") || '<tr><td colspan="11" class="mute">Сканую…</td></tr>';

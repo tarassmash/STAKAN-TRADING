@@ -143,6 +143,10 @@ CVD (cumulative volume delta from the live tape: market buys minus market sells,
 followed for the cvdWatch coins with the fastest OI growth. With useCvd: trend needs CVD >= cvdMin in the trade direction (aggressors really push);
 squeeze needs CVD >= cvdMin in the crowd's direction while the price stands still (the crowd's market orders are absorbed); a TREND position in profit
 is closed when the 5-min CVD turns >= cvdExit against it (not for squeeze trades: there the crowd's CVD is the setup itself). "wait" in topOiMovers says why a setup was not taken (e.g. CVD does not confirm).
+Side: "sideMode" = "sell" (the owner's current choice: shorts only, earn on the fall) | "buy" | "both"; keep the owner's choice unless told otherwise.
+Add-ons: right after an entry the bot places dcaLevels limit orders dcaStepPct % apart further against the trade (short: above the entry), each
+dcaMult × the entry size; the take is counted from the average price, the stop sits stopPct beyond the last add-on level; once the trailing stop
+starts (profit) the unfilled add-ons are cancelled. Bigger add-ons = better average but bigger loss if the stop is hit.
 YOU decide which scenario works now: compare byStrategy / bySide / byExit and the live "topOiMovers"; set "strategy" accordingly (both = take the
 strongest signal of either). With learn on, a scenario that keeps losing while the other wins is skipped by itself.
 Entry: PostOnly limit at the best price (follows the price up to entryWaitSec; after chaseSec with the signal still alive -> market entry). Exits: take max(takePct, feeX x round-trip fee) as a limit,
@@ -153,14 +157,14 @@ Rules: never remove stops; keep feeX >= 10; with few trades change one or two se
 no trades for a long time -> lower oiMin/pxMin a little.
 Answer with ONE JSON object only, no text around it:
 {"regime":"calm|range|trend|volatile|chaotic","oi":{"params":{optional: strategy,oiMin,oiMin5,pxMin,pxFlat,fundMin,minTurnoverM,maxSpreadPct,feeX,takePct,
-stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,chaseSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn,useCvd,cvdMin,cvdExit,cvdWatch}},
+stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,chaseSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn,useCvd,cvdMin,cvdExit,cvdWatch,sideMode,dcaLevels,dcaStepPct,dcaMult}},
 "reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit open-interest trading app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
 transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
  "engine": "start" | "stop"       (stop also switches the AI off)
  "ai": true | false               (AI autopilot on/off)
- "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,useCvd,cvdMin,cvdExit,...}}
+ "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,useCvd,cvdMin,cvdExit,sideMode:"sell"|"buy"|"both",dcaLevels,dcaStepPct,dcaMult,...}}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
  "aiEveryMin": n                  (how often the AI decides)
  "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future)

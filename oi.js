@@ -11,6 +11,10 @@ const WebSocketNode = (() => { try { return require("ws"); } catch (e) { return 
 const DEFAULTS = {
   on: false,
   strategy: "both",        // "trend" | "squeeze" | "both"
+  sideMode: "sell",        // "sell" = shorts only (earn on the fall) | "buy" = longs only | "both"
+  dcaLevels: 1,            // right after the entry: limit orders to add to the position further against it (short: higher), 0 = off
+  dcaStepPct: 2,           // ... every dcaStepPct % from the first entry (short: +2%, +4% ...)
+  dcaMult: 1,              // size of each added order × the first entry
   symbols: [],             // coins that are traded / watched right now (filled by the scanner)
   margin: 10,              // USDT margin per trade
   leverage: 5,
@@ -41,7 +45,7 @@ const DEFAULTS = {
   scanSec: 60,
   learn: true,             // a strategy that keeps losing is switched off by itself while the other one makes money
 };
-const NUM = { margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 20], oiMin: [0.5, 50], oiMin5: [0, 20], pxMin: [0, 20], pxFlat: [0.05, 5], fundMin: [0, 1],
+const NUM = { dcaLevels: [0, 5], dcaStepPct: [0.2, 20], dcaMult: [0.2, 5], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 20], oiMin: [0.5, 50], oiMin5: [0, 20], pxMin: [0, 20], pxFlat: [0.05, 5], fundMin: [0, 1],
   minTurnoverM: [1, 5000], maxSpreadPct: [0.01, 1], feeX: [1, 50], takePct: [0.2, 30], stopPct: [0.2, 20], trailStart: [0, 20], trailGap: [0.1, 10], oiExit: [0, 20],
   maxHoldMin: [5, 4320], entryWaitSec: [5, 600], chaseSec: [0, 600], cooldownMin: [0, 1440], scanSec: [20, 600], cvdMin: [0, 0.9], cvdExit: [0.05, 1], cvdWatch: [5, 60] };
 const BOOL = ["learn", "useCvd"];
@@ -146,7 +150,8 @@ function create(host) {
       else m.wait = P.useCvd && cv == null ? "чекаю CVD" : `CVD ${cv != null ? Math.round(cv * 100) + "%" : "—"} не підтверджує сквіз`;
     }
     // learning: a scenario that keeps losing while the other one makes money is skipped
-    const ok = out.filter(s => !(P.learn && disabled(s.strategy)));
+    const ok = out.filter(s => !(P.learn && disabled(s.strategy)) && (P.sideMode === "both" || (P.sideMode === "sell" ? s.side === "Sell" : s.side === "Buy")));
+    if (!ok.length && out.length && P.sideMode !== "both") m.wait = `сигнал ${out[0].side === "Buy" ? "лонг" : "шорт"}, а режим «тільки ${P.sideMode === "sell" ? "Sell" : "Buy"}»`;
     return ok.sort((a, b) => b.score - a.score)[0] || null;
   }
   function disabled(strategy) {
@@ -272,10 +277,13 @@ function create(host) {
     const qty = Number(x.execQty), p = Number(x.execPrice), fee = Number(x.execFee || 0), s = x.side === "Buy" ? 1 : -1;
     if (!(qty > 0)) return;
     const a = acc(sym), o = ORD[x.orderLinkId];
-    if (!a.q) { Object.assign(a, { at: now(), real: 0, fees: 0, fills: 0, side: s > 0 ? "Buy" : "Sell", sig: (o && o.sig) || (M[sym] && M[sym].sig) || null, how: "", peak: 0, lockPx: null, slPx: null }); }
+    if (!a.q) { Object.assign(a, { entry0: p, dcaPlaced: false, dcaFilled: 0, at: now(), real: 0, fees: 0, fills: 0, side: s > 0 ? "Buy" : "Sell", sig: (o && o.sig) || (M[sym] && M[sym].sig) || null, how: "", peak: 0, lockPx: null, slPx: null }); }
     if (ours && M[sym] && M[sym].sizeK < 1) M[sym].sizeK = Math.min(1, M[sym].sizeK * 1.25);
     a.fees += fee; a.fills++;
-    if (!a.q || Math.sign(a.q) === s) { a.avg = (a.avg * Math.abs(a.q) + p * qty) / (Math.abs(a.q) + qty); a.q += s * qty; }
+    if (!a.q || Math.sign(a.q) === s) {
+      a.avg = (a.avg * Math.abs(a.q) + p * qty) / (Math.abs(a.q) + qty); a.q += s * qty;
+      if (roleOf(x.orderLinkId) === "d" && (!o || o.filled === 0)) { a.dcaFilled = (a.dcaFilled || 0) + 1; engineLog(`➕ ${sym}: добрав ${a.side === "Sell" ? "шорт вище" : "лонг нижче"} @ ${p} — середня ${Number(a.avg).toPrecision(6)}, тейк перераховано`, "mute"); }
+    }
     else {
       const close = Math.min(qty, Math.abs(a.q));
       a.real += close * (p - a.avg) * Math.sign(a.q); a.q += s * close;
@@ -327,7 +335,7 @@ function create(host) {
   setInterval(() => { if (P.on) refreshWallet(); }, 5000);
   // size from the money that is free; leverage up for the exchange minimum, but never so high that liquidation comes before the stop
   function sizing(sym, price) {
-    const m = M[sym], safe = Math.max(1, Math.floor(80 / Math.max(P.stopPct, 0.1)));
+    const m = M[sym], safe = Math.max(1, Math.floor(80 / Math.max(P.stopPct + (P.dcaLevels > 0 ? P.dcaStepPct * P.dcaLevels : 0), 0.1)));
     const maxLev = Math.min(Math.floor(m.maxLev || P.leverage), safe), base = Math.min(P.leverage, maxLev);
     const minNotional = Math.max(m.minNotional * 1.05, m.minQty * price);
     const free = ST.avail == null ? Infinity : Math.max(0, ST.avail * 0.9);
@@ -386,7 +394,8 @@ function create(host) {
       stopQ.delete(sym);
       const a = A[sym]; if (!a || !a.q || !M[sym] || !M[sym].tick) continue;
       const long = a.q > 0;
-      const sl = a.lockPx ? String(a.lockPx) : px(sym, a.avg * (1 - (long ? 1 : -1) * P.stopPct / 100), !long);
+      const base = P.dcaLevels > 0 && a.entry0 ? a.entry0 : a.avg, dist = P.stopPct + (P.dcaLevels > 0 ? P.dcaStepPct * P.dcaLevels : 0);   // with add-ons: the stop sits beyond the last one
+      const sl = a.lockPx ? String(a.lockPx) : px(sym, base * (1 - (long ? 1 : -1) * dist / 100), !long);
       if (a.slPx === sl && a.slQ === a.q) continue;
       try {
         await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: sym, stopLoss: sl, slTriggerBy: "LastPrice", tpslMode: "Full", positionIdx: ST.hedge[sym] ? (long ? 1 : 2) : 0 } });
@@ -427,9 +436,9 @@ function create(host) {
       for (const sym of traded()) {
         const tk = TK[sym], m = M[sym], a = acc(sym);
         if (!tk || !m || !m.tick || !tk.bid) continue;
-        const es = ordersOf(sym, "e"), ts = ordersOf(sym, "t"), xs = ordersOf(sym, "x");
+        const es = ordersOf(sym, "e"), ts = ordersOf(sym, "t"), xs = ordersOf(sym, "x"), ds = ordersOf(sym, "d");
         if (!a.q) {
-          for (const o of [...ts, ...xs]) await cancel(o.id);
+          for (const o of [...ts, ...xs, ...ds]) await cancel(o.id);
           for (const o of es) {
             const best = o.side === "Buy" ? tk.bid : tk.ask;
             const c = ST.cands.find(x => x.sym === sym);
@@ -445,6 +454,16 @@ function create(host) {
         }
         for (const o of es) await cancel(o.id);
         const long = a.q > 0, size = Number(align(Math.abs(a.q), m.step, false)), exitSide = long ? "Sell" : "Buy";
+        // add-on limits right after the entry: short -> higher (+dcaStepPct, +2×...), long -> lower; a better average price
+        if (P.dcaLevels > 0 && !a.dcaPlaced && a.entry0 && P.on && !xs.length) {
+          a.dcaPlaced = true;
+          const q1 = Math.max(Number(align(Math.abs(a.q) * P.dcaMult, m.step, false)), m.minQty);
+          for (let i = 1; i <= P.dcaLevels; i++) {
+            const lvl = Number(px(sym, a.entry0 * (1 + (long ? -1 : 1) * P.dcaStepPct * i / 100), !long));
+            await place(sym, long ? "Buy" : "Sell", lvl, q1, "d");
+          }
+          engineLog(`➕ ${sym}: лімітки на добір ${long ? "нижче" : "вище"} входу: ${Array.from({ length: P.dcaLevels }, (_, i) => `${long ? "−" : "+"}${P.dcaStepPct * (i + 1)}%`).join(", ")}`, "mute");
+        }
         const price = tk.price || (tk.bid + tk.ask) / 2;
         const mv = (long ? price - a.avg : a.avg - price) / a.avg * 100;
         a.peak = Math.max(a.peak || 0, mv);
@@ -452,6 +471,7 @@ function create(host) {
         if (P.trailStart > 0 && a.peak >= P.trailStart) {
           const lockPct = Math.max(rtFee(sym) + 0.02, a.peak - P.trailGap);
           const lp = Number(px(sym, a.avg * (1 + (long ? 1 : -1) * lockPct / 100), long));
+          if (!a.lockPx) for (const o of ds) await cancel(o.id);   // in profit: no more adding
           if (!a.lockPx || (long ? lp > a.lockPx : lp < a.lockPx)) { if (!a.lockPx) engineLog(`🛡 ${sym}: +${mv.toFixed(2)}% — стоп іде за ціною (в плюсі)`, "mute"); a.lockPx = lp; stopDirty(sym); }
         }
         // the move is over: OI falls while we are in profit -> leave at the best price
@@ -461,7 +481,7 @@ function create(host) {
           : P.useCvd && (!a.sig || a.sig.strategy !== "squeeze") && mt && mt.cvd5 != null && mt.cvd5 * (long ? -1 : 1) >= P.cvdExit && mv >= rtFee(sym) * 2 ? `CVD розвернувся (${Math.round(mt.cvd5 * 100)}% за 5 хв) — ринкові ${long ? "продавці" : "покупці"} перехопили`
           : held > P.maxHoldMin ? "час" : "";
         if (leave && !xs.length) {
-          for (const o of ts) await cancel(o.id);
+          for (const o of [...ts, ...ds]) await cancel(o.id);
           a.how = "вихід: " + leave;
           await place(sym, exitSide, long ? tk.ask : tk.bid, size, "x", { reduce: true });
           continue;
@@ -557,8 +577,9 @@ function create(host) {
         if (P[k] !== n) { ch.push(`${k} ${P[k]}→${n}`); P[k] = n; }
       } else if (BOOL.includes(k) && typeof v === "boolean") { if (P[k] !== v) { ch.push(`${k} ${P[k]}→${v}`); P[k] = v; } }
       else if (k === "strategy" && ["trend", "squeeze", "both"].includes(v)) { if (P.strategy !== v) { ch.push(`сценарій ${P.strategy}→${v}`); P.strategy = v; } }
+      else if (k === "sideMode" && ["sell", "buy", "both"].includes(v)) { if (P.sideMode !== v) { ch.push(`бік ${P.sideMode}→${v}`); P.sideMode = v; } }
     }
-    if (ch.some(x => x.startsWith("leverage") || x.startsWith("margin") || x.startsWith("stopPct"))) { ST.lev = {}; for (const m of Object.values(M)) m.sizeK = 1; }
+    if (ch.some(x => /^(leverage|margin|stopPct|dca)/.test(x))) { ST.lev = {}; for (const m of Object.values(M)) m.sizeK = 1; }
     save();
     return ch;
   }
@@ -573,7 +594,7 @@ function create(host) {
     return Object.entries(A).filter(([, a]) => a.q).map(([sym, a]) => {
       const tk = TK[sym] || {}, price = tk.price || 0, long = a.q > 0, mv = price ? (long ? price - a.avg : a.avg - price) / a.avg * 100 : null;
       return { sym, side: long ? "Buy" : "Sell", q: Math.abs(a.q), avg: +Number(a.avg).toPrecision(8), price, mv: mv != null ? +mv.toFixed(2) : null, pnl: price ? +((price - a.avg) * a.q - a.fees).toFixed(4) : null,
-        peak: +Number(a.peak || 0).toFixed(2), stop: a.slPx || null, trailing: !!a.lockPx, min: Math.round((now() - a.at) / 60000), strategy: a.sig ? a.sig.strategy : null, oi: metrics(sym) };
+        peak: +Number(a.peak || 0).toFixed(2), stop: a.slPx || null, trailing: !!a.lockPx, entry0: a.entry0 || null, dcaFilled: a.dcaFilled || 0, dca: ordersOf(sym, "d").map(o => o.price), min: Math.round((now() - a.at) / 60000), strategy: a.sig ? a.sig.strategy : null, oi: metrics(sym) };
     });
   }
   function view() {

@@ -149,20 +149,21 @@ Prefer fewer, stronger trades (higher thr), takes of several fee multiples (take
 no taker exits (fastExit false). The engine itself raises the take / widens MM quotes when 10 trades of a coin were positive before fees but negative after.
 Fees: maker and taker in % ("fees"); every result is net of fees. Latency: wsLagMs (market data), orderMs (order round trip).
 Per-coin learning runs by itself (micro threshold up after 3 losses on a coin, MM edge wider after losing cycles, mode per coin by results).
-The engine trades ONE coin only (owner's choice). With autoCoins it picks the best one itself (a coin proven profitable, else the busiest tape;
-in mm mode a wide-tick coin) and changes it when it loses 5 trades in a row or is idle 20 min; send "symbols":["XXXUSDT"] (one coin) only to override.
+The engine trades coinCount (5) HOT coins at once - the ones going crazy right now on Bybit: every pickEveryMin minutes the top movers by 24 h
+change are checked on 1-minute candles (range of the last 15 min, volume surge of the last 5 min vs the 25 before, move of the last 5 min);
+coins that cool down are replaced ("candidates" shows the list with range15/surge/move5). Send "symbols" only to override (max 10).
 Use bySymbolMode/byMode/byExit/series to decide: mode, thresholds, take/stop, edges, coin. The owner wants long series of winning trades.
 Rules: never remove stops; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
 no trades for a long time -> lower thr or pick busier coins.
 Answer with ONE JSON object only, no text around it:
 {"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,feeX,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,
-maxSpreadTicks,stepIn,cooldownSec,fastExit,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,mmMaxHoldSec,margin,leverage,autoCoins,minTurnoverM,pickEveryMin,learn}},"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
+maxSpreadTicks,stepIn,cooldownSec,fastExit,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,mmMaxHoldSec,margin,leverage,maxPositions,autoCoins,coinCount,minTurnoverM,pickEveryMin,learn}},"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's fast Bybit order-book trading app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
 transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
  "engine": "start" | "stop"       (stop also switches the AI off)
  "ai": true | false               (AI autopilot on/off)
- "fast": {"symbols":["ONE coin"], "params":{mode:"micro"|"mm"|"auto",thr,takeTicks,stopPct,maxHoldSec,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,margin,leverage,maxPositions,autoCoins,coinCount,minTurnoverM,learn,...}}
+ "fast": {"symbols":[...], "params":{mode:"micro"|"mm"|"auto",thr,takeTicks,stopPct,maxHoldSec,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,margin,leverage,maxPositions,autoCoins,coinCount,minTurnoverM,learn,...}}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
  "aiEveryMin": n                  (how often the AI decides)
  "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future, e.g. "be more careful", "trade only BTC")

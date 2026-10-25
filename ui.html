@@ -114,8 +114,10 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">MM: розмір котирування, % ліміту<input id="sQty" inputmode="decimal"></label>
         <label class="f">MM: токсичний потік 0.2–1<input id="sTox" inputmode="decimal"></label>
         <label class="f">MM: стоп запасу, %<input id="sMmStop" inputmode="decimal"></label>
-        <label class="f">Монета<select id="sCoins"><option value="auto">Авто: бот сам вибирає найкращу</option><option value="manual">Своя</option></select></label>
-        <label class="f">Своя монета<input id="sSyms" placeholder="BTCUSDT"></label>
+        <label class="f">Монети<select id="sCoins"><option value="auto">Авто: найгарячіші зараз</option><option value="manual">Свої</option></select></label>
+        <label class="f">Свої монети (через кому)<input id="sSyms" placeholder="BTCUSDT, SOLUSDT"></label>
+        <label class="f">Скільки монет одночасно<input id="sCount" inputmode="decimal"></label>
+        <label class="f">Позицій одночасно<input id="sMax" inputmode="decimal"></label>
         <label class="f">Мін. обіг 24 год, млн $<input id="sTurn" inputmode="decimal"></label>
         <label class="f">Самонавчання<select id="sLearn"><option value="on">Увімк</option><option value="off">Вимк</option></select></label>
       </div>
@@ -157,7 +159,7 @@ document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => act({ wh
 $("aiBtn").onclick = () => act({ what: S.ai.on ? "ai-off" : "ai-on" });
 $("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "ai-now" }); };
 $("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
-const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sThr", "thr"], ["sFeeX", "feeX"], ["sTakeP", "takePct"], ["sStop", "stopPct"], ["sMinHold", "minHoldSec"], ["sHold", "maxHoldSec"],
+const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sCount", "coinCount"], ["sMax", "maxPositions"], ["sThr", "thr"], ["sFeeX", "feeX"], ["sTakeP", "takePct"], ["sStop", "stopPct"], ["sMinHold", "minHoldSec"], ["sHold", "maxHoldSec"],
   ["sEdge", "mmEdgePct"], ["sQty", "mmQtyPct"], ["sTox", "mmToxic"], ["sMmStop", "mmStopPct"], ["sTurn", "minTurnoverM"]];
 $("sSave").onclick = async () => {
   const o = {};
@@ -242,7 +244,7 @@ function paint() {
   $("connCard").style.display = S.keys && S.fal && S.password && !ACC.err ? "none" : "";
   $("dot").className = "dot" + (on ? " on" : "");
   $("status").textContent = !on ? "Зупинено" : (AI.on ? "🧠 AI торгує · " : "Торгую · ") + (P.mode === "auto" ? "мікро + маркет-мейкінг" : P.mode === "mm" ? "маркет-мейкінг" : "мікроструктура");
-  $("status2").innerHTML = `монета <b>${esc(P.symbols[0] || "—")}</b> · ${X.ws ? "стакан наживо ✓" : "підключаюсь до біржі…"} · ${X.priv ? "ордери в реальному часі ✓" : '<span class="down">приватний канал — опитування REST</span>'} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.feeX}× комісії${X.takeGoal ? ` = ${X.takeGoal}%` : ""} (коло комісій ${X.rtFee ?? "—"}%) · сервер 24/7`;
+  $("status2").innerHTML = `${P.symbols.length} монет · до ${P.maxPositions} позицій · ${X.ws ? "стакан наживо ✓" : "підключаюсь до біржі…"} · ${X.priv ? "ордери в реальному часі ✓" : '<span class="down">приватний канал — опитування REST</span>'} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.feeX}× комісії${X.takeGoal ? ` = ${X.takeGoal}%` : ""} (коло комісій ${X.rtFee ?? "—"}%) · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === P.mode));
   $("modeHint").textContent = P.mode === "micro" ? "Вхід лімітом по дисбалансу потоку ордерів, тейк кілька тіків, вихід одразу, коли потік розвернувся."
@@ -260,7 +262,8 @@ function paint() {
   $("ser").innerHTML = (SR.wins ? `<span class="up">${SR.wins}+</span>` : SR.losses ? `<span class="down">${SR.losses}−</span>` : "—") + ` · ${SR.bestWins || 0}`;
   $("lat").textContent = `${X.lat.wsLagMs} · ${X.lat.orderMs} мс`;
   $("hold").textContent = ST.avgHoldSec != null ? ST.avgHoldSec + " с" : "—";
-  $("coinsLine").innerHTML = `· торгую тільки <b>${esc(P.symbols[0] || "—")}</b>${P.autoCoins ? ' <span class="mute">(бот вибрав сам; міняє, якщо монета 5 угод у мінусі або 20 хв без угод)</span>' : ' <span class="mute">(ваш вибір)</span>'}`;
+  const HOT = X.vol || [];
+  $("coinsLine").innerHTML = P.autoCoins ? `· 🔥 гарячі зараз (оновлення кожні ${P.pickEveryMin} хв): ` + (P.symbols.map(s2 => { const h = HOT.find(x => x.sym === s2); return `<b>${esc(s2)}</b>` + (h && h.range15 != null ? ` <span class="mute">${h.range15}%/15хв ×${h.surge}</span>` : ""); }).join(" · ") || "шукаю…") : "· ваші монети: " + esc(P.symbols.join(", "));
   $("live").innerHTML = (X.coins || []).map(k => {
     const F = k.f || {};
     const pos = k.pos ? `<span class="${k.pos.q > 0 ? "up" : "down"}">${k.pos.q > 0 ? "лонг" : "шорт"} ${Math.abs(k.pos.q)}</span> @${k.pos.avg} · ${sgn(k.pos.pnl, 3)} · ${k.pos.sec}с` : '<span class="mute">—</span>';

@@ -13,14 +13,14 @@ const WebSocketNode = (() => { try { return require("ws"); } catch (e) { return 
 const DEFAULTS = {
   on: false,
   mode: "auto",            // "micro" | "mm" | "auto"
-  symbols: ["BTCUSDT"],     // ONE coin: the bot picks the best one itself and trades only it
+  symbols: ["BTCUSDT"],     // the hot coins of the moment are picked by the bot itself
   autoCoins: true,
-  coinCount: 1,
-  minTurnoverM: 100,       // 24 h turnover, million $
-  pickEveryMin: 15,
+  coinCount: 5,            // 5 hot coins at once
+  minTurnoverM: 50,        // 24 h turnover, million $
+  pickEveryMin: 3,         // the hot list is refreshed every 3 min
   margin: 10,              // USDT margin per coin (position / inventory cap = margin × leverage)
   leverage: 10,
-  maxPositions: 1,         // one coin -> one position
+  maxPositions: 5,         // a position on every hot coin at once
   // micro
   thr: 0.7,                // |score| to enter (score -1..1): only strong order flow
   feeX: 10,                // the take is at least feeX × the round-trip fee (owner: "take 10 times the fee")
@@ -46,7 +46,7 @@ const DEFAULTS = {
   // learning
   learn: true,             // adapt the micro threshold, MM edge and the mode per coin from own results
 };
-const NUM = { coinCount: [1, 1], minTurnoverM: [5, 5000], pickEveryMin: [2, 240], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 1],
+const NUM = { coinCount: [1, 10], minTurnoverM: [5, 5000], pickEveryMin: [2, 240], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 10],
   thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], feeX: [1, 30], stopPct: [0.05, 3], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
   cooldownSec: [0, 600], mmEdgePct: [0.01, 1], mmQtyPct: [5, 100], mmSkew: [0, 3], mmToxic: [0.2, 1], mmStopPct: [0.1, 5], mmMaxHoldSec: [10, 3600] };
 const BOOL = ["autoCoins", "stepIn", "fastExit", "learn", "on"];
@@ -60,13 +60,14 @@ function create(host) {
 
   let ST_PICK = false;
   const P = Object.assign({}, DEFAULTS, lsGet("fx", {}));
-  if (!(P.v >= 5)) { Object.assign(P, { feeX: 10, beAtPct: Math.max(P.beAtPct || 0, 0.15), minHoldSec: Math.max(P.minHoldSec || 0, 30), maxHoldSec: Math.max(P.maxHoldSec || 0, 900), mmMaxHoldSec: Math.max(P.mmMaxHoldSec || 0, 600) }); P.v = 5; lsSet("fx", P); }
-  if (!(P.v >= 4)) { P.coinCount = 1; P.maxPositions = 1; if (P.symbols.length > 1) P.symbols = P.symbols.slice(0, 1); P.v = Math.max(P.v || 0, 4); lsSet("fx", P); ST_PICK = true; }
-  if (P.v === 2) { P.mmToxic = Math.min(P.mmToxic, 0.4); P.v = 3; lsSet("fx", P); }
   if (!(P.v >= 2)) {   // fees were eating the account: fewer, stronger trades, bigger takes, time to reach them
     Object.assign(P, { thr: Math.max(P.thr, 0.7), takePct: 0.12, stopPct: Math.max(P.stopPct, 0.3), beAtPct: 0.08, minHoldSec: 20, maxHoldSec: Math.max(P.maxHoldSec, 180), cooldownSec: Math.max(P.cooldownSec, 15), fastExit: false, mmToxic: Math.min(P.mmToxic, 0.4), v: 3 });
     lsSet("fx", P);
   }
+  if (P.v === 2) { P.mmToxic = Math.min(P.mmToxic, 0.4); P.v = 3; lsSet("fx", P); }
+  if (!(P.v >= 4)) { P.coinCount = 1; P.maxPositions = 1; if (P.symbols.length > 1) P.symbols = P.symbols.slice(0, 1); P.v = Math.max(P.v || 0, 4); lsSet("fx", P); ST_PICK = true; }
+  if (!(P.v >= 5)) { Object.assign(P, { feeX: 10, beAtPct: Math.max(P.beAtPct || 0, 0.15), minHoldSec: Math.max(P.minHoldSec || 0, 30), maxHoldSec: Math.max(P.maxHoldSec || 0, 900), mmMaxHoldSec: Math.max(P.mmMaxHoldSec || 0, 600) }); P.v = 5; lsSet("fx", P); }
+  if (!(P.v >= 6)) { Object.assign(P, { coinCount: 5, maxPositions: 5, pickEveryMin: 3, minTurnoverM: Math.min(P.minTurnoverM || 50, 50), autoCoins: true }); P.v = 6; lsSet("fx", P); ST_PICK = true; }
   const save = () => lsSet("fx", P);
   const TR = lsGet("fxTrades", []);                     // closed round trips
   const LEARN = Object.assign({ thr: {}, edge: {}, modeStat: {} }, lsGet("fxLearn", {}));
@@ -620,37 +621,55 @@ function create(host) {
       } catch (e) { setErr(`${sym}: ${e.message}`); }
     }
   }
+  // ---------------- hot coins: the ones that are going crazy RIGHT NOW (live Bybit market data) ----------------
+  // stage 1: all USDT perps with enough turnover, ranked by 24 h move and turnover; stage 2: 1-minute candles of the top 30:
+  // range of the last 15 min, volume of the last 5 min vs the 25 before (surge) and the move of the last 5 min -> hotness
+  async function hotList(rows) {
+    const pre = rows.slice().sort((a, b) => Math.abs(b.chg24) * Math.sqrt(b.turnoverM) - Math.abs(a.chg24) * Math.sqrt(a.turnoverM)).slice(0, 30);
+    const out = [];
+    await Promise.all(pre.map(async (x) => {
+      try {
+        const k = await bx("/v5/market/kline", { query: { category: "linear", symbol: x.sym, interval: "1", limit: "30" } });
+        const c = (k.list || []).map(r => ({ o: Number(r[1]), h: Number(r[2]), l: Number(r[3]), c: Number(r[4]), v: Number(r[6] || r[5]) })).reverse();   // oldest first
+        if (c.length < 20) return;
+        const l15 = c.slice(-15), l5 = c.slice(-5), prev = c.slice(0, -5);
+        const range15 = (Math.max(...l15.map(z => z.h)) - Math.min(...l15.map(z => z.l))) / x.price * 100;
+        const vol5 = l5.reduce((a, z) => a + z.v, 0) / 5, volPrev = prev.reduce((a, z) => a + z.v, 0) / Math.max(1, prev.length);
+        const surge = volPrev > 0 ? vol5 / volPrev : 1;
+        const move5 = (l5[l5.length - 1].c - l5[0].o) / l5[0].o * 100;
+        const hot = range15 * Math.sqrt(Math.min(surge, 10)) * (1 + Math.min(Math.abs(move5), 5) / 5);
+        out.push(Object.assign({}, x, { range15: +range15.toFixed(2), surge: +surge.toFixed(2), move5: +move5.toFixed(2), hot: +hot.toFixed(3) }));
+      } catch (e) { /* skip this coin */ }
+    }));
+    // the take is feeX × fee (≈0.4%): a coin must move clearly more than that in 15 min, with a tight spread
+    return out.filter(x => x.range15 >= 0.6 && (x.spreadPct == null || x.spreadPct <= 0.08)).sort((a, b) => b.hot - a.hot);
+  }
   async function pickCoins(force) {
     if (!P.autoCoins || (!force && now() - ST.pickedAt < P.pickEveryMin * 60000)) return;
     ST.pickedAt = now();
     try {
       const r = await bx("/v5/market/tickers", { query: { category: "linear" } });
       const rows = (r.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0)
-        .map(x => ({ sym: x.symbol, price: Number(x.lastPrice), turnoverM: Math.round(Number(x.turnover24h) / 1e6), range24: +((Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100).toFixed(2),
+        .map(x => ({ sym: x.symbol, price: Number(x.lastPrice), turnoverM: Math.round(Number(x.turnover24h) / 1e6), chg24: +(Number(x.price24hPcnt || 0) * 100).toFixed(2),
+          range24: +((Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100).toFixed(2),
           spreadPct: Number(x.ask1Price) && Number(x.bid1Price) ? +((Number(x.ask1Price) - Number(x.bid1Price)) / Number(x.lastPrice) * 100).toFixed(4) : null }));
-      // micro: the busiest tapes with real movement; MM: coins where one tick already pays the fees
-      const micro = rows.slice().sort((a, b) => b.turnoverM * Math.min(b.range24, 20) - a.turnoverM * Math.min(a.range24, 20));
-      const mm = rows.filter(x => x.spreadPct != null && x.spreadPct >= P.mmEdgePct && x.spreadPct <= 0.4).sort((a, b) => b.turnoverM - a.turnoverM);
-      // ONE coin. A coin that already made money in its mode wins; then MM coins (one tick ≥ 3 maker fees) in mm mode, else the busiest tape
-      const mmOk = (x) => x.spreadPct >= Math.max(P.mmEdgePct, 3 * MAKER);
-      const proven = rows.map(x => { const st = ["micro", "mm"].map(md => LEARN.modeStat[x.sym + ":" + md]).filter(v => v && v.n >= 10 && v.ew > 0);
-        return { x, ew: st.length ? Math.max(...st.map(v => v.ew)) : null }; }).filter(o => o.ew != null).sort((a, b) => b.ew - a.ew);
-      const best = P.mode === "mm" ? (mm.find(mmOk) || mm[0]) : P.mode === "micro" ? micro[0]
-        : (proven[0] && proven[0].x) || micro[0];
-      const cur = P.symbols[0], curRow = rows.find(x => x.sym === cur);
-      // keep the current coin unless it is gone from the list, it keeps losing, or there were no entries for 20 min
-      const lastCur = TR.filter(t => t.sym === cur).slice(-5);
-      const losing = lastCur.length >= 5 && lastCur.reduce((a2, t) => a2 + t.pnl, 0) < 0;
-      const idle = now() - Math.max(ST.coinAt || 0, (TR.filter(t => t.sym === cur).slice(-1)[0] || {}).closedAt || 0) > 20 * 60000;
-      const holding = Object.keys(A).some(s2 => A[s2].q);
-      let pick = cur;
-      if (!holding && best && (force || !curRow || losing || idle) && best.sym !== cur) pick = best.sym;
-      if (ST_PICK && best && !holding) { pick = best.sym; ST_PICK = false; }
-      ST.vol = rows.filter(x => x.sym === pick || (best && x.sym === best.sym));
-      if (pick && pick !== cur) {
-        P.symbols = [pick]; ST.coinAt = now(); save();
-        const why = !curRow ? "" : losing ? ` (на ${cur} 5 угод у мінусі)` : idle ? ` (на ${cur} 20 хв без угод)` : "";
-        engineLog(`🪙 Монета: ${pick}${why} — торгую тільки її`, "mute");
+      let hot = await hotList(rows);
+      if (hot.length < P.coinCount) {                       // a quiet market: fill up with the biggest 24 h movers
+        const more = rows.filter(x => !hot.some(h => h.sym === x.sym)).sort((a, b) => b.range24 * Math.sqrt(b.turnoverM) - a.range24 * Math.sqrt(a.turnoverM));
+        hot = hot.concat(more.slice(0, P.coinCount - hot.length));
+      }
+      ST.vol = hot.slice(0, 12);
+      const n = P.coinCount, holding = Object.keys(A).filter(s2 => A[s2].q);
+      const top = hot.slice(0, n).map(x => x.sym);
+      // a coin we trade stays while it is still among the hottest 2n (no churn); cooled-down coins are replaced by hotter ones
+      const keep = P.symbols.filter(s2 => holding.includes(s2) || (!force && hot.slice(0, n * 2).some(x => x.sym === s2)));
+      const pick = [...new Set([...keep, ...top])].slice(0, Math.max(n, keep.length));
+      for (const s2 of holding) if (!pick.includes(s2)) pick.push(s2);
+      if (pick.length && pick.join() !== P.symbols.join()) {
+        const added = pick.filter(s2 => !P.symbols.includes(s2)), gone = P.symbols.filter(s2 => !pick.includes(s2));
+        P.symbols = pick; save();
+        const info = (s2) => { const h = hot.find(x => x.sym === s2); return h && h.range15 != null ? `${s2} (${h.range15}% за 15 хв, обсяг ×${h.surge})` : s2; };
+        engineLog(`🔥 Гарячі монети зараз: ${pick.map(info).join(", ")}` + (gone.length ? ` · охололи: ${gone.join(", ")}` : "") + (added.length && gone.length ? "" : ""), "gold-t");
       }
     } catch (e) { setErr("вибір монет: " + e.message); }
     await loadSpecs(P.symbols); resub();
@@ -708,7 +727,7 @@ function create(host) {
       } else if (BOOL.includes(k) && typeof v === "boolean") { if (P[k] !== v) { ch.push(`${k} ${P[k]}→${v}`); P[k] = v; } }
       else if (k === "mode" && ["micro", "mm", "auto"].includes(v)) { if (P.mode !== v) { ch.push(`режим ${P.mode}→${v}`); P.mode = v; ST.pickedAt = 0; } }
       else if (k === "symbols" && Array.isArray(v)) {
-        const list = [...new Set(v.map(x => String(x).toUpperCase()).filter(x => /^[A-Z0-9]{2,30}USDT$/.test(x)))].slice(0, 1);   // one coin only
+        const list = [...new Set(v.map(x => String(x).toUpperCase()).filter(x => /^[A-Z0-9]{2,30}USDT$/.test(x)))].slice(0, 10);
         if (list.length && list.join() !== P.symbols.join()) { ch.push(`монети ${list.join(",")}`); P.symbols = list; loadSpecs(list).then(resub); }
       }
     }

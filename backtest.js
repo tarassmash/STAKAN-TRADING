@@ -23,7 +23,9 @@ function trendOf(closes, thrPct = 0.8) {
 // grid simulation on OHLC candles (oldest first) with the same rules as the live engine:
 // cells, counter orders, trailing, grid stop and a new grid after the stop; maker fee on limits, taker on market orders
 function simulate(c, o) {
-  const { mode, widthPct, n, investment, lev, maker = 0.02, taker = 0.055, slPct = 3, trailing = true, autoRestart = true, minNotional = 5 } = o;
+  const { mode, widthPct, n, investment, lev, maker = 0.02, taker = 0.055, slPct = 3, trailing = true, autoRestart = true, minNotional = 5,
+    breakout = false, bkTrigger = 1, bkMult = 1, bkStopPct = 1.5, bkTrailStart = 1, bkTrailGap = 0.7 } = o;
+  let bk = null, breakouts = 0, bkProfit = 0;
   const mk = maker / 100, tk = taker / 100;
   let cells = [], low = 0, high = 0, r = 1, qty = 0;
   let profit = 0, cycles = 0, stops = 0, trails = 0, fees = 0, maxDD = 0, peak = 0;
@@ -42,6 +44,18 @@ function simulate(c, o) {
   }
   const unreal = (x) => cells.reduce((s, q) => s + (q.state === "close" ? (x - q.openPx) * qty * q.dir : 0), 0);
   function step(x) {
+    // a breakout trade runs instead of the grid: stop for a false breakout, trailing take from bkTrailStart
+    if (bk) {
+      bk.peak = bk.dir > 0 ? Math.max(bk.peak, x) : Math.min(bk.peak, x);
+      const moved = (bk.peak / bk.entry - 1) * 100 * bk.dir;
+      let stop = bk.entry * (1 - bk.dir * bkStopPct / 100);
+      if (moved >= bkTrailStart) { const t = bk.peak * (1 - bk.dir * bkTrailGap / 100); stop = bk.dir > 0 ? Math.max(stop, t) : Math.min(stop, t); }
+      if ((bk.dir > 0 && x <= stop) || (bk.dir < 0 && x >= stop)) {
+        const pr = (x - bk.entry) * bk.q * bk.dir; profit += pr; bkProfit += pr; fees += bk.q * x * tk; bk = null;
+        if (autoRestart) build(x); else { cells = []; return false; }
+      }
+      return true;
+    }
     // fills in the order the price meets them
     for (const q of cells) {
       if (q.state === "open") {
@@ -70,12 +84,20 @@ function simulate(c, o) {
     }
     // grid stop
     const longs = cells.some(q => q.state === "close" && q.dir > 0), shorts = cells.some(q => q.state === "close" && q.dir < 0);
+    const k = breakout ? bkTrigger : slPct;
+    if (breakout && ((longs && x <= low * (1 - k / 100)) || (shorts && x >= high * (1 + k / 100)))) {
+      const held = cells.filter(q => q.state === "close");
+      profit += unreal(x); fees += held.length * qty * x * tk; breakouts++;
+      const dir = x >= high ? 1 : -1, q = investment * lev * bkMult / x;
+      bk = { dir, entry: x, peak: x, q }; fees += q * x * tk; cells = [];
+      return true;
+    }
     if ((longs && x <= low * (1 - slPct / 100)) || (shorts && x >= high * (1 + slPct / 100))) {
       const held = cells.filter(q => q.state === "close");
       profit += unreal(x); fees += held.length * qty * x * tk; stops++;
       if (autoRestart) build(x); else { cells = []; return false; }
     }
-    const eq = profit - fees + unreal(x);
+    const eq = profit - fees + unreal(x) + (bk ? (x - bk.entry) * bk.q * bk.dir : 0);
     peak = Math.max(peak, eq); maxDD = Math.max(maxDD, peak - eq);
     return true;
   }
@@ -88,8 +110,8 @@ function simulate(c, o) {
     if (!alive) break;
   }
   const last = c[c.length - 1].c;
-  const net = profit - fees + (cells.length ? unreal(last) : 0);
-  return { net: +net.toFixed(4), roi: +(net / investment * 100).toFixed(2), cycles, stops, trails, fees: +fees.toFixed(4), maxDD: +(maxDD / investment * 100).toFixed(2), qty };
+  const net = profit - fees + (cells.length ? unreal(last) : 0) + (bk ? (last - bk.entry) * bk.q * bk.dir : 0);
+  return { net: +net.toFixed(4), roi: +(net / investment * 100).toFixed(2), cycles, stops, trails, breakouts, bkProfit: +bkProfit.toFixed(4), fees: +fees.toFixed(4), maxDD: +(maxDD / investment * 100).toFixed(2), qty };
 }
 
 module.exports = { ema, trendOf, simulate };

@@ -25,13 +25,19 @@ const DEFAULTS = {
   low: 0, high: 0,         // manual range (both > 0 -> used)
   feeX: 10,                // the step between levels is at least feeX × the round-trip fee
   trailing: true,          // the grid follows the price out of its range
-  slPct: 3,                // stop of the whole grid: this % beyond its edge
+  slPct: 3,                // stop of the whole grid: this % beyond its edge (only when breakout is off)
+  breakout: true,          // the price left the grid against its position -> no stop: the grid closes and a trade is opened in the direction of the breakout
+  bkTrigger: 1,            // ... when the price is this % beyond the grid's edge
+  bkMult: 1,               // size of the breakout trade × the grid's whole volume (investment × leverage)
+  bkStopPct: 1.5,          // stop of the breakout trade (a false breakout: the price comes back), %
+  bkTrailStart: 1,         // profit at which the trailing take starts, %
+  bkTrailGap: 0.7,         // the trailing take follows the best price at this distance, % (Bybit's own trailing stop: works even if the server is down)
   autoRestart: true,       // after the stop (or when the coin goes dead) a new grid around the price
   restartMin: 2,
   minTurnoverM: 50,
 };
-const NUM = { trendPct: [0.1, 10], btDays: [1, 3.4], investment: [1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
-const BOOL = ["autoCoin", "autoRange", "trailing", "autoRestart", "autoTune", "btNeedPlus"];
+const NUM = { bkTrigger: [0, 20], bkMult: [0.1, 5], bkStopPct: [0.2, 20], bkTrailStart: [0, 50], bkTrailGap: [0.1, 20], trendPct: [0.1, 10], btDays: [1, 3.4], investment: [1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
+const BOOL = ["breakout", "autoCoin", "autoRange", "trailing", "autoRestart", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -45,6 +51,8 @@ function create(host) {
   const P = Object.assign({}, DEFAULTS, lsGet("grid.p", {}));
   const save = () => lsSet("grid.p", P);
   let G = lsGet("grid.g", null);          // the live grid
+  let BK = lsGet("grid.bk", null);        // the live breakout trade (after the price left the grid)
+  const saveBK = () => { lsSet("grid.bk", BK); if (host.flush) host.flush(); };
   const saveG = () => { lsSet("grid.g", G); if (host.flush) host.flush(); };   // written to disk at once: a crash must not forget an order
   const TR = lsGet("grid.trades", []);    // completed cells + grid stops
   const ST = { err: "", errAt: 0, pubUp: false, privUp: false, price: 0, bid: 0, ask: 0, hedge: null, spec: null, busy: false, seenExec: new Set(), lastExecPoll: 0, restartAt: lsGet("grid.restartAt", 0), cool: lsGet("grid.cool", {}), lastTrail: 0, ex: {} };
@@ -96,9 +104,10 @@ function create(host) {
     pub.on("error", () => {});
   }
   function subPub() {
-    if (!pub || !ST.pubUp || !G || pubSym === G.sym) return;
+    const sym = G ? G.sym : BK ? BK.sym : "";
+    if (!pub || !ST.pubUp || !sym || pubSym === sym) return;
     if (pubSym) pub.send(JSON.stringify({ op: "unsubscribe", args: [`tickers.${pubSym}`] }));
-    pub.send(JSON.stringify({ op: "subscribe", args: [`tickers.${G.sym}`] })); pubSym = G.sym;
+    pub.send(JSON.stringify({ op: "subscribe", args: [`tickers.${sym}`] })); pubSym = sym;
   }
   async function ticker(sym) {
     const r = await api("/v5/market/tickers", { query: { category: "linear", symbol: sym } });
@@ -248,11 +257,12 @@ function create(host) {
           for (let n of [...new Set(counts)]) {
             n = Math.min(n, maxByStep, Math.floor(P.investment * lev / minNotional));
             if (n < 2) continue;
-            const r = candles.length > 50 ? BT.simulate(candles, { mode, widthPct: w, n, investment: P.investment, lev, maker, slPct: P.slPct, trailing: P.trailing, autoRestart: P.autoRestart, minNotional }) : { roi: 0, net: 0, cycles: 0, stops: 0 };
+            const r = candles.length > 50 ? BT.simulate(candles, { mode, widthPct: w, n, investment: P.investment, lev, maker, slPct: P.slPct, trailing: P.trailing, autoRestart: P.autoRestart, minNotional,
+              breakout: P.breakout, bkTrigger: P.bkTrigger, bkMult: P.bkMult, bkStopPct: P.bkStopPct, bkTrailStart: P.bkTrailStart, bkTrailGap: P.bkTrailGap }) : { roi: 0, net: 0, cycles: 0, stops: 0 };
             if (!best || r.roi > best.roi || (r.roi === best.roi && n > best.n)) best = Object.assign({ w, n }, r);
           }
         }
-        if (best) results.push({ sym: cd.sym, mode, trend: tr, w: +best.w.toFixed(2), n: best.n, roi: best.roi, net: best.net, cycles: best.cycles, stops: best.stops, maxDD: best.maxDD, swing: +swing.toFixed(1), chg: +cd.chg.toFixed(1), tested: candles.length });
+        if (best) results.push({ sym: cd.sym, mode, trend: tr, w: +best.w.toFixed(2), n: best.n, roi: best.roi, net: best.net, cycles: best.cycles, stops: best.stops, breakouts: best.breakouts, bkProfit: best.bkProfit, maxDD: best.maxDD, swing: +swing.toFixed(1), chg: +cd.chg.toFixed(1), tested: candles.length });
         else results.push({ sym: cd.sym, mode, trend: tr, err: `замало коштів (мін. ордер ${minNotional.toFixed(2)} USDT)` });
       } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
     }
@@ -360,8 +370,64 @@ function create(host) {
   async function checkStop() {
     if (!G || !ST.price) return;
     const p = ST.price, longs = G.cells.some(c => c.state === "close" && c.dir > 0), shorts = G.cells.some(c => c.state === "close" && c.dir < 0);
-    const down = longs && p <= G.low * (1 - P.slPct / 100), up = shorts && p >= G.high * (1 + P.slPct / 100);
-    if (down || up) await closeGrid(`стоп: ціна ${down ? "нижче" : "вище"} сітки на ${P.slPct}%`, true);
+    const k = P.breakout ? P.bkTrigger : P.slPct;
+    const down = longs && p <= G.low * (1 - k / 100), up = shorts && p >= G.high * (1 + k / 100);
+    if (!down && !up) return;
+    if (!P.breakout) { await closeGrid(`стоп: ціна ${down ? "нижче" : "вище"} сітки на ${P.slPct}%`, true); return; }
+    // breakout: the grid's position is closed and a trade follows the move
+    const dir = up ? 1 : -1, sym = G.sym, lev = G.lev;
+    await closeGrid(`пробій ${up ? "вгору" : "вниз"}: ціна ${up ? "вище" : "нижче"} сітки на ${k}% — переходжу на пробій`, false);
+    await openBreakout(sym, dir, lev);
+  }
+  async function openBreakout(sym, dir, lev) {
+    try {
+      await loadSpec(sym); await ticker(sym);
+      const price = dir > 0 ? ST.ask : ST.bid;
+      const qty = Math.max(qa(P.investment * lev * P.bkMult / price, false), qa(Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * price) / price, true));
+      const ix = ST.hedge ? (dir > 0 ? 1 : 2) : 0;
+      await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: dir > 0 ? "Buy" : "Sell", orderType: "Market", qty: String(qty), positionIdx: ix, timeInForce: "IOC", orderLinkId: ("gb" + now().toString(36)).slice(0, 36) } });
+      BK = { sym, dir, qty, entry: price, at: now(), peak: price, stopSet: false, seen: false, ix };
+      saveBK(); subPub();
+      engineLog(`🚀 ${sym}: ПРОБІЙ ${dir > 0 ? "вгору — лонг" : "вниз — шорт"} ${qty} ринком ≈ ${fmt(price)} · стоп ${P.bkStopPct}% (хибний пробій), трейлінг-тейк з +${P.bkTrailStart}% на відстані ${P.bkTrailGap}%`, dir > 0 ? "up" : "down");
+      await setBreakoutStops();
+    } catch (e) { setErr("пробій: " + e.message); ST.restartAt = now() + P.restartMin * 60000; }
+  }
+  // the stop and the trailing take live on the exchange (Bybit's trailing stop), so they work even while the server restarts
+  async function setBreakoutStops() {
+    if (!BK || BK.stopSet) return;
+    const long = BK.dir > 0, e = BK.entry, spec = ST.spec || await specOf(BK.sym);
+    const fx = (v, up) => align(v, spec.tickStr, up);
+    try {
+      await api("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: BK.sym, tpslMode: "Full", positionIdx: BK.ix,
+        stopLoss: fx(e * (1 - (long ? 1 : -1) * P.bkStopPct / 100), !long), slTriggerBy: "LastPrice",
+        trailingStop: fx(e * P.bkTrailGap / 100, true), activePrice: fx(e * (1 + (long ? 1 : -1) * P.bkTrailStart / 100), long) } });
+      BK.stopSet = true; saveBK();
+    } catch (e2) { if (e2.code === 34040) { BK.stopSet = true; saveBK(); } else setErr("стоп пробою: " + e2.message); }
+  }
+  // the breakout trade: follow it until the exchange closes it (trailing take or stop), then a new grid
+  async function manageBreakout() {
+    if (!BK) return;
+    if (!ST.spec) await loadSpec(BK.sym);
+    if (!ST.price || now() - (ST.priceAt || 0) > 10000) await ticker(BK.sym);
+    subPub();
+    BK.peak = BK.dir > 0 ? Math.max(BK.peak, ST.price) : Math.min(BK.peak, ST.price);
+    if (now() - (ST.bkCheck || 0) < 3000) return;
+    ST.bkCheck = now();
+    const r = await api("/v5/position/list", { query: { category: "linear", symbol: BK.sym }, auth: true });
+    const pos = (r.list || []).find(x => Number(x.size) > 0 && (x.side === "Buy") === (BK.dir > 0));
+    if (pos) { BK.seen = true; BK.entry = Number(pos.avgPrice) || BK.entry; BK.trailing = Number(pos.trailingStop || 0) > 0; if (!BK.stopSet) await setBreakoutStops(); saveBK(); return; }
+    if (!BK.seen && now() - BK.at < 15000) return;          // the market order has not shown up yet
+    // closed by the exchange: the result from closed-pnl
+    let pnl = null, exit = null;
+    try { const c = ((await api("/v5/position/closed-pnl", { query: { category: "linear", symbol: BK.sym, limit: "5" }, auth: true })).list || []).filter(x => Number(x.createdTime || x.updatedTime) >= BK.at - 5000);
+      if (c.length) { pnl = c.reduce((s2, x) => s2 + Number(x.closedPnl || 0), 0); exit = Number(c[0].avgExitPrice); } } catch (e) { /* unknown */ }
+    if (pnl == null) pnl = (ST.price - BK.entry) * BK.qty * BK.dir;
+    const best = (BK.peak / BK.entry - 1) * 100 * BK.dir;
+    TR.push({ at: now(), sym: BK.sym, kind: "breakout", dir: BK.dir, entry: BK.entry, exit, peakPct: +best.toFixed(2), pnl: +pnl.toFixed(5), min: Math.round((now() - BK.at) / 60000) });
+    lsSet("grid.trades", TR);
+    engineLog(`🏁 ${BK.sym}: пробійну угоду закрито ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT (найкраще було ${best >= 0 ? "+" : ""}${best.toFixed(2)}%) — далі нова сітка`, pnl >= 0 ? "up" : "down");
+    BK = null; saveBK();
+    if (P.on && P.autoRestart) ST.restartAt = now() + P.restartMin * 60000;
   }
   async function closeGrid(why, restart) {
     if (!G) return;
@@ -394,6 +460,7 @@ function create(host) {
     if (ST.busy) return; ST.busy = true;
     try {
       if (!keys || !keys.key) return;
+      if (BK) { await manageBreakout(); return; }
       if (!G) {
         if (P.on && now() >= (ST.restartAt || 0)) {
           try { await build(); }
@@ -487,6 +554,7 @@ function create(host) {
   async function boot() {
     connectPub(); connectPriv();
     if (G) { try { await loadSpec(G.sym); await ticker(G.sym); engineLog(`↺ Сітка ${G.sym} продовжує роботу після перезапуску`, "mute"); } catch (e) { setErr(e.message); } }
+    if (BK) engineLog(`↺ Пробійна угода ${BK.sym} продовжується після перезапуску (стоп і трейлінг стоять на біржі)`, "mute");
   }
   function setOn(on) {
     P.on = !!on; save();
@@ -494,8 +562,15 @@ function create(host) {
     else engineLog("■ Грід-бот зупинено: ордери сітки зняті (позиція лишається з її стопом, якщо є)", "mute");
     if (!on && G) { const g = G; for (const c of g.cells) if (c.order) { cancelOrderSym(g.sym, c.order); c.order = null; } saveG(); }
   }
-  async function newGrid() { if (G) await closeGrid("нова сітка за командою", false); ST.restartAt = 0; if (P.on) { try { await build(); } catch (e) { setErr(e.message); } } return G ? "Нова сітка " + G.sym : ST.err; }
-  async function closeNow() { if (!G) return "Сітки немає"; await closeGrid("закрито власником", false); return "Сітку закрито, позицію закрито ринком"; }
+  async function newGrid() { if (BK) return "Зараз іде пробійна угода — нова сітка буде після неї (або закрийте її кнопкою «Закрити»)"; if (G) await closeGrid("нова сітка за командою", false); ST.restartAt = 0; if (P.on) { try { await build(); } catch (e) { setErr(e.message); } } return G ? "Нова сітка " + G.sym : ST.err; }
+  async function closeNow() {
+    if (BK) {
+      try { await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: BK.sym, side: BK.dir > 0 ? "Sell" : "Buy", orderType: "Market", qty: String(BK.qty), reduceOnly: true, positionIdx: BK.ix, timeInForce: "IOC" } }); }
+      catch (e) { return "Не закрив пробійну угоду: " + e.message; }
+      ST.bkCheck = 0; return "Пробійну угоду закрито ринком";
+    }
+    if (!G) return "Сітки немає"; await closeGrid("закрито власником", false); return "Сітку закрито, позицію закрито ринком";
+  }
   function setParams(o) {
     const ch = [];
     for (const [k, v] of Object.entries(o || {})) {
@@ -514,13 +589,17 @@ function create(host) {
     let unreal = 0, pos = 0;
     if (g) for (const c of g.cells) if (c.state === "close" && c.openPx) { unreal += (p - c.openPx) * c.qty * c.dir; pos += c.qty * c.dir; }
     const cells = TR.filter(t => t.kind === "cell"), day = cells.filter(t => t.at >= now() - 86400e3);
-    return { bt: ST.bt || null, params: P, ws: ST.pubUp, priv: ST.privUp, err: now() - ST.errAt < 120000 ? ST.err : "", price: p, picks: ST.picks || [], hedge: ST.hedge,
+    const bk = BK && { sym: BK.sym, dir: BK.dir, qty: BK.qty, entry: BK.entry, price: p, pct: p ? +((p / BK.entry - 1) * 100 * BK.dir).toFixed(2) : null, pnl: p ? +((p - BK.entry) * BK.qty * BK.dir).toFixed(4) : null,
+      peakPct: +((BK.peak / BK.entry - 1) * 100 * BK.dir).toFixed(2), trailing: !!BK.trailing, stopSet: BK.stopSet, min: Math.round((now() - BK.at) / 60000),
+      stopPx: +(BK.entry * (1 - BK.dir * P.bkStopPct / 100)).toPrecision(6), activePx: +(BK.entry * (1 + BK.dir * P.bkTrailStart / 100)).toPrecision(6) };
+    return { bk, bt: ST.bt || null, params: P, ws: ST.pubUp, priv: ST.privUp, err: now() - ST.errAt < 120000 ? ST.err : "", price: p, picks: ST.picks || [], hedge: ST.hedge,
       restartIn: !g && P.on && ST.restartAt > now() ? Math.round((ST.restartAt - now()) / 1000) : null,
       grid: g && { trend: g.trend || null, btr: g.bt || null, sym: g.sym, mode: g.mode, low: g.low, high: g.high, stepPct: g.stepPct, qty: g.qty, lev: g.lev, n: g.cells.length, startedAt: g.startedAt, profit: +(g.profit || 0).toFixed(4), cycles: g.cycles || 0,
         trails: g.trails || 0, unreal: +unreal.toFixed(4), pos: +pos.toFixed(8), stopLow: +(g.low * (1 - P.slPct / 100)).toPrecision(6), stopHigh: +(g.high * (1 + P.slPct / 100)).toPrecision(6),
         cells: g.cells.map(c => ({ lo: c.lo, hi: c.hi, dir: c.dir, state: c.state, live: !!c.order, openPx: c.openPx })) },
       stats: { cycles: cells.length, profit: +cells.reduce((a, t) => a + t.pnl, 0).toFixed(4), day: +day.reduce((a, t) => a + t.pnl, 0).toFixed(4), dayCycles: day.length,
-        stops: TR.filter(t => t.kind === "grid").length, stopPnl: +TR.filter(t => t.kind === "grid").reduce((a, t) => a + t.pnl, 0).toFixed(4) },
+        stops: TR.filter(t => t.kind === "grid").length, stopPnl: +TR.filter(t => t.kind === "grid").reduce((a, t) => a + t.pnl, 0).toFixed(4),
+        breakouts: TR.filter(t => t.kind === "breakout").length, bkPnl: +TR.filter(t => t.kind === "breakout").reduce((a, t) => a + t.pnl, 0).toFixed(4) },
       trades: TR.slice(-30).reverse() };
   }
 

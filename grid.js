@@ -43,6 +43,29 @@ function create(host) {
   const TR = lsGet("grid.trades", []);    // completed cells + grid stops
   const ST = { err: "", errAt: 0, pubUp: false, privUp: false, price: 0, bid: 0, ask: 0, hedge: null, spec: null, busy: false, seenExec: new Set(), lastExecPoll: 0, restartAt: lsGet("grid.restartAt", 0), cool: lsGet("grid.cool", {}), lastTrail: 0, ex: {} };
   const setErr = (t) => { ST.err = t; ST.errAt = now(); log("grid", t); };
+  // Bybit allows ~10 order requests per second per symbol; everything private goes through one queue (≤ 7/s), a 10006 pauses the queue
+  let qTail = Promise.resolve(), qLast = 0;
+  function api(path, opts) {
+    if (!opts || !opts.auth) return bx(path, opts);
+    const run = async () => {
+      const wait = Math.max(0, qLast + 145 - now(), (ST.pauseUntil || 0) - now());
+      if (wait) await new Promise(r => setTimeout(r, wait));
+      qLast = now();
+      try { return await bx(path, opts); }
+      catch (e) {
+        if (e.code === 10006 || /rate limit|too many visits/i.test(e.message)) {
+          ST.pauseUntil = now() + 3000; ST.rl = (ST.rl || 0) + 1;
+          if (now() - (ST.rlLog || 0) > 60000) { ST.rlLog = now(); engineLog("⏳ Bybit: забагато запитів — пригальмовую на 3 с і повторюю", "mute"); }
+          await new Promise(r => setTimeout(r, 3000)); qLast = now();
+          return bx(path, opts);
+        }
+        throw e;
+      }
+    };
+    const p2 = qTail.then(run, run);
+    qTail = p2.catch(() => {});
+    return p2;
+  }
 
   const px = (v, up) => align(v, ST.spec.tickStr, up);
   const qa = (v, up) => Number(align(v, ST.spec.step, up));
@@ -72,7 +95,7 @@ function create(host) {
     pub.send(JSON.stringify({ op: "subscribe", args: [`tickers.${G.sym}`] })); pubSym = G.sym;
   }
   async function ticker(sym) {
-    const r = await bx("/v5/market/tickers", { query: { category: "linear", symbol: sym } });
+    const r = await api("/v5/market/tickers", { query: { category: "linear", symbol: sym } });
     const x = (r.list || [])[0]; if (!x) throw new Error("немає " + sym);
     ST.price = Number(x.lastPrice); ST.bid = Number(x.bid1Price); ST.ask = Number(x.ask1Price); ST.priceAt = now();
     return x;
@@ -112,7 +135,7 @@ function create(host) {
   function onOrder(o) {
     const p = parseLid(o.orderLinkId); if (!p || !G) return;
     const c = cellOf(p.k);
-    if (c && c.order === o.orderLinkId && ["Cancelled", "Rejected", "Deactivated"].includes(o.orderStatus) && !c.moving) { c.order = null; saveG(); }   // e.g. PostOnly rejected -> re-placed next loop
+    if (c && c.order === o.orderLinkId && ["Cancelled", "Rejected", "Deactivated"].includes(o.orderStatus) && !c.moving) { c.order = null; c.fails = (c.fails || 0) + 1; c.retryAt = now() + Math.min(30000, 2000 * c.fails); saveG(); }   // e.g. PostOnly rejected -> re-placed next loop
   }
 
   // ---------------- grid ----------------
@@ -124,27 +147,28 @@ function create(host) {
   }
   function idx(dir) { return ST.hedge ? (dir > 0 ? 1 : 2) : 0; }
   async function placeCell(c) {
+    if ((c.retryAt || 0) > now()) return false;
     const o = cellOrder(c);
     // PostOnly must not cross the book. An opening order beyond the price waits; a closing order beyond the price is already in profit -> close at the touch
-    if (o.kind === "o" && ((o.side === "Buy" && ST.ask && o.price >= ST.ask) || (o.side === "Sell" && ST.bid && o.price <= ST.bid))) return;
+    if (o.kind === "o" && ((o.side === "Buy" && ST.ask && o.price >= ST.ask) || (o.side === "Sell" && ST.bid && o.price <= ST.bid))) return false;
     if (o.kind === "c" && o.side === "Sell" && ST.bid && o.price <= ST.bid) o.price = Number(px(ST.ask, true));
     if (o.kind === "c" && o.side === "Buy" && ST.ask && o.price >= ST.ask) o.price = Number(px(ST.bid, false));
     const id = lid(c.k, o.kind);
     c.order = id; c.orderAt = now();
     try {
-      await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: o.side, orderType: "Limit", qty: String(c.qty), price: String(o.price),
+      await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: o.side, orderType: "Limit", qty: String(c.qty), price: String(o.price),
         timeInForce: "PostOnly", orderLinkId: id, positionIdx: idx(c.dir), reduceOnly: ST.hedge || P.mode !== "neutral" ? o.reduce : false } });
-      saveG();
+      c.fails = 0; saveG(); return true;
     } catch (e) {
-      c.order = null;
-      if (e.code === 10001) { ST.hedge = !ST.hedge; return; }
-      if (e.code === 110017 || e.code === 110025) { c.state = "open"; return; }     // nothing to reduce: the holding is gone (stop) -> wait to open again
-      if ([110007, 110004, 110012].includes(e.code)) { if (now() - (ST.nmAt || 0) > 60000) { ST.nmAt = now(); engineLog("💰 мало вільних коштів для ордера сітки — зменште суму або кількість сіток", "down"); } return; }
-      setErr(`ордер сітки: ${e.message}`);
+      c.order = null; c.fails = (c.fails || 0) + 1; c.retryAt = now() + Math.min(60000, 1000 * 2 ** Math.min(6, c.fails));   // a failing cell retries ever more slowly
+      if (e.code === 10001) { ST.hedge = !ST.hedge; c.retryAt = 0; return true; }
+      if (e.code === 110017 || e.code === 110025) { c.state = "open"; return true; }     // nothing to reduce: the holding is gone (stop) -> wait to open again
+      if ([110007, 110004, 110012].includes(e.code)) { if (now() - (ST.nmAt || 0) > 60000) { ST.nmAt = now(); engineLog("💰 мало вільних коштів для ордера сітки — зменште суму або кількість сіток", "down"); } return true; }
+      setErr(`ордер сітки: ${e.message}`); return true;
     }
   }
   async function cancelOrder(id) {
-    try { await bx("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, orderLinkId: id } }); } catch (e) { /* gone */ }
+    try { await api("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, orderLinkId: id } }); } catch (e) { /* gone */ }
   }
   function filled(c, kind, avg, fee) {
     c.order = null;
@@ -163,7 +187,7 @@ function create(host) {
 
   // the coin for a grid: swings a lot within the day (range) but its 24 h change is small; enough turnover
   async function pickCoin() {
-    const r = await bx("/v5/market/tickers", { query: { category: "linear" } });
+    const r = await api("/v5/market/tickers", { query: { category: "linear" } });
     const rows = (r.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.turnover24h) >= P.minTurnoverM * 1e6 && Number(x.lastPrice) > 0 && !((ST.cool[x.symbol] || 0) > now()))
       .map(x => { const range = (Number(x.highPrice24h) - Number(x.lowPrice24h)) / Number(x.lastPrice) * 100, chg = Math.abs(Number(x.price24hPcnt || 0) * 100);
         return { sym: x.symbol, range, chg, score: range / (chg + 2) * Math.log10(Number(x.turnover24h)) }; })
@@ -175,8 +199,8 @@ function create(host) {
   async function loadSpec(sym) {
     const s = await spec(sym);
     ST.spec = { tickStr: s.tick, tick: Number(s.tick), step: s.step, minQty: Number(s.minQty || 0), minNotional: Number(s.minNotional || 5), maxLev: Number(s.maxLev || 10) };
-    try { const fr = ((await bx("/v5/account/fee-rate", { query: { category: "linear", symbol: sym }, auth: true })).list || [])[0]; if (fr) ST.spec.maker = Number(fr.makerFeeRate) * 100; } catch (e) { /* default */ }
-    try { const r = await bx("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true }); ST.hedge = (r.list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { ST.hedge = false; }
+    try { const fr = ((await api("/v5/account/fee-rate", { query: { category: "linear", symbol: sym }, auth: true })).list || [])[0]; if (fr) ST.spec.maker = Number(fr.makerFeeRate) * 100; } catch (e) { /* default */ }
+    try { const r = await api("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true }); ST.hedge = (r.list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { ST.hedge = false; }
   }
   async function build() {
     let sym = P.symbol, info = null;
@@ -204,7 +228,7 @@ function create(host) {
     if (n < 2) throw new Error(`замало коштів: на ${sym} мінімальний ордер ${minNotional.toFixed(2)} USDT, а ${P.investment} USDT × x${lev} вистачає на ${maxByMoney} — збільште суму або плече`);
     const r = Math.pow(high / low, 1 / n), L = Array.from({ length: n + 1 }, (_, i) => Number(px(low * Math.pow(r, i), false)));
     const qty = Math.max(qa(P.investment * lev / n / price, false), qa(minNotional / low, true));
-    try { await bx("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); }
+    try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); }
     catch (e) { if (e.code !== 110043) log("leverage", e.message); }
     const id = now().toString(36).slice(-5);
     G = { id, sym, mode: P.mode, low: L[0], high: L[n], levels: L, stepPct: +((r - 1) * 100).toFixed(3), qty, lev, startedAt: now(), startPrice: price, profit: 0, cycles: 0, fees: 0, trails: 0, cells: [] };
@@ -225,7 +249,7 @@ function create(host) {
     const init = initBuy || initSell;
     if (init) {
       try {
-        await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: initBuy ? "Buy" : "Sell", orderType: "Market", qty: String(qa(init, false)), orderLinkId: ("gi" + id + "." + (now() % 1e6).toString(36)).slice(0, 36), positionIdx: idx(initBuy ? 1 : -1), timeInForce: "IOC" } });
+        await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: initBuy ? "Buy" : "Sell", orderType: "Market", qty: String(qa(init, false)), orderLinkId: ("gi" + id + "." + (now() % 1e6).toString(36)).slice(0, 36), positionIdx: idx(initBuy ? 1 : -1), timeInForce: "IOC" } });
       } catch (e) { setErr("стартова позиція сітки: " + e.message); }
     }
   }
@@ -263,7 +287,7 @@ function create(host) {
     // a long grid trailing up needs the coin for the new top cell: bought at market (like Bybit's trailing up); short grid trailing down: sold
     if ((P.mode === "long" && where === "вгору") || (P.mode === "short" && where === "вниз")) {
       try {
-        await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: dir > 0 ? "Buy" : "Sell", orderType: "Market", qty: String(c.qty), orderLinkId: ("gi" + G.id + ".t" + (now() % 1e6).toString(36)).slice(0, 36), positionIdx: idx(dir), timeInForce: "IOC" } });
+        await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: G.sym, side: dir > 0 ? "Buy" : "Sell", orderType: "Market", qty: String(c.qty), orderLinkId: ("gi" + G.id + ".t" + (now() % 1e6).toString(36)).slice(0, 36), positionIdx: idx(dir), timeInForce: "IOC" } });
         c.state = "close"; c.openPx = ST.price; c.openFee = c.qty * ST.price * 0.00055;
       } catch (e) { setErr("трейлінг: " + e.message); }
     }
@@ -290,9 +314,9 @@ function create(host) {
         const hedge = ST.hedge;
         if (hedge) {
           const lq = g.cells.filter(c => c.state === "close" && c.dir > 0).reduce((s, c) => s + c.qty, 0), sq = g.cells.filter(c => c.state === "close" && c.dir < 0).reduce((s, c) => s + c.qty, 0);
-          if (lq) await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: "Sell", orderType: "Market", qty: String(qa(lq, false)), reduceOnly: true, positionIdx: 1, timeInForce: "IOC" } });
-          if (sq) await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: "Buy", orderType: "Market", qty: String(qa(sq, false)), reduceOnly: true, positionIdx: 2, timeInForce: "IOC" } });
-        } else await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: net > 0 ? "Sell" : "Buy", orderType: "Market", qty: String(qa(Math.abs(net), false)), reduceOnly: true, positionIdx: 0, timeInForce: "IOC" } });
+          if (lq) await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: "Sell", orderType: "Market", qty: String(qa(lq, false)), reduceOnly: true, positionIdx: 1, timeInForce: "IOC" } });
+          if (sq) await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: "Buy", orderType: "Market", qty: String(qa(sq, false)), reduceOnly: true, positionIdx: 2, timeInForce: "IOC" } });
+        } else await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: g.sym, side: net > 0 ? "Sell" : "Buy", orderType: "Market", qty: String(qa(Math.abs(net), false)), reduceOnly: true, positionIdx: 0, timeInForce: "IOC" } });
       } catch (e) { setErr("закриття сітки: " + e.message); }
       for (const c of g.cells) if (c.state === "close") pnl += (ST.price - c.openPx) * c.qty * c.dir - (c.openFee || 0) - c.qty * ST.price * 0.00055;
     }
@@ -302,7 +326,7 @@ function create(host) {
     if (why.startsWith("стоп")) { ST.cool[g.sym] = now() + 3 * 3600e3; lsSet("grid.cool", ST.cool); }
     if (restart && P.autoRestart && P.on) { ST.restartAt = now() + P.restartMin * 60000; lsSet("grid.restartAt", ST.restartAt); engineLog(`🔁 Нова сітка через ${P.restartMin} хв`, "mute"); }
   }
-  async function cancelOrderSym(sym, id) { try { await bx("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderLinkId: id } }); } catch (e) { /* gone */ } }
+  async function cancelOrderSym(sym, id) { try { await api("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderLinkId: id } }); } catch (e) { /* gone */ } }
 
   // ---------------- the loop ----------------
   async function loop() {
@@ -320,7 +344,11 @@ function create(host) {
       await checkStop(); if (!G) return;
       for (let k = 0; k < 3 && G; k++) { const before = G.trails || 0; ST.lastTrail = 0; await trail(); if ((G.trails || 0) === before) break; }   // a fast move: up to 3 cells per second
       // every cell has its order on the exchange
-      for (const c of G.cells) if (!c.order && G) await placeCell(c);
+      let sent = 0;
+      for (const c of G.cells.slice().sort((a, b) => Math.abs((a.lo + a.hi) / 2 - ST.price) - Math.abs((b.lo + b.hi) / 2 - ST.price))) {   // the cells nearest the price first
+        if (sent >= 5 || !G) break;
+        if (!c.order && await placeCell(c)) sent++;
+      }
     } catch (e) { setErr(e.message); }
     finally { ST.busy = false; }
   }
@@ -331,16 +359,18 @@ function create(host) {
     if (!G || !keys || !keys.key) return;
     try {
       if (!ST.privUp) {
-        const r = await bx("/v5/execution/list", { query: { category: "linear", symbol: G.sym, limit: "100", startTime: String(Math.max(ST.lastExecPoll || now() - 60000, now() - 600000)) }, auth: true });
+        const r = await api("/v5/execution/list", { query: { category: "linear", symbol: G.sym, limit: "100", startTime: String(Math.max(ST.lastExecPoll || now() - 60000, now() - 600000)) }, auth: true });
         ST.lastExecPoll = now() - 2000;
         for (const x of (r.list || []).slice().reverse()) onExec(Object.assign({ symbol: G.sym }, x));
       }
-      const live = new Set(((await bx("/v5/order/realtime", { query: { category: "linear", symbol: G.sym, limit: "50" }, auth: true })).list || []).map(o => o.orderLinkId));
+      const live = new Set(((await api("/v5/order/realtime", { query: { category: "linear", symbol: G.sym, limit: "50" }, auth: true })).list || []).map(o => o.orderLinkId));
+      let looks = 0;
       for (const c of G.cells) {
         if (!c.order || live.has(c.order) || now() - (c.orderAt || 0) < 5000) continue;
+        if (++looks > 4) break;
         const id = c.order;
         try {
-          const h = ((await bx("/v5/order/history", { query: { category: "linear", symbol: G.sym, orderLinkId: id }, auth: true })).list || [])[0];
+          const h = ((await api("/v5/order/history", { query: { category: "linear", symbol: G.sym, orderLinkId: id }, auth: true })).list || [])[0];
           if (h && h.orderStatus === "Filled") { const p = parseLid(id); if (p && c.order === id) filled(c, p.kind, Number(h.avgPrice) || (p.kind === "o" ? cellOrder(c).price : cellOrder(c).price), Number(h.cumExecFee || 0)); }
           else if (c.order === id) c.order = null;
         } catch (e) { /* next time */ }
@@ -354,7 +384,7 @@ function create(host) {
   }
   setInterval(reconcile, 5000);
   async function syncPosition() {
-    const r = await bx("/v5/position/list", { query: { category: "linear", symbol: G.sym }, auth: true });
+    const r = await api("/v5/position/list", { query: { category: "linear", symbol: G.sym }, auth: true });
     const ex = (r.list || []).reduce((s2, x) => s2 + Number(x.size || 0) * (x.side === "Buy" ? 1 : x.side === "Sell" ? -1 : 0), 0);
     const mine = G.cells.filter(c => c.state === "close").reduce((s2, c) => s2 + c.qty * c.dir, 0);
     const diff = ex - mine;

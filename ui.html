@@ -37,13 +37,12 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
   <div class="card" id="fullCard" style="border-color:#f7a600">
     <div style="display:flex;gap:8px;margin-bottom:10px;align-items:flex-end">
       <label class="f" style="flex:1">Монета (порожньо — бот вибирає сам)<input id="fSym" placeholder="напр. BTC, SOL, PEPE" autocapitalize="characters" autocomplete="off"></label>
-      <button class="btn" id="fSymGo" style="display:none;min-height:40px">Перейти</button>
     </div>
     <button class="big go" id="fMain">▶ ЗАПУСТИТИ</button>
     <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
   </div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
-  <details id="manual" style="margin-top:18px"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
+  <details id="manual" style="display:none"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
   <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="bg">🚀 Пробійна сітка — налаштування</button></div>
   <div id="tabGrid">
 
@@ -387,7 +386,10 @@ function paintBrain() {
 const FULL_ON = () => !!(S.bg.params.on && S.bg.params.flip);
 let FSYM = false;
 $("fSym").oninput = () => { FSYM = true; };
-$("fSymGo").onclick = () => { const sym = $("fSym").value.trim(); act({ what: "full-coin", sym }, sym ? `Перейти на ${sym.toUpperCase()}? Відкриті угоди на поточній монеті закриються ринком.` : "Нехай бот сам вибирає монету?").then(t => { if (t) { $("fInfo").innerHTML = esc(t); FSYM = false; } }); };
+// while running: a new coin in the field is applied on Enter (or when leaving the field)
+const goCoin = () => { if (!FULL_ON() || !FSYM) return; const sym = $("fSym").value.trim(), cur = S.bg.params.autoCoin ? "" : (S.bg.params.symbol || "").replace(/USDT$/, ""); if (sym.toUpperCase().replace(/USDT$/, "") === cur) { FSYM = false; return; } act({ what: "full-coin", sym }, sym ? `Перейти на ${sym.toUpperCase()}? Відкриті угоди на поточній монеті закриються ринком.` : "Нехай бот сам вибирає монету?").then(t => { if (t) $("fInfo").innerHTML = esc(t); FSYM = false; }); };
+$("fSym").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("fSym").blur(); } };
+$("fSym").onchange = goCoin;
 $("fMain").onclick = () => FULL_ON() ? act({ what: "full-off" }, "Зупинити бота? Нових угод не буде; відкриті закриються на тейку або в точці розвороту.")
   : act({ what: "full-on", sym: $("fSym").value.trim() }, `Запустити бота${$("fSym").value.trim() ? " на " + $("fSym").value.trim().toUpperCase() : ""}${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nВін сам вибирає монету, іде за ціною в будь-який бік, бере тейки по 0.3%, а замість стопу розвертається. Плече до x50, розмір — від балансу.\nРизик: у «пилці» (дрібні смикання туди-сюди) розвороти дають збитки.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
 function paintFull() {
@@ -397,7 +399,7 @@ function paintFull() {
   const cur = X.params.autoCoin ? "" : (X.params.symbol || "").replace(/USDT$/, "");
   if (!FSYM && document.activeElement !== $("fSym")) $("fSym").value = cur;
   const typed = $("fSym").value.trim().toUpperCase().replace(/USDT$/, "");
-  $("fSymGo").style.display = on && typed !== cur ? "" : "none"; $("fSymGo").disabled = BUSY;
+  $("fSym").parentElement.firstChild.textContent = on ? (typed !== cur ? "Монета — натисніть Enter, щоб перейти" : "Монета (впишіть іншу й Enter — бот перейде; порожньо — вибирає сам)") : "Монета (порожньо — бот вибирає сам)";
   const kpi = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px"><div class="k"><b>${f(eq, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div></div>`;
   if (!on) { $("fInfo").innerHTML = kpi + '<span class="mute">Натисніть — і бот усе робить сам: вибирає монету, що рухається, іде за ціною куди б вона не пішла, кожен рух на 0.3% забирає тейком (чистими після комісій), а замість стопу — розворот: якщо ціна відкотилась на кілька рівнів від найкращої точки, закриває все і йде в інший бік. Плече до x50, розмір від балансу — працює навіть з 1 USDT.</span>' + (b && b.units.length ? `<div style="margin-top:6px">Відкриті угоди: ${b.units.length} на ${esc(b.sym)} (закриються на тейку або розвороті)</div>` : ""); return; }
   $("fInfo").innerHTML = kpi + (b ? `<span class="dot on"></span><b>${esc(b.sym)}</b> · ${b.d > 0 ? '<b class="up">▲ ЛОНГ</b>' : '<b class="down">▼ ШОРТ</b>'} · ціна ${pr(X.price)}<br>`

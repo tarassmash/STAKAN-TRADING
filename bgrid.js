@@ -210,6 +210,7 @@ function create(host) {
     try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: pl.sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); } catch (e) { /* not modified */ }
     const qty = Math.max(qa(P.investment * lev / (pl.units + 1) / ST.price, false), qa(Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * ST.price) / ST.price, true));
     B = { scalp: P.scalp, fee: pl.fee, id: now().toString(36).slice(-5), sym: pl.sym, stepPct: pl.step, maxUnits: pl.units, qty, lev, anchor: ST.price, last: 0, d: 0, units: [], nextK: 1, profit: 0, wins: 0, losses: 0, startedAt: now(), idleAt: now(), bt: { roi: pl.roi, wins: pl.wins, losses: pl.losses, flips: pl.flips, days: P.btDays, tested: pl.tested } };
+    B.maxUnits = Math.max(1, Math.min(B.maxUnits, Math.floor(P.investment * lev / (qty * ST.price)) - 1));   // the minimum order rounds a unit up: only as many as the money really holds
     B.last = idxOf(ST.price);
     if (P.flip) {   // the first direction: the EMA if it has one, else the last hour's move
       const cs = await candles5m(pl.sym, 200), dd = dirOf(cs), h = cs.length > 12 ? cs[cs.length - 1].c - cs[cs.length - 13].c : 1;
@@ -217,10 +218,10 @@ function create(host) {
     }
     saveB(); subPub();
     if (B.flip) {
-      engineLog(`🔁 Пробій-розворот ${pl.sym}: тейки ${pl.step}% (комісії ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}%), розворот при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * pl.step).toFixed(2)}%), до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, розворотів ${pl.flips}` : ""} · старт ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, "up");
+      engineLog(`🔁 Пробій-розворот ${pl.sym}: тейки ${pl.step}% (комісії ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}%), розворот при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * pl.step).toFixed(2)}%), до ${B.maxUnits} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, розворотів ${pl.flips}` : ""} · старт ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, "up");
       await openAt(B.last, B.d, "старт"); return;
     }
-    engineLog(`🚀 ${P.scalp ? "⚡ Суперскальпінг" : "Пробійна сітка"} ${pl.sym}: ${P.scalp ? `тейки ${pl.step}% (комісії за коло ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}% з тейка)` : `крок ${pl.step}%`}, до ${pl.units} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
+    engineLog(`🚀 ${P.scalp ? "⚡ Суперскальпінг" : "Пробійна сітка"} ${pl.sym}: ${P.scalp ? `тейки ${pl.step}% (комісії за коло ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}% з тейка)` : `крок ${pl.step}%`}, до ${B.maxUnits} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
     await updateDir(true);
   }
   async function updateDir(force) {

@@ -153,7 +153,7 @@ The engine trades coinCount (5) HOT coins at once - the ones going crazy right n
 change are checked on 1-minute candles (range of the last 15 min, volume surge of the last 5 min vs the 25 before, move of the last 5 min);
 coins that cool down are replaced ("candidates" shows the list with range15/surge/move5). Send "symbols" only to override (max 10).
 Use bySymbolMode/byMode/byExit/series to decide: mode, thresholds, take/stop, edges, coin. The owner wants long series of winning trades.
-Rules: never remove stops; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
+Rules: never remove stops; the owner set the stop to 5% (stopPct, mmStopPct) - do not lower it below 5; leverage is capped by the engine so liquidation never comes before the stop; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
 no trades for a long time -> lower thr or pick busier coins.
 Answer with ONE JSON object only, no text around it:
 {"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,feeX,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,

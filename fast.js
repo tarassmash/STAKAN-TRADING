@@ -27,7 +27,7 @@ const DEFAULTS = {
   takePct: 0.12,           // and at least this %
   ofiSec: 3,               // window of the order-flow imbalance and the tape imbalance, s
   takeTicks: 2,            // take in ticks (at least what beats the fees)
-  stopPct: 0.3,            // stop from the entry, %
+  stopPct: 5,              // stop from the entry, % (owner: 5%)
   beAtPct: 0.15,           // the price went this far our way -> the stop moves to entry + fees (no loss any more)
   minHoldSec: 30,          // no soft exit before this: the trade gets time to reach the take
   maxHoldSec: 900,         // longer -> leave at the touch if not losing (a losing trade is left to the take or the stop)
@@ -41,14 +41,14 @@ const DEFAULTS = {
   mmQtyPct: 30,            // size of each quote, % of the inventory cap
   mmSkew: 1,               // how strongly the inventory shifts the quotes (0..3)
   mmToxic: 0.4,            // flow score against a side above this -> that quote is pulled
-  mmStopPct: 0.5,          // stop on the inventory, %
+  mmStopPct: 5,            // stop on the inventory, %
   mmMaxHoldSec: 600,       // inventory older than this -> flatten at the touch
   // learning
   learn: true,             // adapt the micro threshold, MM edge and the mode per coin from own results
 };
 const NUM = { coinCount: [1, 10], minTurnoverM: [5, 5000], pickEveryMin: [2, 240], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 10],
-  thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], feeX: [1, 30], stopPct: [0.05, 3], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
-  cooldownSec: [0, 600], mmEdgePct: [0.01, 1], mmQtyPct: [5, 100], mmSkew: [0, 3], mmToxic: [0.2, 1], mmStopPct: [0.1, 5], mmMaxHoldSec: [10, 3600] };
+  thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], feeX: [1, 30], stopPct: [0.05, 20], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
+  cooldownSec: [0, 600], mmEdgePct: [0.01, 1], mmQtyPct: [5, 100], mmSkew: [0, 3], mmToxic: [0.2, 1], mmStopPct: [0.1, 20], mmMaxHoldSec: [10, 3600] };
 const BOOL = ["autoCoins", "stepIn", "fastExit", "learn", "on"];
 
 function create(host) {
@@ -68,6 +68,7 @@ function create(host) {
   if (!(P.v >= 4)) { P.coinCount = 1; P.maxPositions = 1; if (P.symbols.length > 1) P.symbols = P.symbols.slice(0, 1); P.v = Math.max(P.v || 0, 4); lsSet("fx", P); ST_PICK = true; }
   if (!(P.v >= 5)) { Object.assign(P, { feeX: 10, beAtPct: Math.max(P.beAtPct || 0, 0.15), minHoldSec: Math.max(P.minHoldSec || 0, 30), maxHoldSec: Math.max(P.maxHoldSec || 0, 900), mmMaxHoldSec: Math.max(P.mmMaxHoldSec || 0, 600) }); P.v = 5; lsSet("fx", P); }
   if (!(P.v >= 6)) { Object.assign(P, { coinCount: 5, maxPositions: 5, pickEveryMin: 3, minTurnoverM: Math.min(P.minTurnoverM || 50, 50), autoCoins: true }); P.v = 6; lsSet("fx", P); ST_PICK = true; }
+  if (!(P.v >= 7)) { P.stopPct = 5; P.mmStopPct = 5; P.v = 7; lsSet("fx", P); }
   const save = () => lsSet("fx", P);
   const TR = lsGet("fxTrades", []);                     // closed round trips
   const LEARN = Object.assign({ thr: {}, edge: {}, modeStat: {} }, lsGet("fxLearn", {}));
@@ -274,17 +275,18 @@ function create(host) {
   setInterval(() => { if (P.on) refreshWallet(); }, 3000);
   // little money: the order is made smaller and, if even the exchange minimum does not fit, the leverage of that coin goes up (to its max)
   function sizing(sym, price) {
-    const m = M[sym], base = Math.min(P.leverage, Math.floor(m.maxLev || P.leverage));
+    const m = M[sym], safe = Math.max(1, Math.floor(80 / Math.max(P.stopPct, P.mmStopPct, 0.1)));    // stop 5% -> at most x16
+    const maxLev = Math.min(Math.floor(m.maxLev || P.leverage), safe), base = Math.min(P.leverage, maxLev);
     const minNotional = Math.max(m.minNotional * 1.05, m.minQty * price);
     const free = ST.avail == null ? Infinity : Math.max(0, ST.avail * 0.9);
     const margin = Math.min(P.margin, free) * (m.sizeK || 1);
     let lev = base;
-    if (margin * lev < minNotional) lev = Math.min(Math.floor(m.maxLev || base), Math.ceil(minNotional * 1.1 / Math.max(margin, 1e-9)));
+    if (margin * lev < minNotional) lev = Math.min(maxLev, Math.ceil(minNotional * 1.1 / Math.max(margin, 1e-9)));
     const ok = margin * lev >= minNotional;
     return { margin, lev, ok, minNotional, free };
   }
   async function setLev(sym, want) {
-    const m = M[sym], lev = Math.max(1, Math.round(want || Math.min(P.leverage, Math.floor(m.maxLev || P.leverage))));
+    const m = M[sym], lev = Math.max(1, Math.round(want || sizing(sym, m.bb || 1).lev));
     if (ST.lev[sym] === lev) return;
     if (ST.lev[sym] > lev && now() - ((ST.levAt || {})[sym] || 0) < 60000) return;   // a higher leverage stays at least a minute (no flapping)
     (ST.levAt = ST.levAt || {})[sym] = now();
@@ -339,7 +341,7 @@ function create(host) {
     if (q < minQ) q = minQ;
     return Number(align(q, m.step, false)) || minQ;
   };
-  const noMoney = (sym, price) => { const z = sizing(sym, price); return `мало коштів: вільно ${z.free === Infinity ? "?" : z.free.toFixed(2)} USDT, мінімальний ордер ${z.minNotional.toFixed(2)} USDT навіть з плечем x${Math.floor(M[sym].maxLev || 1)}`; };
+  const noMoney = (sym, price) => { const z = sizing(sym, price); return `мало коштів: вільно ${z.free === Infinity ? "?" : z.free.toFixed(2)} USDT, мінімальний ордер ${z.minNotional.toFixed(2)} USDT навіть з плечем x${Math.min(Math.floor(M[sym].maxLev || 1), Math.max(1, Math.floor(80 / Math.max(P.stopPct, P.mmStopPct, 0.1))))} (більше не можна: ліквідація настала б раніше за стоп ${P.stopPct}%)`; };
 
   // exchange stop on every position (last-price trigger: faster than the mark price)
   const stopQ = new Set();

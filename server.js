@@ -1,4 +1,4 @@
-// STAKAN FAST 24/7: швидка торгівля по стакану Bybit в інституційному стилі (мікроструктура + маркет-мейкінг) + AI-автопілот fal.ai.
+// OI TRADER 24/7: торгівля за ростом відкритого інтересу на Bybit (тренд + сквіз) + AI-автопілот fal.ai, що вирішує, який сценарій працює.
 // Сторінка лише показує стан і надсилає команди; торгує сервер, навіть коли браузер закритий.
 "use strict";
 const http = require("http");
@@ -105,9 +105,9 @@ async function refreshAccount() {
   } catch (e) { ACC.err = e.message; }
 }
 
-// ---------------- the fast engine ----------------
-const FX = require("./fast").create({
-  bx, spec, align, log: (...a) => log("fast", ...a), engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, env: ENV,
+// ---------------- the open-interest engine ----------------
+const FX = require("./oi").create({
+  bx, spec, align, log: (...a) => log("oi", ...a), engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, env: ENV,
   keys: HAS_KEYS ? { key: KEY } : null, sign: (s) => crypto.createHmac("sha256", SECRET).update(s).digest("hex"),
   testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined, takerFee: process.env.TAKER_FEE_PCT != null ? Number(process.env.TAKER_FEE_PCT) : undefined,
@@ -129,44 +129,37 @@ function aiSet(on) {
   if (on) { AI.last = Date.now(); setTimeout(() => aiTick(true), 300); }
   return on ? "AI увімкнено" : "AI вимкнено";
 }
-const SYSTEM = `You have FULL control of a fast, institutional-style order-book trading engine on Bybit USDT perpetuals. The owner gave you the
-steering wheel 100%: there is no human in the loop. The owner only presses Start/Stop. Your only job is to grow the account.
-Every period you get the engine state and decide how it trades next. "yourTrackRecord" lists your previous decisions and the profit/loss
-made in the period after each of them: repeat what worked, stop what lost money, say what you learned in "lesson".
-Trading NEVER stops (no pause, no daily limit, you cannot switch it off) - make it profitable by tuning.
-The engine works in two modes (per coin; "mode": "auto" lets the engine choose per coin):
- - "micro" (microstructure): score -1..1 = 0.35*OFI (order-flow imbalance at the touch over ofiSec) + 0.25*microprice skew + 0.2*imbalance of
-   5 levels + 0.2*tape imbalance, weakened when the tape is quiet. |score| >= thr -> PostOnly limit entry at the best price (stepIn: one tick
-   inside a 2+ tick spread), take = takeTicks (never less than the maker fees), exchange stop stopPct, exit at the touch as soon as the flow turns
-   (score against >= 0.6*thr) or after maxHoldSec; the strong-reversal exit (revExit) is OFF by the owner's choice (it cut trades that recovered) - keep it off; fastExit crosses the spread if the touch exit does not fill in 3 s while losing.
- - "mm" (market making): quotes on both sides around the microprice, at least mmEdgePct from it (learned multiplier per coin), size mmQtyPct of the
-   inventory cap, quotes shifted against the inventory (mmSkew), the side facing a toxic one-way flow (|score| >= mmToxic) is pulled, inventory
-   stop mmStopPct, inventory older than mmMaxHoldSec is flattened at the touch. MM pays only where the spread/tick is wider than 2 maker fees.
-Little free money is fine: the engine sizes every order to the free balance ("avail") and raises a coin's leverage up to its max so that the exchange minimum order still fits; it never refuses to trade for lack of money while the minimum fits.
-The owner demands every take to be at least feeX (10) times the round-trip fee (micro take and the MM profit per cycle); keep feeX >= 10.
-FEES ARE THE MAIN ENEMY: a round trip with maker fees costs ~0.04% (taker 0.11%); "gross" vs "fees" per mode shows if fees eat the edge.
-Prefer fewer, stronger trades (higher thr), takes of several fee multiples (takePct), time to reach them (minHoldSec), breakeven stop (beAtPct),
-no taker exits (fastExit false). The engine itself raises the take / widens MM quotes when 10 trades of a coin were positive before fees but negative after.
-Fees: maker and taker in % ("fees"); every result is net of fees. Latency: wsLagMs (market data), orderMs (order round trip).
-Per-coin learning runs by itself (micro threshold up after 3 losses on a coin, MM edge wider after losing cycles, mode per coin by results).
-The engine trades coinCount (5) HOT coins at once - the ones going crazy right now on Bybit: every pickEveryMin minutes the top movers by 24 h
-change are checked on 1-minute candles (range of the last 15 min, volume surge of the last 5 min vs the 25 before, move of the last 5 min);
-coins that cool down are replaced ("candidates" shows the list with range15/surge/move5). Send "symbols" only to override (max 10).
-Use bySymbolMode/byMode/byExit/series to decide: mode, thresholds, take/stop, edges, coin. The owner wants long series of winning trades.
-Rules: never remove stops; the owner set the stop to 5% (stopPct, mmStopPct) - do not lower it below 5; leverage is capped by the engine so liquidation never comes before the stop; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
-no trades for a long time -> lower thr or pick busier coins.
+const SYSTEM = `You have FULL control of an open-interest (OI) trading bot on Bybit USDT perpetuals. The owner gave you the steering wheel 100%:
+there is no human in the loop. The owner only presses Start/Stop. Your only job is to grow the account. The owner's previous order-book bots
+only lost money, so be strict: trade only clear OI setups. "yourTrackRecord" lists your previous decisions and the profit/loss of the period
+after each of them: repeat what worked, stop what lost money, say what you learned in "lesson". Trading never stops (you cannot switch it off).
+How the bot works: every scanSec it scans ALL USDT perps (turnover >= minTurnoverM): change of open interest over 5/15/60 min (oi5, oi15, oi60, %),
+price change over 5/15 min (px5, px15, %), funding rate (%). Two scenarios ("strategy": "trend" | "squeeze" | "both"):
+ - trend: oi15 >= oiMin and oi5 >= oiMin5 (OI still rising) and |px15| >= pxMin with px5 in the same direction -> new money enters in the
+   direction of the price -> enter that way.
+ - squeeze: oi15 >= oiMin and oi5 >= oiMin5 while |px15| <= pxFlat and |funding| >= fundMin -> the crowd piles in (funding > 0 = longs crowded)
+   -> enter against the crowd and wait for the flush.
+YOU decide which scenario works now: compare byStrategy / bySide / byExit and the live "topOiMovers"; set "strategy" accordingly (both = take the
+strongest signal of either). With learn on, a scenario that keeps losing while the other wins is skipped by itself.
+Entry: PostOnly limit at the best price (follows the price up to entryWaitSec). Exits: take max(takePct, feeX x round-trip fee) as a limit,
+exchange stop stopPct, trailing stop from trailStart at trailGap behind the best price, exit at the touch when OI falls oiExit % in 5 min while in
+profit (the move is over), maxHoldMin. A coin rests cooldownMin after a trade. Up to maxPositions positions at once, margin per trade, leverage
+(capped by the engine so liquidation never comes before the stop). Fees: maker ~0.02%, taker ~0.055% per side; every result is net of fees.
+Rules: never remove stops; keep feeX >= 10; with few trades change one or two settings at a time; prefer values that made money with n >= 8;
+no trades for a long time -> lower oiMin/pxMin a little.
 Answer with ONE JSON object only, no text around it:
-{"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,feeX,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,
-maxSpreadTicks,stepIn,cooldownSec,fastExit,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,mmMaxHoldSec,margin,leverage,maxPositions,autoCoins,coinCount,minTurnoverM,pickEveryMin,learn}},"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
-const CMD_SYSTEM = `You are the voice assistant of the owner's fast Bybit order-book trading app. The owner speaks (or types) an instruction in Ukrainian,
+{"regime":"calm|range|trend|volatile|chaotic","oi":{"params":{optional: strategy,oiMin,oiMin5,pxMin,pxFlat,fundMin,minTurnoverM,maxSpreadPct,feeX,takePct,
+stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn}},
+"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
+const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit open-interest trading app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
 transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
  "engine": "start" | "stop"       (stop also switches the AI off)
  "ai": true | false               (AI autopilot on/off)
- "fast": {"symbols":[...], "params":{mode:"micro"|"mm"|"auto",thr,takeTicks,stopPct,maxHoldSec,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,margin,leverage,maxPositions,autoCoins,coinCount,minTurnoverM,learn,...}}
+ "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,...}}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
  "aiEveryMin": n                  (how often the AI decides)
- "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future, e.g. "be more careful", "trade only BTC")
+ "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future)
  "forget": true                   (clear remembered instructions)
 Answer with ONE JSON object: {"actions":{...}, "summary":"what will be done, in Ukrainian, short list", "question":"ask only if unclear, else empty"}`;
 async function falJSON(system, prompt, maxTokens) {
@@ -192,10 +185,9 @@ function closePeriod() {
   h.closed = true;
 }
 function applyDecision(d, caps) {
-  const ch = [], s = d && (d.fast || d.superscalp);
+  const ch = [], s = d && (d.oi || d.fast);
   if (!s || typeof s !== "object") return ch;
   const p = Object.assign({}, s.params || {}); delete p.on;          // the AI never switches trading off
-  if (Array.isArray(s.symbols) && s.symbols.length) p.symbols = s.symbols;
   ch.push(...FX.setParams(p, caps));
   return ch;
 }
@@ -206,7 +198,7 @@ async function aiTick(force) {
   try {
     closePeriod();
     const ctx = { time: new Date().toISOString(), account: { equity: ACC.equity, available: ACC.available },
-      limits: { maxMarginPerCoin: capMargin(), maxLeverage: capLev() }, fast: FX.aiView(),
+      limits: { maxMarginPerTrade: capMargin(), maxLeverage: capLev() }, oi: FX.aiView(),
       yourTrackRecord: AI.history.slice(-12).map(h => ({ at: new Date(h.at).toISOString(), regime: h.regime, changes: h.changes, lesson: h.lesson || "",
         periodPnlUsdt: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null, periodWins: h.periodWins ?? null })) };
     const sys = SYSTEM + (AI.notes.length ? `\nThe OWNER's standing instructions (follow them; they have priority over your own preferences, but never remove stops):\n- ${AI.notes.map(n => n.text).join("\n- ")}\n` : "");
@@ -243,13 +235,13 @@ function applyCommand(id) {
     if (Number(a.limits.maxMargin) > 0) { AI.maxMargin = Number(a.limits.maxMargin); done.push(`межа маржі для AI ${AI.maxMargin} USDT`); }
   }
   if (Number(a.aiEveryMin) > 0) { AI.every = Math.max(2, Math.min(120, Math.round(Number(a.aiEveryMin)))); done.push(`AI вирішує кожні ${AI.every} хв`); }
-  const fx = a.fast || a.superscalp;
+  const fx = a.oi || a.fast;
   if (fx && typeof fx === "object") {
     const p = fx.params || {};
     // the owner's own command may raise margin/leverage; the AI caps follow it
     if (Number(p.margin) > 0) AI.maxMargin = Math.max(AI.maxMargin || 0, Number(p.margin));
     if (Number(p.leverage) > 0) AI.maxLev = Math.max(AI.maxLev || 0, Math.round(Number(p.leverage)));
-    done.push(...applyDecision({ fast: fx }, {}));
+    done.push(...applyDecision({ oi: fx }, {}));
   }
   const eng = a.engine || a.scalper;
   if (eng === "start" && !FX.params.on) { if (HAS_KEYS) { FX.setOn(true); done.push("торгівлю запущено"); } else done.push("немає ключів Bybit"); }
@@ -295,11 +287,11 @@ async function act(b) {
     FX.setOn(true);
     return FAL_KEY ? "Запущено; " + aiSet(true) : "Запущено (без AI: немає FAL_KEY)";
   }
-  if (what === "stop") { FX.setOn(false); aiSet(false); return "Зупинено: котирування й входи знято, відкриті позиції закриваються лімітом біля ринку"; }
+  if (what === "stop") { FX.setOn(false); aiSet(false); return "Зупинено: нові входи не відкриваються, відкриті позиції закриваються лімітом біля ринку"; }
   if (what === "ai-on") return aiSet(true);
   if (what === "ai-off") return aiSet(false);
   if (what === "ai-now") { if (!AI.on) return "Спершу увімкніть AI"; aiTick(true); return "AI думає…"; }
-  if (what === "mode" && ["micro", "mm", "auto"].includes(b.mode)) { const c = FX.setParams({ mode: b.mode }); if (c.length) addLog("⚙ " + c.join(", "), "mute"); return c.join(", ") || "без змін"; }
+  if (what === "strategy" && ["trend", "squeeze", "both"].includes(b.strategy)) { const c = FX.setParams({ strategy: b.strategy }); if (c.length) addLog("⚙ " + c.join(", "), "mute"); return c.join(", ") || "без змін"; }
   if (what === "settings" && b.o && typeof b.o === "object") { const ch = FX.setParams(b.o); if (ch.length) addLog("⚙ Налаштування: " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   if (what === "limits") {
     const m = Number(b.maxMargin), l = Math.round(Number(b.maxLev)), e = Number(b.every);
@@ -341,7 +333,7 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(UI);
   } catch (e) { return json(500, { error: String(e && e.message || e) }); }
-}).listen(PORT, "0.0.0.0", () => log(`STAKAN FAST :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · fal ${FAL_KEY ? "yes" : "no"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
+}).listen(PORT, "0.0.0.0", () => log(`OI TRADER :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · fal ${FAL_KEY ? "yes" : "no"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
 
 // ---------------- start ----------------
 (async () => {

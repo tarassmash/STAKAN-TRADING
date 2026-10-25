@@ -36,7 +36,7 @@ const DEFAULTS = {
   restartMin: 2,
   minTurnoverM: 50,
 };
-const NUM = { bkTrigger: [0, 20], bkMult: [0.1, 5], bkStopPct: [0.2, 20], bkTrailStart: [0, 50], bkTrailGap: [0.1, 20], trendPct: [0.1, 10], btDays: [1, 3.4], investment: [1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
+const NUM = { bkTrigger: [0, 20], bkMult: [0.1, 5], bkStopPct: [0.2, 20], bkTrailStart: [0, 50], bkTrailGap: [0.1, 20], trendPct: [0.1, 10], btDays: [1, 3.4], investment: [0.1, 1e6], leverage: [1, 50], grids: [2, 200], rangePct: [0.5, 100], low: [0, 1e9], high: [0, 1e9], feeX: [1, 50], slPct: [0.2, 50], restartMin: [0, 1440], minTurnoverM: [1, 10000] };
 const BOOL = ["breakout", "autoCoin", "autoRange", "trailing", "autoRestart", "autoTune", "btNeedPlus"];
 
 function create(host) {
@@ -249,7 +249,7 @@ function create(host) {
         const minNotional = Math.max(sp.minNotional * 1.05, sp.minQty * price);
         const maker = sp.maker != null ? sp.maker : MAKER, minStep = P.feeX * 2 * Math.max(0.01, maker);
         const manual = !P.autoRange && P.low > 0 && P.high > P.low;
-        const widths = manual ? [(P.high / P.low - 1) * 100] : P.autoRange ? (P.autoTune ? [0.4, 0.6, 0.8, 1.0] : [0.7]).map(k => Math.max(3, Math.min(30, swing * k))) : [P.rangePct];
+        const widths = manual ? [(P.high / P.low - 1) * 100] : P.autoRange ? (P.autoTune ? [0.4, 0.6, 0.8, 1.0] : [0.7]).map(k => Math.min(Math.max(0.8, 100 / lev), Math.max(3, Math.min(30, swing * k))))   /* at high leverage the range must be narrow: x50 -> 2% */ : [P.rangePct];
         const counts = P.autoTune ? [10, 15, 20, 30, 40, Math.round(P.grids)] : [Math.round(P.grids)];
         const candles = P.autoTune ? await candles5m(cd.sym, P.btDays) : [];
         let best = null;

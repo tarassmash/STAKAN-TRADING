@@ -120,7 +120,7 @@ const BG = require("./bgrid").create({
 });
 
 // ---------------- the regime switcher ("brain" over both bots) ----------------
-const BR = require("./brain").create({ bx, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
+const BR = require("./brain").create({ bx, spec, acc: () => ACC, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined });
 
 function state() {
@@ -147,6 +147,8 @@ async function act(b) {
   if (what === "bg-enter" && (b.dir === 1 || b.dir === -1)) { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.enterNow(b.dir, String(b.sym || "").trim()); }
   if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   if (what === "brain-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BR.setOn(true); return "Автоперемикач увімкнено — перший аналіз іде"; }
+  if (what === "full-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err; if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок"; BR.setFull(true); return `Повний автомат увімкнено: баланс ${ACC.equity.toFixed(2)} USDT, плече до x50, мікро-тейки — перший аналіз іде`; }
+  if (what === "full-off") { BR.setFull(false); return "Повний автомат вимкнено"; }
   if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
   if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }
   if (what === "brain-settings" && b.o && typeof b.o === "object") { const ch = BR.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }

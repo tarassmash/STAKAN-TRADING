@@ -26,7 +26,7 @@ const DEFAULTS = {
   scalp: false,            // ⚡ super scalping: takes of scalpStep % on every micro move (the step is fixed, the coin is still chosen on history)
   scalpStep: 0.3,
 };
-const NUM = { straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const NUM = { straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
 const BOOL = ["straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {

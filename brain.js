@@ -8,10 +8,15 @@
 "use strict";
 const BT = require("./backtest");
 
-const DEFAULTS = { on: false, everyMin: 60, minTurnoverM: 100, coins: 30 };
+const DEFAULTS = { on: false, full: false, everyMin: 60, minTurnoverM: 100, coins: 30 };
+// "full auto": everything tuned for micro takes on high leverage; the size of each bot comes from the real balance (works from 1 USDT)
+const FULL_GRID = { leverage: 50, feeX: 4, autoRange: true, autoTune: true, btNeedPlus: true, trailing: true, autoRestart: true, slPct: 0.5,
+  breakout: true, bkTrigger: 0.3, bkMult: 0.5, bkStopPct: 0.6, bkTrailStart: 0.4, bkTrailGap: 0.25 };
+const FULL_BG = { leverage: 50, scalpStep: 0.3, stopSteps: 2, trailSteps: 2, runner: true, autoTune: true, btNeedPlus: true };
 
 function create(host) {
   const { bx, engineLog, lsGet, lsSet, GR, BG } = host;
+  const acc = host.acc || (() => ({ equity: 0, available: 0 })), spec = host.spec;
   const MAKER = host.makerFee != null ? host.makerFee : 0.02, TAKER = 0.055;
   const P = Object.assign({}, DEFAULTS, lsGet("brain.p", {}));
   const save = () => lsSet("brain.p", P);
@@ -36,7 +41,7 @@ function create(host) {
   // history check of the job a coin would get
   function testGrid(c5, gp) {
     const swing = (Math.max(...c5.slice(-288).map(k => k.h)) / Math.min(...c5.slice(-288).map(k => k.l)) - 1) * 100;
-    const w = Math.max(3, Math.min(30, swing * 0.7)), minStep = gp.feeX * 2 * MAKER;
+    const lev = Math.min(gp.leverage, 50), w = Math.min(Math.max(0.8, 100 / lev), Math.max(3, Math.min(30, swing * 0.7))), minStep = gp.feeX * 2 * MAKER;
     const n = Math.max(2, Math.min(Math.round(gp.grids), Math.floor(Math.log(1 + w / 100) / Math.log(1 + minStep / 100))));
     return BT.simulate(c5, { mode: "neutral", widthPct: w, n, investment: gp.investment, lev: gp.leverage, maker: MAKER, slPct: gp.slPct, trailing: gp.trailing, autoRestart: true, minNotional: 5,
       breakout: gp.breakout, bkTrigger: gp.bkTrigger, bkMult: gp.bkMult, bkStopPct: gp.bkStopPct, bkTrailStart: gp.bkTrailStart, bkTrailGap: gp.bkTrailGap });
@@ -46,6 +51,13 @@ function create(host) {
     return Object.assign(BT.simulateB2(c5, { stepPct: step, maxUnits: bp.maxUnits, investment: bp.investment, lev: bp.leverage, maker: MAKER, taker: TAKER, stopSteps: bp.stopSteps, runner: bp.runner, trailSteps: bp.trailSteps, band: bp.band / 100 }), { step });
   }
 
+  // the exchange minimum must fit: an order of at least max(5 USDT, min qty × price)
+  async function fits(sym, price, inv, parts) {
+    if (!spec) return true;
+    try { const s = await spec(sym), lev = Math.min(50, Math.floor(s.maxLev || 10)), need = Math.max(Number(s.minNotional || 5) * 1.05, Number(s.minQty || 0) * price);
+      return inv * lev >= need * parts; } catch (e) { return false; }
+  }
+  const budget = () => Math.max(0, (acc().equity || 0) * 0.9);   // 10% of the balance stays as a buffer against liquidation
   async function run(why) {
     if (ST.busy) return "Аналіз уже йде";
     ST.busy = true;
@@ -67,6 +79,12 @@ function create(host) {
       const trend = res.filter(x => x.regime === "trend").sort((a, b) => b.er * Math.abs(b.slope) - a.er * Math.abs(a.slope)).slice(0, 4);
       for (const x of trend) { const t = testBreakout(x.c5, bp); x.test = t && { roi: t.roi, info: `крок ${t.step}%, тейків ${t.wins}, стопів ${t.losses}, розворотів ${t.flips}` }; }
       const squeeze = res.filter(x => x.regime === "squeeze").sort((a, b) => a.atrRatio - b.atrRatio);
+      if (P.full) {   // with a small balance only coins whose minimum order fits
+        const half = budget() / 2;
+        for (const x of flat.concat(trend, squeeze)) if (!(await fits(x.sym, x.c5[x.c5.length - 1].c, half, x.regime === "flat" ? 2 : 2))) { x.small = true; if (x.test) x.test.info += " · замалий баланс для мін. ордера"; }
+      }
+      for (const L2 of [flat, trend]) for (const x of L2) if (x.small && x.test) x.test.roi = Math.min(x.test.roi, 0);
+      for (let i = squeeze.length - 1; i >= 0; i--) if (squeeze[i].small) squeeze.splice(i, 1);
       const bestFlat = flat.filter(x => x.test && x.test.roi > 0).sort((a, b) => b.test.roi - a.test.roi)[0] || null;
       const bestTrend = trend.filter(x => x.test && x.test.roi > 0 && (!bestFlat || x.sym !== bestFlat.sym)).sort((a, b) => b.test.roi - a.test.roi)[0] || null;
       const bestSq = squeeze.find(x => !bestFlat || x.sym !== bestFlat.sym) || null;
@@ -85,24 +103,29 @@ function create(host) {
       }
       if (!GR.view().grid) {
         if (bestFlat) {
-          GR.setParams({ autoCoin: false, symbol: bestFlat.sym, mode: "neutral" }); GR.setOn(true);
-          const t = await GR.newGrid();
+          const sz = {};
+          if (P.full) { const bv = BG.view().b, bgUsed = bv && bv.units.length ? BG.params.investment : 0, bgWants = !bgUsed && (bestTrend || bestSq);
+            sz.investment = +Math.max(0.1, (budget() - bgUsed) * (bgWants ? 0.5 : 1)).toFixed(2); }
+          GR.setParams(Object.assign({ autoCoin: false, symbol: bestFlat.sym, mode: "neutral" }, sz)); GR.setOn(true);
+          let t = await GR.newGrid();
+          if (!GR.view().grid) { GR.setOn(false); t = "не вийшло: " + t; }
           acts.push(`сітка → ${bestFlat.sym}: ${bestFlat.why}; на історії ${bestFlat.test.roi >= 0 ? "+" : ""}${bestFlat.test.roi}% (${bestFlat.test.info}) · ${t}`);
         } else if (GR.params.on) { GR.setOn(false); acts.push("сітка чекає: немає флетової монети з плюсом на історії"); }
       }
       // ---- the breakout grid: a trend coin, or both sides on a squeeze ----
       const b = BG.view().b, gSym = (GR.view().grid || {}).sym;
+      const bgSize = () => { if (P.full) BG.setParams({ investment: +Math.max(0.1, budget() - (GR.view().grid ? GR.params.investment : 0)).toFixed(2) }); };
       if (b && b.units && b.units.length) acts.push(`пробійна сітка ${b.sym} веде угоди — не чіпаю`);
       else if (bestTrend && bestTrend.sym !== gSym) {
         if (!(b && b.sym === bestTrend.sym && b.d === bestTrend.dir && !b.straddle)) {
-          const t = await BG.enterNow(bestTrend.dir, bestTrend.sym);
+          bgSize(); const t = await BG.enterNow(bestTrend.dir, bestTrend.sym);
           acts.push(`пробійна сітка → ${bestTrend.sym} ${bestTrend.dir > 0 ? "▲ лонг" : "▼ шорт"}: ${bestTrend.why}; на історії ${bestTrend.test.roi >= 0 ? "+" : ""}${bestTrend.test.roi}% (${bestTrend.test.info}) · ${t}`);
         } else acts.push(`пробійна сітка лишається на ${b.sym} (тренд триває)`);
       } else if (bestSq && bestSq.sym !== gSym) {
         if (!(b && b.sym === bestSq.sym && (b.straddle || b.box))) {
           if (b) await BG.closeAll();
           const pct = +Math.max(0.6, Math.min(3, bestSq.range6 * 0.6)).toFixed(2);
-          const t = await BG.straddleNow(pct, bestSq.sym);
+          bgSize(); const t = await BG.straddleNow(pct, bestSq.sym);
           acts.push(`пробійна сітка → ${bestSq.sym} ↕ обидва боки ±${pct}%: ${bestSq.why} · ${t}`);
         } else acts.push(`межі на ${b.sym} чекають пробою`);
       } else {
@@ -122,9 +145,19 @@ function create(host) {
   }
   setInterval(() => { if (P.on && now() - ST.at >= P.everyMin * 60000) run("за розкладом"); }, 30000);
 
-  function setOn(on) { P.on = !!on; save(); note(on ? `Автоперемикач увімкнено: кожні ${P.everyMin} хв сам вибирає монети й стратегії` : "Автоперемикач вимкнено: боти працюють із поточними налаштуваннями", on ? "up" : "mute"); if (on) setTimeout(() => run("увімкнення"), 500); }
+  function setOn(on) { P.on = !!on; if (!on) P.full = false; save(); note(on ? `Автоперемикач увімкнено: кожні ${P.everyMin} хв сам вибирає монети й стратегії` : "Автоперемикач вимкнено: боти працюють із поточними налаштуваннями", on ? "up" : "mute"); if (on) setTimeout(() => run("увімкнення"), 500); }
+  function setFull(on) {
+    P.full = !!on;
+    if (on) {
+      GR.setParams(FULL_GRID); BG.setParams(FULL_BG); if (!BG.params.scalp) BG.setScalp(true);
+      P.everyMin = 15; P.on = true; save();
+      const eq = acc().equity || 0;
+      note(`🤖 ПОВНИЙ АВТОМАТ: плече до x50 (де біржа дозволяє), мікро-тейки (пробійна сітка ${FULL_BG.scalpStep}%, звичайна від ${(FULL_GRID.feeX * 0.04).toFixed(2)}%), розмір від балансу ${eq.toFixed(2)} USDT (90%, 10% — запас), сітка вузька (2%) зі стопом 0.5% за краєм, ринок перевіряю кожні ${P.everyMin} хв`, "up");
+      setTimeout(() => run("повний автомат"), 500);
+    } else { save(); note("Повний автомат вимкнено (автоперемикач і налаштування лишаються, плече можна змінити на вкладках)", "mute"); }
+  }
   function setParams(o) { const ch = []; for (const k of ["everyMin", "minTurnoverM", "coins"]) if (o && Number(o[k]) > 0 && P[k] !== Number(o[k])) { P[k] = Math.round(Number(o[k])); ch.push(`${k}→${P[k]}`); } save(); return ch; }
-  function view() { return { params: P, busy: ST.busy, last: ST.last, next: P.on ? Math.max(0, Math.round((ST.at + P.everyMin * 60000 - now()) / 60000)) : null, log: ST.log.slice(-15).reverse() }; }
-  return { params: P, setOn, setParams, run, view };
+  function view() { return { equity: acc().equity || 0, budget: +budget().toFixed(2), gInv: GR.params.investment, bInv: BG.params.investment, params: P, busy: ST.busy, last: ST.last, next: P.on ? Math.max(0, Math.round((ST.at + P.everyMin * 60000 - now()) / 60000)) : null, log: ST.log.slice(-15).reverse() }; }
+  return { params: P, setOn, setFull, setParams, run, view };
 }
 module.exports = { create, DEFAULTS };

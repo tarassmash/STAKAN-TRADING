@@ -34,6 +34,10 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 
   <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
 
+  <div class="card" id="fullCard" style="border-color:#f7a600">
+    <button class="big" id="fMain" style="background:#f7a600;color:#111">🤖 Повний автомат</button>
+    <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
+  </div>
   <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="grid">🧱 Сітка</button><button data-tab="bg">🚀 Пробійна сітка</button><button data-tab="brain">🧠 Авто</button></div>
   <div id="tabGrid">
 
@@ -374,7 +378,20 @@ function paintBrain() {
   $("rCoins").innerHTML = L ? L.coins.map(c => `<tr title="${esc(c.why)}"><td><b>${esc(c.sym)}</b></td><td class="${c.regime === "trend" ? (c.dir > 0 ? "up" : "down") : c.regime === "chaos" ? "mute" : ""}">${RNAME[c.regime] || c.regime}${c.regime === "trend" ? (c.dir > 0 ? " ▲" : " ▼") : ""}</td><td>${f(c.er, 2)}</td><td>${sgn(c.slope, 2)}%</td><td>${f(c.atrRatio, 2)}×</td><td>${f(c.range6, 1)}%</td><td>${c.test ? sgn(c.test.roi, 2) + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">—</td></tr>';
   $("rLog").innerHTML = R.log.map(l => `<div>${new Date(l.at).toLocaleString()} · ${esc(l.t)}</div>`).join("") || "<div>Ще немає</div>";
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } };
+$("fMain").onclick = () => S.brain.params.full ? act({ what: "full-off" }, "Вимкнути повний автомат? Відкриті угоди лишаються зі своїми тейками/стопами.")
+  : act({ what: "full-on" }, `Увімкнути ПОВНИЙ АВТОМАТ${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nБот сам вибирає монети й стратегію, плече до x50, мікро-тейки, розмір — від усього балансу (90%).\nПри x50 рух ціни на 2% проти позиції — це вже ліквідація, тому стопи короткі (0.5–0.6%) і серія стопів може з'їсти помітну частину рахунку.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
+function paintFull() {
+  const R = S.brain; if (!R) return; const on = !!R.params.full, m = $("fMain");
+  m.textContent = BUSY ? "…" : on ? "■ Вимкнути повний автомат" : "🤖 Увімкнути повний автомат (x50, мікро-тейки, від 1 USDT)"; m.disabled = BUSY;
+  m.style.background = on ? "var(--down)" : "#f7a600"; m.style.color = on ? "#fff" : "#111";
+  const g = S.gr.grid, b = S.bg.b;
+  $("fInfo").innerHTML = on
+    ? `<span class="dot on"></span><b>Працює сам.</b> Баланс <b>${f(R.equity, 2)}</b> USDT · у роботі до ${f(R.budget, 2)} (10% запас) · ринок перевіряю кожні ${R.params.everyMin} хв${R.next != null ? `, наступна через ${R.next} хв` : ""}<br>`
+      + `🧱 Сітка: ${g ? `<b>${esc(g.sym)}</b> · ${f(S.gr.params.investment, 2)} USDT × x${g.lev} · крок ${g.stepPct}% · ${sgn(g.profit, 4)}` : '<span class="mute">чекає флету</span>'}<br>`
+      + `🚀 Пробійна: ${b ? `<b>${esc(b.sym)}</b> · ${f(S.bg.params.investment, 2)} USDT × x${b.lev} · тейки ${b.stepPct}% · ${b.straddle ? "↕ чекає пробою" : b.d > 0 ? '<span class="up">▲ лонги</span>' : b.d < 0 ? '<span class="down">▼ шорти</span>' : "—"} · юнітів ${b.units.length} · ${sgn(b.profit, 4)}` : '<span class="mute">чекає тренду чи стиснення</span>'}`
+    : '<span class="mute">Одна кнопка — і бот усе робить сам: щоразу вибирає монети, визначає ринок (флет / тренд / стиснення / хаос), запускає потрібну стратегію з плечем до x50 і бере мікро-рухи як тейки (завжди більші за комісії). Розмір угод рахується від вашого балансу, тож працює навіть з 1 USDT (мінімальний ордер Bybit ≈ 5 USDT — при x50 це 0.1 USDT маржі). Ризик високий: при x50 рух проти позиції на 2% = ліквідація, тому стопи короткі.</span>';
+}
+const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);
 </script>
 </body>

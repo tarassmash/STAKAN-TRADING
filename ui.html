@@ -45,7 +45,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
   </div>
 
   <div class="card grid">
-    <div class="k"><span>Капітал, USDT</span><b id="eq">—</b></div>
+    <div class="k"><span>Капітал · вільно, USDT</span><b id="eq">—</b></div>
     <div class="k"><span>За 24 год</span><b id="day">—</b></div>
     <div class="k"><span>Угод · win</span><b id="all">—</b></div>
     <div class="k"><span>PnL · PF</span><b id="pnl">—</b></div>
@@ -251,7 +251,7 @@ function paint() {
   const w = []; if (X.err) w.push(X.err);
   $("warn").innerHTML = w.map(x => `<div class="note">${esc(x)}</div>`).join("");
   // numbers
-  $("eq").textContent = f(ACC.equity);
+  $("eq").textContent = f(ACC.equity) + " · " + f(X.avail ?? ACC.available);
   $("day").innerHTML = `${sgn(D.pnl, 3)} · ${D.n || 0}`;
   $("all").textContent = (ST.n || 0) + (ST.win != null ? " · " + ST.win + "%" : "");
   $("pnl").innerHTML = `${sgn(ST.pnl, 3)} · ${ST.pf ?? "—"}`;

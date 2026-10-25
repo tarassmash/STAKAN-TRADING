@@ -208,6 +208,7 @@ function create(host) {
     if (!(qty > 0)) return;
     const a = acc(sym), o = ORD[x.orderLinkId];
     if (o && o.at) LAT.fillMs = ewma(LAT.fillMs, now() - o.at, 0.1);
+    if (ours && M[sym] && M[sym].sizeK && M[sym].sizeK < 1) M[sym].sizeK = Math.min(1, M[sym].sizeK * 1.25);
     if (!a.q) { a.at = now(); a.real = 0; a.fees = 0; a.fills = 0; a.mode = (M[sym] && M[sym].mode) || P.mode; a.side = s > 0 ? "Buy" : "Sell"; a.sig = M[sym] && M[sym].sig; a.maxAdv = 0; a.how = ""; }
     a.fees += fee; a.fills++;
     if (!a.q || Math.sign(a.q) === s) { a.avg = (a.avg * Math.abs(a.q) + p * qty) / (Math.abs(a.q) + qty); a.q += s * qty; }
@@ -248,12 +249,36 @@ function create(host) {
     if (side === "Buy" && q < 0) return { positionIdx: 2, reduceOnly: true };
     return { positionIdx: side === "Buy" ? 1 : 2, reduceOnly: false };
   }
-  async function setLev(sym) {
-    if (ST.lev[sym] === P.leverage) return;
-    const lev = String(Math.min(P.leverage, Math.floor(M[sym].maxLev || P.leverage)));
-    try { await bx("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev } }); }
-    catch (e) { if (e.code !== 110043) log("leverage", sym, e.message); }
-    ST.lev[sym] = P.leverage;
+  // free money on the account (USDT), refreshed every few seconds and right after a "not enough" rejection
+  async function refreshWallet() {
+    if (!keys || !keys.key) return;
+    try {
+      const w = await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true });
+      const a = (w.list || [])[0] || {};
+      ST.avail = Number(a.totalAvailableBalance || 0); ST.availAt = now();
+    } catch (e) { /* keep the old value */ }
+  }
+  setInterval(() => { if (P.on) refreshWallet(); }, 3000);
+  // little money: the order is made smaller and, if even the exchange minimum does not fit, the leverage of that coin goes up (to its max)
+  function sizing(sym, price) {
+    const m = M[sym], base = Math.min(P.leverage, Math.floor(m.maxLev || P.leverage));
+    const minNotional = Math.max(m.minNotional * 1.05, m.minQty * price);
+    const free = ST.avail == null ? Infinity : Math.max(0, ST.avail * 0.9);
+    const margin = Math.min(P.margin, free) * (m.sizeK || 1);
+    let lev = base;
+    if (margin * lev < minNotional) lev = Math.min(Math.floor(m.maxLev || base), Math.ceil(minNotional * 1.1 / Math.max(margin, 1e-9)));
+    const ok = margin * lev >= minNotional;
+    return { margin, lev, ok, minNotional, free };
+  }
+  async function setLev(sym, want) {
+    const m = M[sym], lev = Math.max(1, Math.round(want || Math.min(P.leverage, Math.floor(m.maxLev || P.leverage))));
+    if (ST.lev[sym] === lev) return;
+    if (ST.lev[sym] > lev && now() - ((ST.levAt || {})[sym] || 0) < 60000) return;   // a higher leverage stays at least a minute (no flapping)
+    (ST.levAt = ST.levAt || {})[sym] = now();
+    try { await bx("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); }
+    catch (e) { if (e.code !== 110043) { log("leverage", sym, e.message); if (e.code === 110013 || e.code === 110012) return; } }   // cannot change now (open position) -> keep the old one
+    if (lev > P.leverage && ST.lev[sym] !== lev) engineLog(`💰 ${sym}: мало вільних коштів — плече x${lev}, щоб відкрити мінімальний ордер біржі`, "mute");
+    ST.lev[sym] = lev;
   }
   async function place(sym, side, price, qty, role, { reduce = false, postOnly = true, market = false } = {}) {
     const id = lid(role), ix = idxFor(sym, side, reduce), t0 = now();
@@ -266,6 +291,10 @@ function create(host) {
       delete ORD[id];
       if (e.code === 10001 && ST.hedge[sym] !== true) { ST.hedge[sym] = true; }       // the account is in hedge mode
       else if (e.code === 110017 || e.code === 110025) { /* reduce-only with nothing to reduce: position already flat */ }
+      else if ([110007, 110004, 110012, 110044, 110045].includes(e.code) || /not enough|insufficient/i.test(e.message)) {
+        const m = M[sym]; m.sizeK = Math.max(0.1, (m.sizeK || 1) * 0.5); m.cool = now() + 800; refreshWallet();
+        if (now() - (ST.nmLog || 0) > 60000) { ST.nmLog = now(); engineLog(`💰 ${sym}: біржа каже «мало коштів» — зменшую розмір ордера і пробую знову`, "mute"); }
+      }
       else { setErr(`${sym}: ${e.message}`); M[sym].cool = now() + 3000; }
       return null;
     }
@@ -287,13 +316,17 @@ function create(host) {
     catch (e) { if (e.code === 110001 || e.code === 10001) delete ORD[id]; return false; }
   }
   const ordersOf = (sym, role) => Object.values(ORD).filter(o => o.sym === sym && (!role || o.role === role));
+  // order size from the money that is really free (0 = not even the exchange minimum fits)
+  const minQtyOf = (sym, price) => { const m = M[sym]; return Math.max(m.minQty, Number(align((m.minNotional * 1.05) / price, m.step, true))); };
   const qtyFor = (sym, price, part = 1) => {
-    const m = M[sym], notional = P.margin * Math.min(P.leverage, m.maxLev || P.leverage) * part;
-    let q = Number(align(notional / price, m.step, false));
-    const minQ = Math.max(m.minQty, Number(align((m.minNotional * 1.05) / price, m.step, true)));
+    const m = M[sym], z = sizing(sym, price);
+    if (!z.ok) return 0;
+    let q = Number(align(z.margin * z.lev * part / price, m.step, false));
+    const minQ = minQtyOf(sym, price);
     if (q < minQ) q = minQ;
     return Number(align(q, m.step, false)) || minQ;
   };
+  const noMoney = (sym, price) => { const z = sizing(sym, price); return `мало коштів: вільно ${z.free === Infinity ? "?" : z.free.toFixed(2)} USDT, мінімальний ордер ${z.minNotional.toFixed(2)} USDT навіть з плечем x${Math.floor(M[sym].maxLev || 1)}`; };
 
   // exchange stop on every position (last-price trigger: faster than the mark price)
   const stopQ = new Set();
@@ -372,8 +405,10 @@ function create(host) {
       if (P.stepIn && f.spreadTicks >= 2) price = side === "Buy" ? f.bb + m.tick : f.ba - m.tick;   // first in the queue
       price = Number(px(sym, price, side === "Sell"));
       m.why = "вхід"; m.sig = f; m.cool = now() + P.cooldownSec * 1000;
-      await setLev(sym);
-      await place(sym, side, price, qtyFor(sym, price), "e");
+      const qty = qtyFor(sym, price);
+      if (!qty) { m.why = noMoney(sym, price); m.cool = now() + 5000; return; }
+      await setLev(sym, sizing(sym, price).lev);
+      await place(sym, side, price, qty, "e");
       return;
     }
     // in a position
@@ -408,7 +443,8 @@ function create(host) {
 
   async function runMM(sym, f) {
     const m = M[sym], a = acc(sym), tick = m.tick;
-    const cap = qtyFor(sym, f.mid);                                    // inventory cap in coins
+    const cap = qtyFor(sym, f.mid) || (a.q ? Math.abs(a.q) : 0);       // inventory cap in coins (from the money that is free)
+    if (!cap) { for (const o of ordersOf(sym)) await cancel(o.id); m.why = noMoney(sym, f.mid); return; }
     const inv = a.q / cap;                                             // -1..1
     const held = a.q ? (now() - a.at) / 1000 : 0;
     // fair price: microprice shifted against the inventory (long -> lower quotes, sells come easier)
@@ -416,7 +452,7 @@ function create(host) {
     const fair = f.micro - P.mmSkew * inv * edge;
     let bid = Number(px(sym, Math.min(f.bb, fair - edge), false)), ask = Number(px(sym, Math.max(f.ba, fair + edge), true));
     if (ask - bid < tick * 2 && f.spreadTicks < 2) { bid = f.bb; ask = f.ba; }
-    const base = Number(align(cap * P.mmQtyPct / 100, m.step, false)) || m.minQty;
+    const base = Math.max(Number(align(cap * P.mmQtyPct / 100, m.step, false)) || 0, Math.min(cap, minQtyOf(sym, f.mid)));
     let bq = inv >= 1 ? 0 : base, aq = inv <= -1 ? 0 : base;
     // with inventory the opposite quote closes exactly the inventory (no flip through zero), the same side adds only below the cap
     if (a.q > 0) aq = Number(align(a.q, m.step, false));
@@ -435,7 +471,7 @@ function create(host) {
     if (!P.on) { if (!a.q) { bq = 0; aq = 0; } else if (a.q > 0) { bq = 0; ask = f.ba; } else { aq = 0; bid = f.bb; } }
     if (P.on && !a.q && openCount() >= P.maxPositions) { bq = 0; aq = 0; m.why = "ліміт позицій"; }
     else m.why = bq || aq ? `котирую ${bq ? bid : "—"} / ${aq ? ask : "—"}` : f.score <= -P.mmToxic ? "токсичний потік вниз" : f.score >= P.mmToxic ? "токсичний потік вгору" : "без котирувань";
-    if (P.on && (bq || aq)) await setLev(sym);
+    if (P.on && (bq || aq) && !a.q) await setLev(sym, sizing(sym, f.mid).lev);
     await quote(sym, "b", "Buy", bid, bq);
     await quote(sym, "a", "Sell", ask, aq);
     m.sig = f;
@@ -570,6 +606,7 @@ function create(host) {
   }
   setInterval(() => lsSet("fxOwn", Object.keys(A).filter(s2 => A[s2].q)), 5000);
   async function boot() {
+    await refreshWallet();
     await loadSpecs(P.symbols);
     await adopt();
     connectPub(); connectPriv();
@@ -605,7 +642,7 @@ function create(host) {
         if (list.length && list.join() !== P.symbols.join()) { ch.push(`монети ${list.join(",")}`); P.symbols = list; loadSpecs(list).then(resub); }
       }
     }
-    if (ch.some(x => x.startsWith("leverage"))) ST.lev = {};
+    if (ch.some(x => x.startsWith("leverage") || x.startsWith("margin"))) { ST.lev = {}; for (const m of Object.values(M)) m.sizeK = 1; }
     if (ch.some(x => /^(autoCoins|coinCount|minTurnoverM|режим)/.test(x)) && P.autoCoins) pickCoins(true);
     save();
     return ch;
@@ -632,7 +669,7 @@ function create(host) {
       return { sym, mode: m.mode, f, why: m.why || (m.ready ? "" : "підключаюсь"), thr: thrOf(sym), edgeMult: (P.learn && LEARN.edge[sym]) || 1, tickPct: m.tickPct ? +m.tickPct.toFixed(4) : null,
         pos: a.q ? { q: +a.q.toFixed(8), avg: +Number(a.avg).toPrecision(8), sec: Math.round((now() - a.at) / 1000), pnl: f ? +((f.mid - a.avg) * a.q - a.fees).toFixed(4) : null } : null, orders: os };
     });
-    return { params: P, ws: ST.pubUp && now() - ST.lastPub < 5000, priv: ST.privUp, err: now() - (ST.errAt || 0) < 120000 ? ST.err : "", lat: { wsLagMs: Math.round(LAT.wsLag), orderMs: Math.round(LAT.rtt), fillMs: Math.round(LAT.fillMs) },
+    return { avail: ST.avail, params: P, ws: ST.pubUp && now() - ST.lastPub < 5000, priv: ST.privUp, err: now() - (ST.errAt || 0) < 120000 ? ST.err : "", lat: { wsLagMs: Math.round(LAT.wsLag), orderMs: Math.round(LAT.rtt), fillMs: Math.round(LAT.fillMs) },
       coins, stats: stats(TR), day: stats(day), byMode: { micro: stats(TR.filter(t => t.mode === "micro")), mm: stats(TR.filter(t => t.mode === "mm")) }, series: series(),
       learn: { thr: LEARN.thr, edge: LEARN.edge }, trades: TR.slice(-20).reverse(), vol: ST.vol, fees: { maker: MAKER, taker: TAKER } };
   }

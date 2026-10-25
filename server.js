@@ -142,6 +142,7 @@ The engine works in two modes (per coin; "mode": "auto" lets the engine choose p
  - "mm" (market making): quotes on both sides around the microprice, at least mmEdgePct from it (learned multiplier per coin), size mmQtyPct of the
    inventory cap, quotes shifted against the inventory (mmSkew), the side facing a toxic one-way flow (|score| >= mmToxic) is pulled, inventory
    stop mmStopPct, inventory older than mmMaxHoldSec is flattened at the touch. MM pays only where the spread/tick is wider than 2 maker fees.
+Little free money is fine: the engine sizes every order to the free balance ("avail") and raises a coin's leverage up to its max so that the exchange minimum order still fits; it never refuses to trade for lack of money while the minimum fits.
 Fees: maker and taker in % ("fees"); every result is net of fees. Latency: wsLagMs (market data), orderMs (order round trip).
 Per-coin learning runs by itself (micro threshold up after 3 losses on a coin, MM edge wider after losing cycles, mode per coin by results).
 Use bySymbolMode/byMode/byExit/series to decide: which mode per coin, thresholds, take/stop, edges, coins (autoCoins picks MM coins with wide

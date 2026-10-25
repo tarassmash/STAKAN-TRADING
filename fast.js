@@ -585,6 +585,20 @@ function create(host) {
     } catch (e) { setErr("звірка: " + e.message); }
   }
   setInterval(reconcile, 5000);
+  // the old breakout bot's trigger orders (orderLinkId bx…/bn…) are removed: this app trades the book only
+  async function sweepOld() {
+    if (!keys || !keys.key) return;
+    for (const filter of ["StopOrder", "Order"]) {
+      try {
+        const r = await bx("/v5/order/realtime", { query: { category: "linear", settleCoin: "USDT", orderFilter: filter, limit: "50" }, auth: true });
+        for (const o of r.list || []) if (/^b[xn]/.test(String(o.orderLinkId || ""))) {
+          try { await bx("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: o.symbol, orderLinkId: o.orderLinkId, orderFilter: filter } });
+            engineLog(`🧹 ${o.symbol}: знято тригерний ордер старого бота пробоїв (${o.side} ${o.triggerPrice || o.price})`, "mute"); } catch (e) { /* gone */ }
+        }
+      } catch (e) { /* ignore */ }
+    }
+  }
+  setTimeout(sweepOld, 3000); setInterval(sweepOld, 30000);
 
   // ---------------- coins ----------------
   async function loadSpecs(list) {

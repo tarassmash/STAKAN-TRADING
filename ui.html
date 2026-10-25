@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OI TRADER</title>
+<title>GRID BOT</title>
 <style>
 :root{--bg:#0b0e11;--panel:#161a1e;--line:#2b3139;--ink:#eaecef;--mute:#848e9c;--up:#0ecb81;--down:#f6465d;--gold:#f7a600;--cyan:#22d3ee}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
@@ -13,7 +13,7 @@
 .big:disabled{opacity:.5;cursor:default}
 .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:6px}
 .seg button{min-height:42px;border:0;background:var(--bg);color:var(--mute);font-size:14px;cursor:pointer}.seg button.on{background:var(--cyan);color:#062a30;font-weight:700}
-
+.seg.inv button.on{background:#f59e0b;color:#111}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
 label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute)}
 input,select{min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font:14px ui-monospace,monospace;width:100%}
@@ -29,8 +29,8 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 </head>
 <body>
 <div class="wrap">
-  <h1>📈 OI TRADER</h1>
-  <div class="mute" style="font-size:13px">Торгівля за ростом відкритого інтересу на Bybit. Щохвилини бот сканує всі ф'ючерси: куди заходять нові гроші і де натовп набирає позиції. Ринкові покупки й продажі (CVD) підтверджують вхід. Сценарії «за трендом» і «сквіз», AI вирішує, який працює зараз. Торгує сервер 24/7.</div>
+  <h1>🧱 GRID BOT</h1>
+  <div class="mute" style="font-size:13px">Ф'ючерсний грід-бот, як на Bybit: сітка лімітних ордерів у діапазоні, після кожного виконання одразу зустрічний ордер, сітка йде за ціною (трейлінг), після стопу ставиться нова сітка. Торгує сервер 24/7.</div>
 
   <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
 
@@ -38,105 +38,53 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div style="font-size:19px;font-weight:700"><span class="dot" id="dot"></span><span id="status">Зупинено</span></div>
     <div class="mute" id="status2" style="font-size:13px;margin-top:4px"></div>
     <div style="margin-top:12px"><button class="big go" id="main">▶ Запустити</button></div>
-    <div style="margin-top:12px;font-size:14px;font-weight:600">Сценарій</div>
-    <div class="seg" id="stratSeg"><button data-strat="both">🤖 Обидва</button><button data-strat="trend">📈 За трендом</button><button data-strat="squeeze">🧲 Сквіз</button></div>
-    <div class="mute" id="stratHint" style="font-size:12px;margin-top:4px"></div>
-    <div style="margin-top:12px;font-size:14px;font-weight:600">Бік</div>
-    <div class="seg" id="sideSeg"><button data-side="sell">🔻 Тільки Sell</button><button data-side="both">↕ Обидва</button><button data-side="buy">🔺 Тільки Buy</button></div>
-    <div class="mute" id="sideHint" style="font-size:12px;margin-top:4px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="newGrid">🔄 Нова сітка зараз</button><button class="btn" id="closeGrid">✖ Закрити сітку і позицію</button></div>
+    <div style="margin-top:12px;font-size:14px;font-weight:600">Режим сітки</div>
+    <div class="seg"><button data-mode="long">🔺 Лонг</button><button data-mode="neutral">↕ Нейтральна</button><button data-mode="short">🔻 Шорт</button></div>
+    <div class="mute" id="modeHint" style="font-size:12px;margin-top:4px"></div>
     <div id="warn"></div>
   </div>
 
   <div class="card grid">
     <div class="k"><span>Капітал · вільно, USDT</span><b id="eq">—</b></div>
-    <div class="k"><span>За 24 год</span><b id="day">—</b></div>
-    <div class="k"><span>Угод · win</span><b id="all">—</b></div>
-    <div class="k"><span>PnL · PF</span><b id="pnl">—</b></div>
-    <div class="k"><span>До комісій · комісії</span><b id="fees">—</b></div>
-    <div class="k"><span>Сер. утримання</span><b id="hold">—</b></div>
+    <div class="k"><span>Сітка заробила · кіл</span><b id="gp">—</b></div>
+    <div class="k"><span>Нереалізований PnL</span><b id="ur">—</b></div>
+    <div class="k"><span>За 24 год · кіл</span><b id="day">—</b></div>
+    <div class="k"><span>Усього: сітки · стопи</span><b id="tot">—</b></div>
+    <div class="k"><span>Трейлінгів</span><b id="tr">—</b></div>
   </div>
 
   <div class="card">
-    <b>Позиції</b>
-    <div class="scroll"><table><thead><tr><th>Монета</th><th>Сценарій</th><th>Бік</th><th>Вхід</th><th>Зараз</th><th>Макс</th><th>Стоп</th><th>OI 5хв</th><th>CVD 5хв</th><th>Хв</th><th>PnL</th></tr></thead><tbody id="pos"></tbody></table></div>
-    <div id="pending" style="font-size:13px;margin-top:6px"></div>
+    <b id="gTitle">Сітка</b>
+    <div class="mute" id="gInfo" style="font-size:13px;margin-top:4px"></div>
+    <svg id="ladder" viewBox="0 0 600 360" style="width:100%;height:auto;margin-top:8px;background:var(--bg);border-radius:10px"></svg>
+    <div class="mute" style="font-size:11px;margin-top:4px">● зелені — чекають купівлі, ● червоні — чекають продажу, ■ заповнені — комірка тримає позицію і чекає закриття на сусідньому рівні; жовта лінія — ціна</div>
   </div>
 
   <div class="card">
-    <b>Відкритий інтерес зараз</b> <span class="mute" id="scanLine" style="font-size:12px"></span>
-    <div class="scroll"><table><thead><tr><th>Монета</th><th>OI 15хв</th><th>OI 5хв</th><th>OI 1год</th><th>Ціна 15хв</th><th>Ціна 5хв</th><th>CVD 5хв</th><th>CVD 15хв</th><th>Фінанс.</th><th>OI, $млн</th><th>Сигнал</th></tr></thead><tbody id="cands"></tbody></table></div>
-  </div>
-
-  <div class="card">
-    <b>Сценарії: хто заробляє</b>
-    <div class="scroll"><table><thead><tr><th>Сценарій</th><th>Угод</th><th>Win</th><th>До комісій</th><th>Комісії</th><th>PnL</th><th>PF</th><th>Утримання</th></tr></thead><tbody id="strats"></tbody></table></div>
-    <div id="learnLine" class="mute" style="font-size:12px;margin-top:6px"></div>
-  </div>
-
-  <div class="card" style="border-color:#7c3aed">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-      <b style="font-size:16px">🧠 AI керує на 100% (fal.ai)</b>
-      <button class="btn" id="aiBtn"></button>
-    </div>
-    <div id="aiStatus" style="font-size:13px;margin-top:6px"></div>
-    <div id="aiLast" style="font-size:13px;margin-top:6px"></div>
-    <details style="margin-top:8px"><summary>Межі для AI і частота рішень</summary>
-      <div class="grid" style="margin-top:8px">
-        <label class="f">Рішення кожні, хв<select id="aiEvery"><option>5</option><option>10</option><option>15</option><option>30</option></select></label>
-        <label class="f">Макс. маржа на угоду для AI, USDT<input id="aiMaxM" inputmode="decimal"></label>
-        <label class="f">Макс. плече для AI<input id="aiMaxL" inputmode="decimal"></label>
-      </div>
-      <div style="margin-top:8px"><button class="btn" id="aiSave">Зберегти межі</button> <button class="btn" id="aiNow">Рішення AI зараз</button> <span id="aiOut" class="mute" style="font-size:13px"></span></div>
-    </details>
-    <div style="margin-top:12px;font-size:14px;font-weight:600">📈 Прогрес навчання AI</div>
-    <div id="progSum" style="font-size:13px;margin-top:4px"></div>
-    <div class="mute" style="font-size:12px;margin-top:6px">Капітал</div>
-    <svg id="eqChart" viewBox="0 0 600 180" style="width:100%;height:auto;background:var(--bg);border-radius:10px"></svg>
-    <div class="mute" style="font-size:12px;margin-top:6px">Результат кожного рішення AI (стовпчик = період, лінія = разом)</div>
-    <svg id="decChart" viewBox="0 0 600 150" style="width:100%;height:auto;background:var(--bg);border-radius:10px"></svg>
-    <details style="margin-top:8px"><summary>Усі рішення AI</summary><div class="log" id="aiHist"></div></details>
-  </div>
-
-  <div class="card">
-    <b>🎙 Команда для AI голосом або текстом</b>
-    <div class="mute" style="font-size:12px;margin-top:2px">Напр.: «тільки тренд», «стоп 2%», «плече 3», «будь обережніше», «зупинись»</div>
-    <div style="display:flex;gap:8px;margin-top:8px"><input id="cmd" placeholder="Що зробити?"><button class="btn" id="mic" title="Голос">🎤</button><button class="btn" id="send">➤</button></div>
-    <div id="plan" style="font-size:13px;margin-top:8px"></div>
-    <div id="notes" style="font-size:13px;margin-top:6px"></div>
-  </div>
-
-  <div class="card">
-    <details><summary>Налаштування (AI підбирає їх сам)</summary>
+    <details><summary>Налаштування (діють для нової сітки)</summary>
       <div class="grid" style="margin-top:10px">
-        <label class="f">Маржа на угоду, USDT<input id="sMargin" inputmode="decimal"></label>
+        <label class="f">Монета<select id="sAuto"><option value="auto">Авто: бот вибирає</option><option value="manual">Своя</option></select></label>
+        <label class="f">Своя монета<input id="sSym" placeholder="SOLUSDT"></label>
+        <label class="f">Сума на сітку (маржа), USDT<input id="sInv" inputmode="decimal"></label>
         <label class="f">Плече<input id="sLev" inputmode="decimal"></label>
-        <label class="f">Позицій одночасно<input id="sMax" inputmode="decimal"></label>
-        <label class="f">Ріст OI за 15 хв, %<input id="sOi" inputmode="decimal"></label>
-        <label class="f">Ріст OI за 5 хв, %<input id="sOi5" inputmode="decimal"></label>
-        <label class="f">Тренд: рух ціни за 15 хв від, %<input id="sPx" inputmode="decimal"></label>
-        <label class="f">Сквіз: ціна стоїть (до, %)<input id="sFlat" inputmode="decimal"></label>
-        <label class="f">Сквіз: фінансування від, %<input id="sFund" inputmode="decimal"></label>
-        <label class="f">Добір: скільки лімітів<input id="sDcaN" inputmode="decimal"></label>
-        <label class="f">Добір: крок від входу, %<input id="sDcaS" inputmode="decimal"></label>
-        <label class="f">Добір: обсяг × входу<input id="sDcaM" inputmode="decimal"></label>
-        <label class="f">Тейк, %<input id="sTake" inputmode="decimal"></label>
-        <label class="f">Стоп, %<input id="sStop" inputmode="decimal"></label>
-        <label class="f">Трейлінг з прибутку, %<input id="sTrS" inputmode="decimal"></label>
-        <label class="f">Трейлінг: відступ, %<input id="sTrG" inputmode="decimal"></label>
-        <label class="f">Вихід, коли OI падає за 5 хв на, %<input id="sOiX" inputmode="decimal"></label>
-        <label class="f">Макс. утримання, хв<input id="sHold" inputmode="decimal"></label>
-        <label class="f">Пауза монети після угоди, хв<input id="sCool" inputmode="decimal"></label>
-        <label class="f">Мін. обіг 24 год, млн $<input id="sTurn" inputmode="decimal"></label>
-        <label class="f">CVD-підтвердження<select id="sCvd"><option value="on">Увімк</option><option value="off">Вимк</option></select></label>
-        <label class="f">CVD мін., частка 0–0.9<input id="sCvdMin" inputmode="decimal"></label>
-        <label class="f">Вихід, коли CVD проти, 0–1<input id="sCvdX" inputmode="decimal"></label>
-        <label class="f">Самонавчання<select id="sLearn"><option value="on">Увімк</option><option value="off">Вимк</option></select></label>
+        <label class="f">Кількість сіток<input id="sN" inputmode="decimal"></label>
+        <label class="f">Діапазон<select id="sAR"><option value="auto">Авто: від руху монети за добу</option><option value="manual">Свій</option></select></label>
+        <label class="f">Ширина діапазону, %<input id="sW" inputmode="decimal"></label>
+        <label class="f">Низ (необов'язково)<input id="sLow" inputmode="decimal"></label>
+        <label class="f">Верх (необов'язково)<input id="sHigh" inputmode="decimal"></label>
+        <label class="f">Трейлінг сітки<select id="sTrail"><option value="on">Увімк</option><option value="off">Вимк</option></select></label>
+        <label class="f">Стоп сітки за краєм, %<input id="sSl" inputmode="decimal"></label>
+        <label class="f">Нова сітка після стопу<select id="sRe"><option value="on">Так</option><option value="off">Ні</option></select></label>
+        <label class="f">Пауза перед новою сіткою, хв<input id="sReM" inputmode="decimal"></label>
+        <label class="f">Крок ≥ N × комісії<input id="sFee" inputmode="decimal"></label>
       </div>
       <div style="margin-top:8px"><button class="btn" id="sSave">Зберегти</button> <span id="sOut" class="mute" style="font-size:13px"></span></div>
     </details>
+    <div id="picks" class="mute" style="font-size:12px;margin-top:8px"></div>
   </div>
 
-  <div class="card"><b>Закриті угоди</b><div class="log" id="trades"></div></div>
+  <div class="card"><b>Закриті кола і сітки</b><div class="log" id="trades"></div></div>
   <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 </div>
 <script>
@@ -144,161 +92,85 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toFixed(d);
+const sgn = (v, d = 2) => v == null ? "—" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(d)}</span>`;
+const pr = (v) => v == null ? "—" : Number(v).toPrecision(6);
 let S = null, BUSY = false, FILLED = false;
-async function load() {
-  try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); paint(); }
-  catch (e) { $("status").textContent = "немає зв'язку з сервером"; }
-}
-async function post(url, body) {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
-  if (r.error) alert(r.error);
-  return r;
-}
+async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); paint(); } catch (e) { $("status").textContent = "немає зв'язку з сервером"; } }
 async function act(o, q) {
-  if (q && !confirm(q)) return null;
+  if (q && !confirm(q)) return "";
   BUSY = true; paint();
-  const r = await post("/api/act", o);
-  BUSY = false; await load();
-  return r.text || "";
+  const r = await fetch("/api/act", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
+  BUSY = false; if (r.error) alert(r.error); await load(); return r.text || "";
 }
-$("main").onclick = () => {
-  const on = S.fx.params.on || S.ai.on;
-  if (on) act({ what: "stop" }, "Зупинити? Нові входи не відкриватимуться, AI вимкнеться, відкриті позиції закриються лімітом біля ринку.");
-  else act({ what: "start" }, (S.env === "mainnet" ? "Запустити торгівлю за відкритим інтересом на реальному рахунку?" : "Запустити на testnet?") + (S.fal ? " AI (fal.ai) вирішуватиме, який сценарій працює." : ""));
-};
-document.querySelectorAll("[data-strat]").forEach(b => b.onclick = () => act({ what: "strategy", strategy: b.dataset.strat }));
-document.querySelectorAll("[data-side]").forEach(b => b.onclick = () => act({ what: "settings", o: { sideMode: b.dataset.side } }));
-$("aiBtn").onclick = () => act({ what: S.ai.on ? "ai-off" : "ai-on" });
-$("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "ai-now" }); };
-$("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
-const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sMax", "maxPositions"], ["sOi", "oiMin"], ["sOi5", "oiMin5"], ["sPx", "pxMin"], ["sFlat", "pxFlat"], ["sFund", "fundMin"],
-  ["sTake", "takePct"], ["sStop", "stopPct"], ["sTrS", "trailStart"], ["sTrG", "trailGap"], ["sOiX", "oiExit"], ["sHold", "maxHoldMin"], ["sCool", "cooldownMin"], ["sTurn", "minTurnoverM"], ["sCvdMin", "cvdMin"], ["sCvdX", "cvdExit"], ["sDcaN", "dcaLevels"], ["sDcaS", "dcaStepPct"], ["sDcaM", "dcaMult"]];
+$("main").onclick = () => S.gr.params.on ? act({ what: "stop" }, "Зупинити? Ордери сітки знімуться. Позиція сітки (якщо є) лишиться — закрити її можна кнопкою «Закрити сітку».") : act({ what: "start" }, S.env === "mainnet" ? "Запустити грід-бота на реальному рахунку?" : "Запустити на testnet?");
+$("newGrid").onclick = () => act({ what: "new" }, "Закрити поточну сітку (позицію — ринком) і поставити нову навколо поточної ціни?");
+$("closeGrid").onclick = () => act({ what: "close" }, "Закрити сітку: зняти ордери і закрити позицію ринком?");
+document.querySelectorAll("[data-mode]").forEach(b => b.onclick = async () => { const t = await act({ what: "settings", o: { mode: b.dataset.mode } }); if (t.startsWith("Збережено") && S.gr.grid && confirm("Режим зміниться для нової сітки. Поставити нову сітку зараз?")) act({ what: "new" }); });
+const FIELDS = [["sInv", "investment"], ["sLev", "leverage"], ["sN", "grids"], ["sW", "rangePct"], ["sLow", "low"], ["sHigh", "high"], ["sSl", "slPct"], ["sReM", "restartMin"], ["sFee", "feeX"]];
 $("sSave").onclick = async () => {
   const o = {};
   for (const [id, k] of FIELDS) { const v = Number(String($(id).value).replace(",", ".")); if (Number.isFinite(v) && $(id).value !== "") o[k] = v; }
-  o.learn = $("sLearn").value === "on"; o.useCvd = $("sCvd").value === "on";
+  o.autoCoin = $("sAuto").value === "auto"; o.symbol = $("sSym").value; o.autoRange = $("sAR").value === "auto"; o.trailing = $("sTrail").value === "on"; o.autoRestart = $("sRe").value === "on";
   $("sOut").textContent = await act({ what: "settings", o }); FILLED = false;
 };
-function fillSettings(P) {
-  for (const [id, k] of FIELDS) $(id).value = P[k];
-  $("sLearn").value = P.learn ? "on" : "off"; $("sCvd").value = P.useCvd ? "on" : "off";
-  $("aiEvery").value = String(S.ai.every); $("aiMaxM").value = S.ai.maxMargin || ""; $("aiMaxL").value = S.ai.maxLev || "";
+function fill(P) {
+  for (const [id, k] of FIELDS) $(id).value = P[k] || (k === "low" || k === "high" ? "" : P[k]);
+  $("sAuto").value = P.autoCoin ? "auto" : "manual"; $("sSym").value = P.symbol || ""; $("sAR").value = P.autoRange ? "auto" : "manual";
+  $("sTrail").value = P.trailing ? "on" : "off"; $("sRe").value = P.autoRestart ? "on" : "off";
 }
-// ---- voice / text commands ----
-let PLAN = null;
-const speak = (t) => { try { const u = new SpeechSynthesisUtterance(t); u.lang = "uk-UA"; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { /* no speech */ } };
-async function sendCmd(text) {
-  text = (text || "").trim(); if (!text) return;
-  $("plan").innerHTML = '<span class="mute">AI розбирає команду…</span>';
-  const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
-  if (r.error) { $("plan").innerHTML = `<span class="down">${esc(r.error)}</span>`; return; }
-  PLAN = r;
-  $("plan").innerHTML = `<div style="border:1px solid #7c3aed;border-radius:12px;padding:10px"><b style="color:#c4b5fd">План:</b> ${esc(r.summary || "—")}${r.question ? `<br><span style="color:var(--gold)">${esc(r.question)}</span>` : ""}<div style="margin-top:8px;display:flex;gap:8px"><button class="btn" id="doit" style="background:#7c3aed;color:#fff">✓ Виконати</button><button class="btn" id="nope">Скасувати</button></div></div>`;
-  speak(r.question || ("План: " + (r.summary || "") + ". Виконати?"));
-  $("doit").onclick = async () => {
-    $("plan").innerHTML = '<span class="mute">Виконую…</span>';
-    const a = await fetch("/api/command/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: PLAN.id }) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
-    $("plan").innerHTML = a.error ? `<span class="down">${esc(a.error)}</span>` : `<span class="up">✓ ${esc(a.text)}</span>`;
-    speak(a.error || "Готово"); $("cmd").value = ""; FILLED = false; load();
-  };
-  $("nope").onclick = () => { PLAN = null; $("plan").innerHTML = ""; };
+function ladder(g, price) {
+  if (!g) { $("ladder").innerHTML = '<text x="20" y="180" fill="#848e9c" font-size="14">Сітки ще немає</text>'; return; }
+  const lo = Math.min(g.low, price || g.low), hi = Math.max(g.high, price || g.high), pad = (hi - lo) * 0.06 || 1;
+  const Y = (v) => 345 - (v - (lo - pad)) / ((hi + pad) - (lo - pad)) * 330;
+  let s = "";
+  for (const c of g.cells) {
+    const y1 = Y(c.lo), y2 = Y(c.hi), hold = c.state === "close";
+    const col = c.dir > 0 ? "#0ecb81" : "#f6465d";
+    if (hold) s += `<rect x="70" y="${Math.min(y1, y2)}" width="440" height="${Math.max(1, Math.abs(y1 - y2) - 1)}" fill="${col}" fill-opacity=".14"/>`;
+    s += `<line x1="70" x2="510" y1="${y1}" y2="${y1}" stroke="#2b3139"/>`;
+    const at = c.state === "open" ? (c.dir > 0 ? c.lo : c.hi) : (c.dir > 0 ? c.hi : c.lo), wait = (c.state === "open") === (c.dir > 0) ? "Buy" : "Sell";
+    s += `<circle cx="${c.dir > 0 ? 470 : 110}" cy="${Y(at)}" r="${c.live ? 5 : 3}" fill="${wait === "Buy" ? "#0ecb81" : "#f6465d"}" fill-opacity="${c.live ? 1 : 0.35}"><title>${wait === "Buy" ? "купівля" : "продаж"} ${pr(at)}${c.live ? "" : " (ставиться)"}</title></circle>`;
+  }
+  s += `<line x1="70" x2="510" y1="${Y(g.high)}" y2="${Y(g.high)}" stroke="#2b3139"/>`;
+  s += `<text x="515" y="${Y(g.high) + 4}" fill="#848e9c" font-size="11">${pr(g.high)}</text><text x="515" y="${Y(g.low) + 4}" fill="#848e9c" font-size="11">${pr(g.low)}</text>`;
+  if (price) s += `<line x1="60" x2="520" y1="${Y(price)}" y2="${Y(price)}" stroke="#f7a600" stroke-width="2"/><text x="4" y="${Y(price) + 4}" fill="#f7a600" font-size="11">${pr(price)}</text>`;
+  $("ladder").innerHTML = s;
 }
-$("send").onclick = () => sendCmd($("cmd").value);
-$("cmd").addEventListener("keydown", e => { if (e.key === "Enter") sendCmd($("cmd").value); });
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition; let rec = null;
-$("mic").onclick = () => {
-  if (!SR) { alert("Цей браузер не розпізнає голос. Відкрийте в Chrome / Edge / Safari або напишіть текстом."); return; }
-  if (rec) { rec.stop(); return; }
-  rec = new SR(); rec.lang = "uk-UA"; rec.interimResults = true; rec.continuous = false; $("mic").style.background = "#f6465d";
-  rec.onresult = e => { let t = ""; for (const r of e.results) t += r[0].transcript; $("cmd").value = t; if (e.results[e.results.length - 1].isFinal) sendCmd(t); };
-  rec.onerror = e => { $("plan").innerHTML = `<span class="down">Мікрофон: ${esc(e.error)}</span>`; };
-  rec.onend = () => { rec = null; $("mic").style.background = ""; };
-  rec.start();
-};
-
-// ---- view ----
-function drawProgress(G) {
-  const Wd = 600, eq = G.eq || [], dec = G.dec || [], q = G.quality;
-  $("progSum").innerHTML = G.periods ? `Періодів AI: ${G.periods} · разом <span class="${G.totalPnl >= 0 ? "up" : "down"}">${G.totalPnl >= 0 ? "+" : ""}${f(G.totalPnl, 4)}</span> USDT · якість останніх 10: ${q == null ? "—" : `<b class="${q >= 50 ? "up" : "down"}">${q}%</b> у плюсі`}`
-    + (G.avgLast != null && G.avgPrev != null ? ` · середній період <span class="${G.avgLast >= G.avgPrev ? "up" : "down"}">${G.avgLast >= G.avgPrev ? "покращився" : "погіршився"}</span> (${f(G.avgPrev, 4)} → ${f(G.avgLast, 4)})` : "")
-    : '<span class="mute">Графік наповнюватиметься: капітал записується кожні 10 хв, кожне рішення AI отримує результат свого періоду.</span>';
-  let svg = "";
-  if (eq.length > 1) {
-    const t0 = eq[0][0], t1 = eq[eq.length - 1][0], vs = eq.map(p => p[1]), lo = Math.min(...vs), hi = Math.max(...vs), pad = (hi - lo) * 0.1 || 1;
-    const X = t => 10 + (t - t0) / (t1 - t0 || 1) * (Wd - 20), Y = v => 170 - (v - (lo - pad)) / ((hi + pad) - (lo - pad)) * 160;
-    dec.forEach(d => { if (d.at >= t0 && d.at <= t1) svg += `<line x1="${X(d.at)}" x2="${X(d.at)}" y1="5" y2="172" stroke="#7c3aed" stroke-opacity=".45"/>`; });
-    svg += `<polyline fill="none" stroke="${vs[vs.length - 1] >= vs[0] ? "#0ecb81" : "#f6465d"}" stroke-width="2" points="${eq.map(p => X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join(" ")}"/>`;
-    svg += `<text x="12" y="14" fill="#848e9c" font-size="11">${f(hi, 2)}</text><text x="12" y="168" fill="#848e9c" font-size="11">${f(lo, 2)}</text>`;
-  } else svg = '<text x="12" y="90" fill="#848e9c" font-size="13">Ще мало точок капіталу</text>';
-  $("eqChart").innerHTML = svg;
-  const done = dec.filter(d => d.pnl != null).slice(-60); let s2 = "";
-  if (done.length) {
-    const mx = Math.max(...done.map(d => Math.abs(d.pnl)), 1e-9); let cum = 0; const cums = done.map(d => cum += d.pnl), cm = Math.max(...cums.map(Math.abs), 1e-9);
-    const bw = (Wd - 20) / done.length, mid = 75;
-    done.forEach((d, i) => { const h = Math.abs(d.pnl) / mx * 65; s2 += `<rect x="${(10 + i * bw + 1).toFixed(1)}" y="${(d.pnl >= 0 ? mid - h : mid).toFixed(1)}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" fill="${d.pnl >= 0 ? "#0ecb81" : "#f6465d"}"><title>${new Date(d.at).toLocaleString()} · ${esc(d.regime)} · ${d.pnl >= 0 ? "+" : ""}${d.pnl} USDT · угод ${d.trades}</title></rect>`; });
-    s2 += `<line x1="10" x2="590" y1="${mid}" y2="${mid}" stroke="#2b3139"/><polyline fill="none" stroke="#c4b5fd" stroke-width="2" points="${cums.map((c, i) => (10 + i * bw + bw / 2).toFixed(1) + "," + (mid - c / cm * 65).toFixed(1)).join(" ")}"/>`;
-  } else s2 = '<text x="12" y="75" fill="#848e9c" font-size="13">Перший результат з&#39;явиться після другого рішення AI</text>';
-  $("decChart").innerHTML = s2;
-}
-const sgn = (v, d = 2) => v == null ? "—" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(d)}</span>`;
-const cvdTd = (v) => v == null ? '<span class="mute">—</span>' : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${Math.round(v * 100)}%</span>`;
-const fmtUsd = (v) => (v >= 0 ? "+" : "−") + "$" + (Math.abs(v) >= 1e6 ? (Math.abs(v) / 1e6).toFixed(1) + "м" : Math.abs(v) >= 1e3 ? Math.round(Math.abs(v) / 1e3) + "к" : Math.round(Math.abs(v)));
-const STRAT = { trend: "📈 тренд", squeeze: "🧲 сквіз", both: "🤖 обидва" };
 function paint() {
   if (!S) return;
-  const X = S.fx, P = X.params, ST = X.stats || {}, D = X.day || {}, AI = S.ai, ACC = S.acc, on = !!P.on || AI.on;
-  if (!FILLED) { fillSettings(P); FILLED = true; }
+  const X = S.gr, P = X.params, g = X.grid, ACC = S.acc, on = !!P.on;
+  if (!FILLED) { fill(P); FILLED = true; }
   const c = [];
   c.push(S.keys ? `<span class="up">Bybit ${S.env}: ключі є</span>` : '<span class="down">Немає BYBIT_API_KEY / BYBIT_API_SECRET у Railway → Variables</span>');
-  c.push(S.fal ? `<span class="up">fal.ai: ключ є</span> (${esc(S.model)})` : '<span class="down">Немає FAL_KEY у Railway → Variables — без AI</span>');
   if (!S.password) c.push('<span class="down">Немає UI_PASSWORD — кнопки заблоковані, додайте змінну в Railway</span>');
   if (ACC.err) c.push(`<span class="down">Bybit: ${esc(ACC.err)}</span>`);
   $("conn").innerHTML = c.join("<br>");
-  $("connCard").style.display = S.keys && S.fal && S.password && !ACC.err ? "none" : "";
+  $("connCard").style.display = S.keys && S.password && !ACC.err ? "none" : "";
   $("dot").className = "dot" + (on ? " on" : "");
-  $("status").textContent = !on ? "Зупинено" : (AI.on ? "🧠 AI торгує · " : "Торгую · ") + (P.strategy === "both" ? "тренд + сквіз" : P.strategy === "trend" ? "за трендом" : "сквіз");
-  const ago = X.scanAt ? Math.round((Date.now() - X.scanAt) / 1000) : null;
-  $("status2").innerHTML = `${P.sideMode === "sell" ? "🔻 тільки Sell · " : P.sideMode === "buy" ? "🔺 тільки Buy · " : ""}сканую ${X.coinsScanned} монет${ago != null ? ` (${ago} с тому)` : ""} · позицій ${(X.positions || []).length}/${P.maxPositions} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.takePct}% · стоп ${P.stopPct}% · трейлінг з +${P.trailStart}% · сервер 24/7`;
+  $("status").textContent = !on ? "Зупинено" : g ? `Сітка ${g.sym} працює` : X.restartIn != null ? `Нова сітка через ${X.restartIn} с` : "Ставлю сітку…";
+  $("status2").textContent = (g ? `ціна ${pr(X.price)} · ` : "") + `${P.mode === "long" ? "лонг" : P.mode === "short" ? "шорт" : "нейтральна"} · ${P.investment} USDT × x${P.leverage} · ${g ? g.n + " сіток" + (g.n < P.grids ? ` (з ${P.grids}: більше не дозволяє сума або крок ≥ комісій)` : "") : P.grids + " сіток"} · трейлінг ${P.trailing ? "так" : "ні"} · стоп ${P.slPct}% за краєм · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
-  document.querySelectorAll("[data-strat]").forEach(b => b.classList.toggle("on", b.dataset.strat === P.strategy));
-  $("stratHint").textContent = P.strategy === "trend" ? "OI росте разом із ціною, а CVD показує, що ринкові покупці (продавці) тиснуть у той самий бік: входимо туди ж."
-    : P.strategy === "squeeze" ? "OI росте, ціна стоїть, натовп б'є ринком (CVD у бік натовпу, видно і з фінансування), але ціну не зрушує: входимо проти нього."
-    : "Обидва сценарії: береться найсильніший сигнал; збитковий сценарій вимикається сам, AI перемикає за результатами.";
-  document.querySelectorAll("[data-side]").forEach(b => b.classList.toggle("on", b.dataset.side === P.sideMode));
-  const lvls = Array.from({ length: P.dcaLevels }, (_, i) => P.dcaStepPct * (i + 1));
-  $("sideHint").textContent = (P.sideMode === "sell" ? "Лише шорти: заробіток на падінні." : P.sideMode === "buy" ? "Лише лонги." : "І лонги, і шорти.")
-    + (P.dcaLevels > 0 ? ` Одразу після входу — лімітки на добір ${P.sideMode === "buy" ? "нижче" : P.sideMode === "sell" ? "вище" : "проти руху"}: ${lvls.map(v => (P.sideMode === "buy" ? "−" : "+") + v + "%").join(", ")} (×${P.dcaMult} обсягу); тейк рахується від середньої, стоп — за останнім добором (${(P.stopPct + P.dcaStepPct * P.dcaLevels).toFixed(1)}% від входу).` : " Добір вимкнено.");
+  document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === P.mode));
+  $("modeHint").textContent = P.mode === "long" ? "Купує на рівнях нижче ціни, продає на рівень вище; на старті купує частку для рівнів над ціною. Заробляє на коливаннях і на рості."
+    : P.mode === "short" ? "Продає на рівнях вище ціни, відкуповує на рівень нижче; на старті продає частку для рівнів під ціною. Заробляє на коливаннях і на падінні."
+    : "Без стартової позиції: нижче ціни купує → продає на рівень вище, вище ціни продає → відкуповує на рівень нижче. Заробляє на коливаннях у діапазоні.";
   $("warn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
-  $("eq").textContent = f(ACC.equity) + " · " + f(X.avail ?? ACC.available);
-  $("day").innerHTML = `${sgn(D.pnl, 3)} · ${D.n || 0}`;
-  $("all").textContent = (ST.n || 0) + (ST.win != null ? " · " + ST.win + "%" : "");
-  $("pnl").innerHTML = `${sgn(ST.pnl, 3)} · ${ST.pf ?? "—"}`;
-  $("fees").innerHTML = `${sgn(ST.gross, 3)} · <span class="down">−${f(ST.fees, 3)}</span>`;
-  $("hold").textContent = ST.avgHoldMin != null ? ST.avgHoldMin + " хв" : "—";
-  $("pos").innerHTML = (X.positions || []).map(p => `<tr><td><b>${esc(p.sym)}</b></td><td>${STRAT[p.strategy] || "—"}</td><td class="${p.side === "Buy" ? "up" : "down"}">${p.side === "Buy" ? "лонг" : "шорт"}</td><td>${p.avg}</td><td>${sgn(p.mv)}%</td><td>+${p.peak}%</td><td>${esc(p.stop || "—")}${p.trailing ? " 🛡" : ""}${p.dca && p.dca.length ? `<br><span class="mute">добір: ${p.dca.join(", ")}</span>` : ""}${p.dcaFilled ? `<br><span class="up">добрано ×${p.dcaFilled}</span>` : ""}</td><td>${p.oi && p.oi.oi5 != null ? sgn(p.oi.oi5) + "%" : "—"}</td><td>${cvdTd(p.oi && p.oi.cvd5)}</td><td>${p.min}</td><td>${sgn(p.pnl, 3)}</td></tr>`).join("") || '<tr><td colspan="11" class="mute">Відкритих позицій немає</td></tr>';
-  $("pending").innerHTML = (X.pending || []).map(o => `⏳ ${esc(o.sym)} ${o.side === "Buy" ? "лонг" : "шорт"} лімітом ${o.price} · ${o.sec} с · ${esc(o.sig ? o.sig.why : "")}`).join("<br>");
-  $("scanLine").textContent = `· топ за ростом OI, обіг від ${P.minTurnoverM} млн $`;
-  $("cands").innerHTML = (X.cands || []).map(k => `<tr><td><b>${esc(k.sym)}</b></td><td>${sgn(k.oi15)}%</td><td>${k.oi5 != null ? sgn(k.oi5) + "%" : "—"}</td><td>${k.oi60 != null ? sgn(k.oi60) + "%" : "—"}</td><td>${sgn(k.px15)}%</td><td>${k.px5 != null ? sgn(k.px5) + "%" : "—"}</td><td>${cvdTd(k.cvd5)}</td><td>${cvdTd(k.cvd15)}${k.cvd15usd != null ? ` <span class="mute">${fmtUsd(k.cvd15usd)}</span>` : ""}</td><td>${k.funding != null ? sgn(k.funding, 4) + "%" : "—"}</td><td>${k.oiUsdM}</td><td>${k.sig ? `<b class="${k.sig.side === "Buy" ? "up" : "down"}">${STRAT[k.sig.strategy]} ${k.sig.side === "Buy" ? "лонг" : "шорт"}</b> <span class="mute">${k.sig.score}</span>` : `<span class="mute">${esc(k.wait || "—")}</span>`}</td></tr>`).join("") || '<tr><td colspan="11" class="mute">Сканую…</td></tr>';
-  const BS = X.byStrategy || {};
-  $("strats").innerHTML = [["trend", "📈 За трендом"], ["squeeze", "🧲 Сквіз"]].map(([k, n]) => { const s = BS[k] || {}; return `<tr><td>${n}${(X.learn.off || []).includes(k) ? ' <span class="down">(вимкнено навчанням)</span>' : ""}</td><td>${s.n || 0}</td><td>${s.win ?? "—"}${s.win != null ? "%" : ""}</td><td>${sgn(s.gross, 3)}</td><td class="down">−${f(s.fees, 3)}</td><td>${sgn(s.pnl, 3)}</td><td>${s.pf ?? "—"}</td><td>${s.avgHoldMin ?? "—"} хв</td></tr>`; }).join("");
-  $("learnLine").textContent = `Самонавчання ${P.learn ? "увімкнено" : "вимкнено"}: якщо один сценарій після 8+ угод у мінусі, а інший у плюсі, збитковий тимчасово вимикається. Тейк завжди ≥ ${P.feeX}× комісії.`;
-  // AI
-  const b = $("aiBtn"); b.textContent = AI.on ? "🧠 AI увімкнено — вимкнути" : "🧠 Увімкнути AI"; b.style.background = AI.on ? "#7c3aed" : ""; b.style.color = AI.on ? "#fff" : ""; b.disabled = BUSY;
-  const next = Math.max(0, Math.round((AI.last + AI.every * 60000 - Date.now()) / 60000));
-  $("aiStatus").innerHTML = (!S.fal ? '<span class="down">Додайте FAL_KEY у Railway → Variables, щоб AI керував ботом</span>'
-    : AI.on ? (AI.busy ? '<span style="color:#c4b5fd">AI думає…</span>' : `AI керує: наступне рішення через ~${next} хв · межі: маржа ${AI.maxMargin} USDT, плече x${AI.maxLev}`)
-    : '<span class="mute">AI вимкнено — бот торгує з поточними налаштуваннями</span>') + (AI.error ? `<div class="down">Остання помилка: ${esc(AI.error)}</div>` : "");
-  const h = AI.history[AI.history.length - 1];
-  $("aiLast").innerHTML = h ? `<b>Останнє рішення</b> (${new Date(h.at).toLocaleTimeString()}, ${esc(h.regime)}): ${esc(h.reason)}${h.changes.length ? `<br><span class="mute">Зміни: ${esc(h.changes.join("; "))}</span>` : ""}${h.lesson ? `<br>📚 ${esc(h.lesson)}` : ""}` : "";
-  $("aiHist").innerHTML = AI.history.slice().reverse().map(x => `<div>${new Date(x.at).toLocaleString()} · ${esc(x.regime)} · ${esc(x.reason)}${x.changes.length ? " · " + esc(x.changes.join("; ")) : ""}${x.periodPnl != null ? ` · період ${sgn(x.periodPnl, 4)} (${x.periodTrades} уг.)` : ""}</div>`).join("") || "<div>Ще немає</div>";
-  $("notes").innerHTML = AI.notes.length ? "<b>AI пам'ятає:</b> " + AI.notes.map((n, i) => `«${esc(n.text)}» <a href="#" data-del="${i}" class="mute">✕</a>`).join(" · ") : "";
-  document.querySelectorAll("[data-del]").forEach(a => a.onclick = (e) => { e.preventDefault(); act({ what: "note-del", i: Number(a.dataset.del) }); });
-  drawProgress(S.prog || {});
-  $("trades").innerHTML = (X.trades || []).map(t => `<div>${new Date(t.closedAt).toLocaleString()} · ${esc(t.sym)} ${STRAT[t.strategy] || ""} ${t.side === "Buy" ? "лонг" : "шорт"} · ${esc(t.how)} · ${sgn(t.pnl, 4)} (комісії ${t.fees}) · макс +${t.peak}% · ${Math.round(t.holdMs / 60000)} хв</div>`).join("") || "<div>Ще немає</div>";
+  $("eq").textContent = f(ACC.equity) + " · " + f(ACC.available);
+  $("gp").innerHTML = g ? `${sgn(g.profit, 4)} · ${g.cycles}` : "—";
+  $("ur").innerHTML = g ? sgn(g.unreal, 4) : "—";
+  $("day").innerHTML = `${sgn(X.stats.day, 4)} · ${X.stats.dayCycles}`;
+  $("tot").innerHTML = `${sgn(X.stats.profit, 4)} · ${X.stats.stops} (${sgn(X.stats.stopPnl, 3)})`;
+  $("tr").textContent = g ? g.trails : "—";
+  $("gTitle").textContent = g ? `Сітка ${g.sym}` : "Сітка";
+  $("gInfo").innerHTML = g ? `${pr(g.low)} – ${pr(g.high)} · ${g.n} сіток по ${g.stepPct}% · ${g.qty} на сітку · x${g.lev} · позиція сітки ${g.pos} · стоп ${g.pos > 0 ? "≤ " + pr(g.stopLow) : g.pos < 0 ? "≥ " + pr(g.stopHigh) : `≤ ${pr(g.stopLow)} / ≥ ${pr(g.stopHigh)}`} · з ${new Date(g.startedAt).toLocaleString()}` : (X.restartIn != null ? `нова сітка через ${X.restartIn} с` : "");
+  ladder(g, X.price);
+  $("picks").textContent = X.picks.length ? "Найкращі монети для сітки зараз (рух за добу / зміна за добу): " + X.picks.map(p => `${p.sym} ${p.range}%/${p.chg}%`).join(", ") : "";
+  $("trades").innerHTML = (X.trades || []).map(t => t.kind === "cell"
+    ? `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.dir > 0 ? "купив" : "продав"} ${pr(t.open)} → ${t.dir > 0 ? "продав" : "купив"} ${pr(t.close)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`
+    : `<div><b>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} сітку закрито: ${esc(t.why)}</b> · сітка ${sgn(t.gridProfit, 4)} за ${t.cycles} кіл · закриття ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
   $("log").innerHTML = (S.events || []).slice(0, 80).map(e => `<div class="${e[2] === "down" ? "down" : e[2] === "up" ? "up" : ""}">${new Date(e[0]).toLocaleTimeString()} · ${esc(e[1])}</div>`).join("");
 }
-load();
-setInterval(load, 2500);
+load(); setInterval(load, 2000);
 </script>
 </body>
 </html>

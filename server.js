@@ -1,4 +1,4 @@
-// OI TRADER 24/7: торгівля за ростом відкритого інтересу на Bybit (тренд + сквіз) + AI-автопілот fal.ai, що вирішує, який сценарій працює.
+// GRID BOT 24/7: простий ф'ючерсний грід-бот Bybit з трейлінгом сітки й автопідстановкою нових сіток.
 // Сторінка лише показує стан і надсилає команди; торгує сервер, навіть коли браузер закритий.
 "use strict";
 const http = require("http");
@@ -14,14 +14,9 @@ const ENV = (process.env.BYBIT_ENV || "mainnet").trim().toLowerCase() === "testn
 const KEY = (process.env.BYBIT_API_KEY || "").trim();
 const SECRET = (process.env.BYBIT_API_SECRET || "").trim();
 const HAS_KEYS = !!(KEY && SECRET);
-const FAL_KEY = (process.env.FAL_KEY || process.env.FAL_API_KEY || "").trim();
-const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
-const FAL_URL = (process.env.TEST_FAL_URL || process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
 const REST = (process.env.TEST_BYBIT_URL || "").trim() || (ENV === "testnet" ? "https://api-testnet.bybit.com" : "https://api.bybit.com");
 const TEST_WS = (process.env.TEST_WS_URL || "").trim();
 const AUTOSTART = /^(1|true|yes|on|ai)$/i.test((process.env.AUTOSTART || "").trim());
-const ENV_CAP_MARGIN = Number(process.env.AI_MAX_MARGIN) || 0;
-const ENV_CAP_LEV = Number(process.env.AI_MAX_LEVERAGE) || 0;
 const UI = fs.readFileSync(path.join(__dirname, "ui.html"), "utf8");
 
 const ts = () => new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -105,208 +100,30 @@ async function refreshAccount() {
   } catch (e) { ACC.err = e.message; }
 }
 
-// ---------------- the open-interest engine ----------------
-const FX = require("./oi").create({
-  bx, spec, align, log: (...a) => log("oi", ...a), engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, env: ENV,
+// ---------------- the grid engine ----------------
+const GR = require("./grid").create({
+  bx, spec, align, log: (...a) => log("grid", ...a), engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, env: ENV,
   keys: HAS_KEYS ? { key: KEY } : null, sign: (s) => crypto.createHmac("sha256", SECRET).update(s).digest("hex"),
   testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
-  makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined, takerFee: process.env.TAKER_FEE_PCT != null ? Number(process.env.TAKER_FEE_PCT) : undefined,
+  makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined,
+  flush: () => { dirty = true; dump(); },
 });
 
-// ---------------- AI autopilot (fal.ai) with full control ----------------
-const AI = Object.assign({ on: false, last: 0, every: Math.max(2, Number(process.env.AI_EVERY_MIN || 10)), maxMargin: null, maxLev: null, history: [], error: "", notes: [] }, lsGet("ai", {}));
-AI.busy = false;
-const saveAI = () => lsSet("ai", { on: AI.on, last: AI.last, every: AI.every, maxMargin: AI.maxMargin, maxLev: AI.maxLev, history: AI.history.slice(-400), error: AI.error, notes: AI.notes.slice(-20) });
-const capMargin = () => ENV_CAP_MARGIN || AI.maxMargin || FX.params.margin;
-const capLev = () => ENV_CAP_LEV || AI.maxLev || FX.params.leverage;
-function aiSet(on) {
-  if (on && !FAL_KEY) return "Для AI додайте FAL_KEY у Railway → Variables";
-  if (on && !AI.maxMargin) AI.maxMargin = FX.params.margin;       // the AI never risks more than the owner set, unless the owner raises the caps
-  if (on && !AI.maxLev) AI.maxLev = FX.params.leverage;
-  if (on === AI.on) return on ? "AI вже керує" : "AI вже вимкнено";
-  AI.on = on; AI.error = ""; saveAI();
-  addLog(on ? `🧠 AI автопілот увімкнено: керує всім, рішення кожні ${AI.every} хв (маржа до ${capMargin()} USDT, плече до x${capLev()})` : "🧠 AI автопілот вимкнено", on ? "up" : "mute");
-  if (on) { AI.last = Date.now(); setTimeout(() => aiTick(true), 300); }
-  return on ? "AI увімкнено" : "AI вимкнено";
-}
-const SYSTEM = `You have FULL control of an open-interest (OI) trading bot on Bybit USDT perpetuals. The owner gave you the steering wheel 100%:
-there is no human in the loop. The owner only presses Start/Stop. Your only job is to grow the account. The owner's previous order-book bots
-only lost money, so be strict: trade only clear OI setups. "yourTrackRecord" lists your previous decisions and the profit/loss of the period
-after each of them: repeat what worked, stop what lost money, say what you learned in "lesson". Trading never stops (you cannot switch it off).
-How the bot works: every scanSec it scans ALL USDT perps (turnover >= minTurnoverM): change of open interest over 5/15/60 min (oi5, oi15, oi60, %),
-price change over 5/15 min (px5, px15, %), funding rate (%). Two scenarios ("strategy": "trend" | "squeeze" | "both"):
- - trend: oi15 >= oiMin and oi5 >= oiMin5 (OI still rising) and |px15| >= pxMin with px5 in the same direction -> new money enters in the
-   direction of the price -> enter that way.
- - squeeze: oi15 >= oiMin and oi5 >= oiMin5 while |px15| <= pxFlat and |funding| >= fundMin -> the crowd piles in (funding > 0 = longs crowded)
-   -> enter against the crowd and wait for the flush.
-CVD (cumulative volume delta from the live tape: market buys minus market sells, as a share of volume -1..1; cvd5/cvd15, cvd15usd in $) is
-followed for the cvdWatch coins with the fastest OI growth. With useCvd: trend needs CVD >= cvdMin in the trade direction (aggressors really push);
-squeeze needs CVD >= cvdMin in the crowd's direction while the price stands still (the crowd's market orders are absorbed); a TREND position in profit
-is closed when the 5-min CVD turns >= cvdExit against it (not for squeeze trades: there the crowd's CVD is the setup itself). "wait" in topOiMovers says why a setup was not taken (e.g. CVD does not confirm).
-Side: "sideMode" = "sell" (the owner's current choice: shorts only, earn on the fall) | "buy" | "both"; keep the owner's choice unless told otherwise.
-Add-ons: right after an entry the bot places dcaLevels limit orders dcaStepPct % apart further against the trade (short: above the entry), each
-dcaMult × the entry size; the take is counted from the average price, the stop sits stopPct beyond the last add-on level; once the trailing stop
-starts (profit) the unfilled add-ons are cancelled. Bigger add-ons = better average but bigger loss if the stop is hit.
-YOU decide which scenario works now: compare byStrategy / bySide / byExit and the live "topOiMovers"; set "strategy" accordingly (both = take the
-strongest signal of either). With learn on, a scenario that keeps losing while the other wins is skipped by itself.
-Entry: PostOnly limit at the best price (follows the price up to entryWaitSec; after chaseSec with the signal still alive -> market entry). Exits: take max(takePct, feeX x round-trip fee) as a limit,
-exchange stop stopPct, trailing stop from trailStart at trailGap behind the best price, exit at the touch when OI falls oiExit % in 5 min while in
-profit (the move is over), maxHoldMin. A coin rests cooldownMin after a trade. Up to maxPositions positions at once, margin per trade, leverage
-(capped by the engine so liquidation never comes before the stop). Fees: maker ~0.02%, taker ~0.055% per side; every result is net of fees.
-Rules: never remove stops; keep feeX >= 10; with few trades change one or two settings at a time; prefer values that made money with n >= 8;
-no trades for a long time -> lower oiMin/pxMin a little.
-Answer with ONE JSON object only, no text around it:
-{"regime":"calm|range|trend|volatile|chaotic","oi":{"params":{optional: strategy,oiMin,oiMin5,pxMin,pxFlat,fundMin,minTurnoverM,maxSpreadPct,feeX,takePct,
-stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,chaseSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn,useCvd,cvdMin,cvdExit,cvdWatch,sideMode,dcaLevels,dcaStepPct,dcaMult}},
-"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
-const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit open-interest trading app. The owner speaks (or types) an instruction in Ukrainian,
-Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
-transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
- "engine": "start" | "stop"       (stop also switches the AI off)
- "ai": true | false               (AI autopilot on/off)
- "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,useCvd,cvdMin,cvdExit,sideMode:"sell"|"buy"|"both",dcaLevels,dcaStepPct,dcaMult,...}}
- "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
- "aiEveryMin": n                  (how often the AI decides)
- "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future)
- "forget": true                   (clear remembered instructions)
-Answer with ONE JSON object: {"actions":{...}, "summary":"what will be done, in Ukrainian, short list", "question":"ask only if unclear, else empty"}`;
-async function falJSON(system, prompt, maxTokens) {
-  if (!FAL_KEY) throw new Error("немає FAL_KEY у Railway → Variables");
-  let r;
-  try {
-    r = await fetch(FAL_URL, { method: "POST", headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: FAL_MODEL, system_prompt: system, prompt, temperature: 0.2, max_tokens: maxTokens || 900 }), signal: AbortSignal.timeout(90000) });
-  } catch (e) { throw new Error("немає зв'язку з fal.ai: " + (e.cause && e.cause.code || e.message)); }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || (j.detail && JSON.stringify(j.detail).slice(0, 200)) || "помилка"}`);
-  const m = String(j.output || "").match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("AI не повернув JSON");
-  return JSON.parse(m[0]);
-}
-const TRADES = () => FX._test.TR;
-function closePeriod() {
-  const h = AI.history[AI.history.length - 1];
-  if (!h || h.closed) return;
-  const t = TRADES().filter(x => x.closedAt >= h.at);
-  h.periodPnl = +t.reduce((a, x) => a + Number(x.pnl || 0), 0).toFixed(4); h.periodTrades = t.length; h.periodWins = t.filter(x => x.pnl > 0).length;
-  if (h.equity && ACC.equity) h.periodEquity = +(ACC.equity - h.equity).toFixed(4);
-  h.closed = true;
-}
-function applyDecision(d, caps) {
-  const ch = [], s = d && (d.oi || d.fast);
-  if (!s || typeof s !== "object") return ch;
-  const p = Object.assign({}, s.params || {}); delete p.on;          // the AI never switches trading off
-  ch.push(...FX.setParams(p, caps));
-  return ch;
-}
-async function aiTick(force) {
-  if (!AI.on || AI.busy) return;
-  if (!force && Date.now() - AI.last < AI.every * 60000) return;
-  AI.busy = true; AI.last = Date.now();
-  try {
-    closePeriod();
-    const ctx = { time: new Date().toISOString(), account: { equity: ACC.equity, available: ACC.available },
-      limits: { maxMarginPerTrade: capMargin(), maxLeverage: capLev() }, oi: FX.aiView(),
-      yourTrackRecord: AI.history.slice(-12).map(h => ({ at: new Date(h.at).toISOString(), regime: h.regime, changes: h.changes, lesson: h.lesson || "",
-        periodPnlUsdt: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null, periodWins: h.periodWins ?? null })) };
-    const sys = SYSTEM + (AI.notes.length ? `\nThe OWNER's standing instructions (follow them; they have priority over your own preferences, but never remove stops):\n- ${AI.notes.map(n => n.text).join("\n- ")}\n` : "");
-    const d = await falJSON(sys, "State:\n" + JSON.stringify(ctx), 900);
-    const changes = applyDecision(d, { margin: capMargin(), leverage: capLev() });
-    const item = { at: Date.now(), regime: String(d.regime || ""), reason: String(d.reason || "").slice(0, 400), lesson: String(d.lesson || "").slice(0, 300), changes, equity: ACC.equity };
-    AI.history.push(item); AI.error = "";
-    addLog(`🧠 AI: ${item.regime} — ${item.reason}${changes.length ? " · зміни: " + changes.join("; ") : " · без змін"}`, "up");
-  } catch (e) {
-    AI.error = String(e && e.message || e);
-    addLog(`🧠 AI: помилка — ${AI.error}. Бот торгує з поточними налаштуваннями.`, "down");
-  } finally { AI.busy = false; saveAI(); }
-}
-setInterval(() => aiTick(false), 30000);
-
-// ---------------- owner's voice / text commands ----------------
-const PLANS = new Map();
-async function command(text) {
-  const ctx = { instruction: String(text).slice(0, 1500), now: { engineOn: !!FX.params.on, aiOn: AI.on, aiEveryMin: AI.every, params: FX.params,
-    limits: { maxLeverage: capLev(), maxMargin: capMargin() }, remembered: AI.notes.map(n => n.text) } };
-  const d = await falJSON(CMD_SYSTEM, JSON.stringify(ctx), 700);
-  const id = crypto.randomBytes(6).toString("hex");
-  PLANS.set(id, { at: Date.now(), text, d });
-  for (const [k, v] of PLANS) if (Date.now() - v.at > 600000) PLANS.delete(k);
-  return { id, summary: d.summary || "", question: d.question || "" };
-}
-function applyCommand(id) {
-  const plan = PLANS.get(id);
-  if (!plan) throw new Error("План застарів — скажіть ще раз");
-  PLANS.delete(id);
-  const a = (plan.d && plan.d.actions) || {}, done = [];
-  if (a.limits && typeof a.limits === "object") {
-    if (Number(a.limits.maxLeverage) > 0) { AI.maxLev = Math.min(100, Math.round(Number(a.limits.maxLeverage))); done.push(`межа плеча для AI x${AI.maxLev}`); }
-    if (Number(a.limits.maxMargin) > 0) { AI.maxMargin = Number(a.limits.maxMargin); done.push(`межа маржі для AI ${AI.maxMargin} USDT`); }
-  }
-  if (Number(a.aiEveryMin) > 0) { AI.every = Math.max(2, Math.min(120, Math.round(Number(a.aiEveryMin)))); done.push(`AI вирішує кожні ${AI.every} хв`); }
-  const fx = a.oi || a.fast;
-  if (fx && typeof fx === "object") {
-    const p = fx.params || {};
-    // the owner's own command may raise margin/leverage; the AI caps follow it
-    if (Number(p.margin) > 0) AI.maxMargin = Math.max(AI.maxMargin || 0, Number(p.margin));
-    if (Number(p.leverage) > 0) AI.maxLev = Math.max(AI.maxLev || 0, Math.round(Number(p.leverage)));
-    done.push(...applyDecision({ oi: fx }, {}));
-  }
-  const eng = a.engine || a.scalper;
-  if (eng === "start" && !FX.params.on) { if (HAS_KEYS) { FX.setOn(true); done.push("торгівлю запущено"); } else done.push("немає ключів Bybit"); }
-  if (eng === "stop") { FX.setOn(false); aiSet(false); done.push("торгівлю зупинено, AI вимкнено"); }
-  if (typeof a.ai === "boolean" && a.ai !== AI.on) done.push(aiSet(a.ai));
-  if (a.forget) { AI.notes = []; done.push("вказівки AI очищено"); }
-  if (a.remember) { AI.notes.push({ at: Date.now(), text: String(a.remember).slice(0, 300) }); done.push(`AI запам'ятав: «${String(a.remember).slice(0, 120)}»`); }
-  saveAI();
-  const text = done.length ? done.join("; ") : "Нічого не змінено";
-  addLog(`🎙 Команда: «${String(plan.text).slice(0, 120)}» → ${text}`, "up");
-  return text;
-}
-
-// ---------------- progress chart data ----------------
-function progress() {
-  const eq = lsGet("eq", []), step = Math.max(1, Math.ceil(eq.length / 400));
-  const pts = eq.filter((_, i) => i % step === 0 || i === eq.length - 1);
-  const decs = AI.history.slice(-200).map(h => ({ at: h.at, regime: h.regime, pnl: h.periodPnl ?? null, trades: h.periodTrades ?? null }));
-  const done = decs.filter(x => x.pnl != null), l10 = done.slice(-10), p10 = done.slice(-20, -10);
-  const avg = (a) => a.length ? a.reduce((x, y) => x + y.pnl, 0) / a.length : null;
-  return { eq: pts, dec: decs, quality: l10.length ? Math.round(l10.filter(x => x.pnl > 0).length / l10.length * 100) : null,
-    avgLast: avg(l10), avgPrev: avg(p10), periods: done.length, totalPnl: +done.reduce((a, x) => a + x.pnl, 0).toFixed(4) };
-}
-
 function state() {
-  return {
-    env: ENV, keys: HAS_KEYS, fal: !!FAL_KEY, model: FAL_MODEL, password: !!PASSWORD, server: true,
-    acc: { equity: ACC.equity, available: ACC.available, err: ACC.err, at: ACC.at },
-    fx: FX.view(),
-    ai: { on: AI.on, busy: AI.busy, every: AI.every, last: AI.last, error: AI.error, maxMargin: capMargin(), maxLev: capLev(), envCaps: !!(ENV_CAP_MARGIN || ENV_CAP_LEV), notes: AI.notes,
-      history: AI.history.slice(-50).map(h => ({ at: h.at, regime: h.regime, reason: h.reason, lesson: h.lesson, changes: h.changes, periodPnl: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null })) },
-    prog: progress(),
-    events: EVENTS.slice(0, 100),
-  };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
-
 async function act(b) {
   const what = String(b.what || "");
   if (what === "start") {
     if (!HAS_KEYS) return "Додайте BYBIT_API_KEY і BYBIT_API_SECRET у Railway → Variables";
     await syncTime(); await refreshAccount();
     if (ACC.err) return "Bybit: " + ACC.err;
-    FX.setOn(true);
-    return FAL_KEY ? "Запущено; " + aiSet(true) : "Запущено (без AI: немає FAL_KEY)";
+    GR.setOn(true); return "Запущено";
   }
-  if (what === "stop") { FX.setOn(false); aiSet(false); return "Зупинено: нові входи не відкриваються, відкриті позиції закриваються лімітом біля ринку"; }
-  if (what === "ai-on") return aiSet(true);
-  if (what === "ai-off") return aiSet(false);
-  if (what === "ai-now") { if (!AI.on) return "Спершу увімкніть AI"; aiTick(true); return "AI думає…"; }
-  if (what === "strategy" && ["trend", "squeeze", "both"].includes(b.strategy)) { const c = FX.setParams({ strategy: b.strategy }); if (c.length) addLog("⚙ " + c.join(", "), "mute"); return c.join(", ") || "без змін"; }
-  if (what === "settings" && b.o && typeof b.o === "object") { const ch = FX.setParams(b.o); if (ch.length) addLog("⚙ Налаштування: " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
-  if (what === "limits") {
-    const m = Number(b.maxMargin), l = Math.round(Number(b.maxLev)), e = Number(b.every);
-    if (e > 0) AI.every = Math.max(2, Math.min(120, e)); if (m > 0) AI.maxMargin = m; if (l > 0) AI.maxLev = Math.min(100, l); saveAI();
-    return `Збережено: кожні ${AI.every} хв, маржа до ${capMargin()} USDT, плече до x${capLev()}` + (ENV_CAP_MARGIN || ENV_CAP_LEV ? " (жорсткі межі з Railway Variables мають пріоритет)" : "");
-  }
-  if (what === "note-del") { AI.notes.splice(Number(b.i), 1); saveAI(); return "ok"; }
+  if (what === "stop") { GR.setOn(false); return "Зупинено: ордери сітки знято"; }
+  if (what === "new") return await GR.newGrid();
+  if (what === "close") return await GR.closeNow();
+  if (what === "settings" && b.o && typeof b.o === "object") { const ch = GR.setParams(b.o); if (ch.length) addLog("⚙ Налаштування: " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") + " (діє для нової сітки — «Нова сітка зараз»)" : "Без змін"; }
   return "невідома дія";
 }
 
@@ -334,14 +151,12 @@ http.createServer(async (req, res) => {
       const b = await readBody(req);
       try {
         if (url.pathname === "/api/act") { const text = await act(b); dump(); return json(200, { text }); }
-        if (url.pathname === "/api/command") return json(200, await command(b.text || ""));
-        if (url.pathname === "/api/command/apply") { const text = applyCommand(String(b.id || "")); dump(); return json(200, { text }); }
       } catch (e) { return json(200, { error: String(e && e.message || e) }); }
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(UI);
   } catch (e) { return json(500, { error: String(e && e.message || e) }); }
-}).listen(PORT, "0.0.0.0", () => log(`OI TRADER :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · fal ${FAL_KEY ? "yes" : "no"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
+}).listen(PORT, "0.0.0.0", () => log(`GRID BOT :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
 
 // ---------------- start ----------------
 (async () => {
@@ -352,8 +167,8 @@ http.createServer(async (req, res) => {
   setInterval(syncTime, 30 * 60000);
   if (AUTOSTART && HAS_KEYS && !lsGet("autostarted", false)) {
     lsSet("autostarted", true);
-    addLog("AUTOSTART: перший запуск сервера — вмикаю скальпер" + (FAL_KEY ? " і AI" : ""), "up");
-    FX.setOn(true); if (FAL_KEY) aiSet(true);
-  } else if (FX.params.on || AI.on) addLog(`Сервер перезапущено — продовжую: торгівля ${FX.params.on ? "увімкнена" : "на паузі"}, AI ${AI.on ? "керує" : "вимкнено"}`, "up");
+    addLog("AUTOSTART: перший запуск сервера — вмикаю грід-бота", "up");
+    GR.setOn(true);
+  } else if (GR.params.on) addLog("Сервер перезапущено — грід-бот продовжує роботу", "up");
   else addLog("Сервер запущено. Натисніть «▶ Запустити» на сторінці.", "mute");
 })();

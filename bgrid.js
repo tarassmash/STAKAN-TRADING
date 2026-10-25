@@ -21,11 +21,13 @@ const DEFAULTS = {
   autoTune: true, btDays: 3, btNeedPlus: true,
   minTurnoverM: 50,
   idleMin: 60,             // no direction and no units this long -> look for a better coin
+  straddlePct: 1,          // "both sides": the triggers are this % above and below the price
+  straddleRearm: true,     // after the breakout trades are closed the triggers are set again around the new price
   scalp: false,            // ⚡ super scalping: takes of scalpStep % on every micro move (the step is fixed, the coin is still chosen on history)
   scalpStep: 0.3,
 };
-const NUM = { scalpStep: [0.1, 2], investment: [1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
+const NUM = { straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const BOOL = ["straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -207,6 +209,7 @@ function create(host) {
     try {
       const dd = dirOf(await candles5m(B.sym, 200));
       B.dirInfo = dd;
+      if (B.straddle) { saveB(); return; }                         // both-sides triggers armed: the breakout decides the direction, not the EMA
       if (B.manual && dd.d !== -B.d) { saveB(); return; }          // a direction set by hand holds until the trend turns clearly the other way
       if (dd.d !== B.d) {
         if (B.manual) { B.manual = false; engineLog(`🧭 ${B.sym}: тренд розвернувся проти ручного входу`, "gold-t"); }
@@ -254,12 +257,44 @@ function create(host) {
       if (!B) return "Не вдалося відкрити пробійну сітку: " + ST.err;
       P.on = true; save();
       if (!ST.price || now() - ST.priceAt > 5000) await ticker(B.sym);
+      B.straddle = null; B.rearm = false; B.box = null;
       B.d = dir; B.manual = true; B.last = idxOf(ST.price); B.idleAt = now(); saveB();
       const opened = await openAt(B.last, dir, "ручний вхід");
       engineLog(`👆 ${B.sym}: ручний вхід ${dir > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} зараз (${opened.join(" + ") || "уже відкрито"}) — далі сітка веде сама в цей бік, доки тренд явно не розвернеться`, dir > 0 ? "up" : "down");
       return `${B.sym}: ${dir > 0 ? "лонг" : "шорт"} відкрито (${opened.join(" + ") || "юніти вже є"})`;
     } catch (e) { return "Помилка: " + e.message; }
     finally { ST.busy = false; }
+  }
+  // "both sides": two triggers around the price; the side the price breaks first becomes the direction (the other trigger is dropped)
+  function arm(pct) {
+    const k = (pct || P.straddlePct) / 100, x = ST.price;
+    B.straddle = { up: x * (1 + k), dn: x * (1 - k), pct: pct || P.straddlePct, at: now() };
+    B.d = 0; B.manual = false; saveB();
+    engineLog(`↕ ${B.sym}: чекаю пробою в будь-який бік — вище ${fmt(B.straddle.up)} лонг, нижче ${fmt(B.straddle.dn)} шорт`, "gold-t");
+  }
+  async function straddleNow(pct, symIn) {
+    if (!keys || !keys.key) return "Немає ключів Bybit";
+    const sym = symIn ? (symIn.toUpperCase().endsWith("USDT") ? symIn.toUpperCase() : symIn.toUpperCase() + "USDT") : null;
+    while (ST.busy) await new Promise(r2 => setTimeout(r2, 100));
+    ST.busy = true;
+    try {
+      if (B && sym && B.sym !== sym) { if (B.units.length) return `Зараз відкриті юніти на ${B.sym} — спершу «Закрити все»`; B = null; }
+      if (B && B.units.length) return "Спершу закрийте поточні юніти («Закрити все») — межі ставляться на порожню сітку";
+      if (!B) await start({ force: true, sym: sym || (P.autoCoin ? null : P.symbol || null) });
+      if (!B) return "Не вдалося відкрити пробійну сітку: " + ST.err;
+      P.on = true; save();
+      if (!ST.price || now() - ST.priceAt > 5000) await ticker(B.sym);
+      B.rearm = P.straddleRearm; arm(pct);
+      return `${B.sym}: межі поставлено — вище ${fmt(B.straddle.up)} лонг, нижче ${fmt(B.straddle.dn)} шорт`;
+    } catch (e) { return "Помилка: " + e.message; }
+    finally { ST.busy = false; }
+  }
+  async function checkStraddle(x) {
+    const t = B.straddle; if (!t) return;
+    const dir = x >= t.up ? 1 : x <= t.dn ? -1 : 0; if (!dir) return;
+    B.box = { up: t.up, dn: t.dn }; B.straddle = null; B.d = dir; B.manual = true; B.last = idxOf(x); B.idleAt = now(); saveB();
+    engineLog(`💥 ${B.sym}: пробій ${dir > 0 ? "▲ ВГОРУ — лонг" : "▼ ВНИЗ — шорт"} (${fmt(x)}), друга межа знята`, dir > 0 ? "up" : "down");
+    await openAt(B.last, dir, "пробій межі");
   }
   // ---------------- the loop: every 500 ms ----------------
   async function loop() {
@@ -272,7 +307,20 @@ function create(host) {
       subPub();
       await updateDir(false);
       const x = ST.price;
-      if (B.resync) { B.resync = false; B.last = idxOf(x); saveB(); }   // after a restart: continue from the price now (no catch-up of missed levels)
+      if (B.resync) { B.resync = false; B.last = idxOf(x); saveB(); }
+      if (B.straddle) { await checkStraddle(x); if (B.straddle) { B.idleAt = now(); return; } }
+      // a false breakout: after the break up the price fell through the lower trigger (or the other way) -> everything turns to the other side
+      if (B.box && B.manual && !B.box.flipped && ((B.d > 0 && x <= B.box.dn) || (B.d < 0 && x >= B.box.up))) {
+        B.box.flipped = true;                                        // one turn per pair of triggers: a saw does not keep flipping
+        const nd = -B.d;
+        engineLog(`🔁 ${B.sym}: хибний пробій — ціна пробила ${nd > 0 ? "верхню" : "нижню"} межу, перевертаюсь у ${nd > 0 ? "лонг" : "шорт"}`, "gold-t");
+        for (const u of B.units.slice()) await closeUnit(u, "хибний пробій");
+        B.d = nd; B.last = idxOf(x); B.flips = (B.flips || 0) + 1; saveB();
+        await openAt(B.last, nd, "пробій іншої межі");
+      }
+      // both sides again: the breakout trades are done -> new triggers around the price
+      if (B.rearm && B.manual && !B.units.length && B.wasBusy && P.on) { B.wasBusy = false; B.box = null; arm(); return; }
+      if (B.units.length) B.wasBusy = true;   // after a restart: continue from the price now (no catch-up of missed levels)
       // stops and the runner's trailing stop
       for (const u of B.units.slice()) {
         if (u.state !== "open" || u.closing) continue;
@@ -348,7 +396,7 @@ function create(host) {
 
   async function boot() { connectPub(); connectPriv(); if (B) { B.resync = true; } if (B) engineLog(`↺ Пробійна сітка ${B.sym} продовжує роботу після перезапуску`, "mute"); }
   function setOn(on) { P.on = !!on; save(); engineLog(on ? "▶ Пробійна сітка запущена" : "■ Пробійна сітка зупинена: нових юнітів немає (відкриті доходять до тейку/стопу)", on ? "up" : "mute"); if (on) { ST.waitUntil = 0; lsSet("bg.wait", 0); } }
-  async function closeAll() { if (!B) return "Немає пробійної сітки"; for (const u of B.units.slice()) { if (u.state === "open") await closeUnit(u, "закрито власником"); } const sym = B.sym; setTimeout(() => { if (B && !B.units.length) { B = null; saveB(); } }, 6000); return `Юніти ${sym} закриваються ринком`; }
+  async function closeAll() { if (!B) return "Немає пробійної сітки"; if (B.straddle || B.rearm || B.box) { B.straddle = null; B.rearm = false; B.box = null; saveB(); } for (const u of B.units.slice()) { if (u.state === "open") await closeUnit(u, "закрито власником"); } const sym = B.sym; setTimeout(() => { if (B && !B.units.length) { B = null; saveB(); } }, 6000); return `Юніти ${sym} закриваються ринком`; }
   async function restart() { if (B && B.units.length) return "Спершу закрийте юніти («Закрити все»)"; B = null; saveB(); ST.waitUntil = 0; return "Шукаю нову монету й крок"; }
   function setParams(o) {
     const ch = [];
@@ -361,7 +409,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -378,6 +426,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

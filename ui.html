@@ -122,6 +122,11 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <button class="btn" id="bLongNow" style="background:var(--up);color:#06281b;border:0;font-weight:700">▲ Лонг зараз</button>
         <button class="btn" id="bShortNow" style="background:var(--down);color:#fff;border:0;font-weight:700">▼ Шорт зараз</button>
       </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn" id="bBoth" style="background:#7c3aed;color:#fff;border:0;font-weight:700;flex:1;min-height:44px">↕ Пробій в обидва боки — куди рване</button>
+        <label class="mute" style="font-size:12px;display:flex;align-items:center;gap:4px">межі ±<input id="bBothPct" inputmode="decimal" style="width:64px;min-height:36px">%</label>
+      </div>
+      <div id="bBothInfo" style="font-size:13px;margin-top:4px"></div>
       <div class="mute" style="font-size:12px;margin-top:4px">Відкриває пробійну сітку негайно в обраний бік (юніт з мікро-тейком + бігун ринком), без очікування сигналу. Далі сітка сама добирає на рухах і відкатах у цей бік, доки тренд явно не розвернеться.</div>
       <button class="big" id="bScalp" style="margin-top:10px;min-height:56px;font-size:18px">⚡ Суперскальпінг</button>
       <div id="bScalpHint" style="font-size:12px;margin-top:4px"></div>
@@ -280,6 +285,8 @@ $("bMain").onclick = () => S.bg.params.on ? act({ what: "bg-stop" }, "Зупин
 $("bScalp").onclick = () => act({ what: "bg-scalp", on: !S.bg.params.scalp }, S.bg.params.scalp ? "Вимкнути суперскальпінг (крок знову підбиратиметься на історії)?" : `Увімкнути суперскальпінг: тейки ${S.bg.params.scalpStep}% на кожному мікро-русі, завжди більші за комісії?`);
 const enterNow = (dir) => { const sym = $("bNowSym").value.trim(); act({ what: "bg-enter", dir, sym }, `${dir > 0 ? "ЛОНГ" : "ШОРТ"} зараз${sym ? " на " + sym.toUpperCase() : S.bg.b ? " на " + S.bg.b.sym : ""}: відкрити пробійну сітку ринком${S.env === "mainnet" ? " на реальному рахунку" : ""}?`).then(t => { if (t) $("bOut").textContent = t; }); };
 $("bLongNow").onclick = () => enterNow(1);
+$("bBoth").onclick = () => { const sym = $("bNowSym").value.trim(), pct = Number(String($("bBothPct").value).replace(",", ".")) || S.bg.params.straddlePct;
+  act({ what: "bg-both", pct, sym }, `Поставити межі ±${pct}% навколо ціни${sym ? " " + sym.toUpperCase() : S.bg.b ? " " + S.bg.b.sym : ""}? Куди ціна проб'є першою — туди й вхід (лонг або шорт), друга межа знімається.`).then(t => { if (t) $("bOut").textContent = t; }); };
 $("bShortNow").onclick = () => enterNow(-1);
 $("bNew").onclick = () => act({ what: "bg-restart" }, "Підібрати нову монету й крок (перевірка на історії)?");
 $("bClose").onclick = () => act({ what: "bg-close" }, "Закрити всі юніти ринком?");
@@ -301,7 +308,11 @@ function paintBg() {
   $("bScalpHint").innerHTML = P.scalp ? `Кожен мікро-рух на ${b ? b.stepPct : P.scalpStep}% — тейк. Комісії за коло (вхід ринком + тейк лімітом) ≈ ${fee}% → <b class="up">чистими ≈ +${((b ? b.stepPct : P.scalpStep) - fee).toFixed(3)}% з кожного тейка</b>; тейк рахується від реальної ціни входу, тож у мінус на комісіях не йде.${b && b.pending ? ' <span style="color:var(--gold)">Увімкнеться, щойно закриються поточні юніти.</span>' : ""}`
     : '<span class="mute">Тейки на кожному мікро-русі ціни (0.3%), у бік пробою. Тейк завжди більший за комісії.</span>';
   $("bWarn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
-  $("bDir").innerHTML = b ? (b.d > 0 ? '<span class="up">▲ вгору (лонги)</span>' : b.d < 0 ? '<span class="down">▼ вниз (шорти)</span>' : '<span class="mute">— немає</span>') + (b.manual ? ' <span class="mute">(ручний)</span>' : "") : "—";
+  if (!$("bBothPct").value) $("bBothPct").value = P.straddlePct;
+  $("bBothInfo").innerHTML = b && b.straddle ? `<b style="color:#c4b5fd">↕ Чекаю пробою:</b> вище <b class="up">${pr(b.straddle.up)}</b> → лонг · нижче <b class="down">${pr(b.straddle.dn)}</b> → шорт · ціна ${pr(X.price)}` + (b.rearm ? ' <span class="mute">(після угод межі ставляться знову)</span>' : "")
+    : b && b.box ? `↕ Межі: ▲ ${pr(b.box.up)} / ▼ ${pr(b.box.dn)} · зараз ${b.d > 0 ? '<b class="up">лонг</b>' : '<b class="down">шорт</b>'}; якщо ціна проб'є протилежну межу — розворот (хибний пробій)`
+    : b && b.rearm ? '<span class="mute">↕ Режим «обидва боки»: після закриття пробійних угод межі поставляться знову навколо нової ціни</span>' : "";
+  $("bDir").innerHTML = b && b.straddle ? '<span style="color:#c4b5fd">↕ чекаю пробою</span>' : b ? (b.d > 0 ? '<span class="up">▲ вгору (лонги)</span>' : b.d < 0 ? '<span class="down">▼ вниз (шорти)</span>' : '<span class="mute">— немає</span>') + (b.manual ? ' <span class="mute">(ручний)</span>' : "") : "—";
   $("bProfit").innerHTML = b ? `${sgn(b.profit, 4)} · ${b.wins}/${b.losses}` : "—";
   $("bUnreal").innerHTML = b ? sgn(b.unreal, 4) : "—";
   $("bDay").innerHTML = `${sgn(X.stats.day, 4)} · ${X.stats.dayN}`;

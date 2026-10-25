@@ -139,6 +139,7 @@ async function act(b) {
   if (what === "bg-close") return await BG.closeAll();
   if (what === "bg-restart") return await BG.restart();
   if (what === "bg-scalp") return BG.setScalp(!!b.on);
+  if (what === "bg-both") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.straddleNow(Number(b.pct) || 0, String(b.sym || "").trim()); }
   if (what === "bg-enter" && (b.dir === 1 || b.dir === -1)) { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.enterNow(b.dir, String(b.sym || "").trim()); }
   if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   return "невідома дія";

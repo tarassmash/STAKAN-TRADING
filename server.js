@@ -143,6 +143,7 @@ The engine works in two modes (per coin; "mode": "auto" lets the engine choose p
    inventory cap, quotes shifted against the inventory (mmSkew), the side facing a toxic one-way flow (|score| >= mmToxic) is pulled, inventory
    stop mmStopPct, inventory older than mmMaxHoldSec is flattened at the touch. MM pays only where the spread/tick is wider than 2 maker fees.
 Little free money is fine: the engine sizes every order to the free balance ("avail") and raises a coin's leverage up to its max so that the exchange minimum order still fits; it never refuses to trade for lack of money while the minimum fits.
+The owner demands every take to be at least feeX (10) times the round-trip fee (micro take and the MM profit per cycle); keep feeX >= 10.
 FEES ARE THE MAIN ENEMY: a round trip with maker fees costs ~0.04% (taker 0.11%); "gross" vs "fees" per mode shows if fees eat the edge.
 Prefer fewer, stronger trades (higher thr), takes of several fee multiples (takePct), time to reach them (minHoldSec), breakeven stop (beAtPct),
 no taker exits (fastExit false). The engine itself raises the take / widens MM quotes when 10 trades of a coin were positive before fees but negative after.
@@ -154,7 +155,7 @@ Use bySymbolMode/byMode/byExit/series to decide: mode, thresholds, take/stop, ed
 Rules: never remove stops; with few trades change one or two settings at a time; prefer values that made money with n >= 10;
 no trades for a long time -> lower thr or pick busier coins.
 Answer with ONE JSON object only, no text around it:
-{"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,
+{"regime":"calm|range|trend|volatile|chaotic","fast":{"symbols":[optional],"params":{optional: mode,thr,ofiSec,takeTicks,feeX,takePct,stopPct,beAtPct,minHoldSec,maxHoldSec,entryWaitSec,
 maxSpreadTicks,stepIn,cooldownSec,fastExit,mmEdgePct,mmQtyPct,mmSkew,mmToxic,mmStopPct,mmMaxHoldSec,margin,leverage,autoCoins,minTurnoverM,pickEveryMin,learn}},"reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's fast Bybit order-book trading app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin

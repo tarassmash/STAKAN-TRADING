@@ -23,13 +23,14 @@ const DEFAULTS = {
   maxPositions: 1,         // one coin -> one position
   // micro
   thr: 0.7,                // |score| to enter (score -1..1): only strong order flow
-  takePct: 0.12,           // take at least this %, so the fees (≈0.04% round trip) are a small part of the win
+  feeX: 10,                // the take is at least feeX × the round-trip fee (owner: "take 10 times the fee")
+  takePct: 0.12,           // and at least this %
   ofiSec: 3,               // window of the order-flow imbalance and the tape imbalance, s
   takeTicks: 2,            // take in ticks (at least what beats the fees)
   stopPct: 0.3,            // stop from the entry, %
-  beAtPct: 0.08,           // the price went this far our way -> the stop moves to entry + fees (no loss any more)
-  minHoldSec: 20,          // no soft exit before this: the trade gets time to reach the take
-  maxHoldSec: 180,         // longer -> leave at the touch if not losing (a losing trade is left to the take or the stop)
+  beAtPct: 0.15,           // the price went this far our way -> the stop moves to entry + fees (no loss any more)
+  minHoldSec: 30,          // no soft exit before this: the trade gets time to reach the take
+  maxHoldSec: 900,         // longer -> leave at the touch if not losing (a losing trade is left to the take or the stop)
   entryWaitSec: 2,         // an unfilled entry is cancelled after this
   maxSpreadTicks: 2,       // wider spread -> no micro entry
   stepIn: true,            // spread ≥ 2 ticks: stand one tick inside the spread (first in the queue)
@@ -41,12 +42,12 @@ const DEFAULTS = {
   mmSkew: 1,               // how strongly the inventory shifts the quotes (0..3)
   mmToxic: 0.4,            // flow score against a side above this -> that quote is pulled
   mmStopPct: 0.5,          // stop on the inventory, %
-  mmMaxHoldSec: 90,        // inventory older than this -> flatten at the touch
+  mmMaxHoldSec: 600,       // inventory older than this -> flatten at the touch
   // learning
   learn: true,             // adapt the micro threshold, MM edge and the mode per coin from own results
 };
 const NUM = { coinCount: [1, 1], minTurnoverM: [5, 5000], pickEveryMin: [2, 240], margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 1],
-  thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], stopPct: [0.05, 3], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
+  thr: [0.3, 0.95], ofiSec: [1, 15], takeTicks: [1, 30], takePct: [0.03, 2], feeX: [1, 30], stopPct: [0.05, 3], beAtPct: [0, 2], minHoldSec: [0, 600], maxHoldSec: [3, 3600], entryWaitSec: [0.5, 30], maxSpreadTicks: [1, 10],
   cooldownSec: [0, 600], mmEdgePct: [0.01, 1], mmQtyPct: [5, 100], mmSkew: [0, 3], mmToxic: [0.2, 1], mmStopPct: [0.1, 5], mmMaxHoldSec: [10, 3600] };
 const BOOL = ["autoCoins", "stepIn", "fastExit", "learn", "on"];
 
@@ -59,6 +60,7 @@ function create(host) {
 
   let ST_PICK = false;
   const P = Object.assign({}, DEFAULTS, lsGet("fx", {}));
+  if (!(P.v >= 5)) { Object.assign(P, { feeX: 10, beAtPct: Math.max(P.beAtPct || 0, 0.15), minHoldSec: Math.max(P.minHoldSec || 0, 30), maxHoldSec: Math.max(P.maxHoldSec || 0, 900), mmMaxHoldSec: Math.max(P.mmMaxHoldSec || 0, 600) }); P.v = 5; lsSet("fx", P); }
   if (!(P.v >= 4)) { P.coinCount = 1; P.maxPositions = 1; if (P.symbols.length > 1) P.symbols = P.symbols.slice(0, 1); P.v = Math.max(P.v || 0, 4); lsSet("fx", P); ST_PICK = true; }
   if (P.v === 2) { P.mmToxic = Math.min(P.mmToxic, 0.4); P.v = 3; lsSet("fx", P); }
   if (!(P.v >= 2)) {   // fees were eating the account: fewer, stronger trades, bigger takes, time to reach them
@@ -407,7 +409,10 @@ function create(host) {
   const makerOf = (sym) => (M[sym] && M[sym].maker != null ? M[sym].maker : MAKER);
   const takeMult = (sym) => (P.learn && LEARN.take && LEARN.take[sym]) || 1;
   // take: at least takePct (× learned multiplier) and at least 3 round-trip maker fees, in whole ticks
-  const minTakeTicks = (sym) => Math.max(P.takeTicks, Math.ceil(Math.max(P.takePct * takeMult(sym), 3 * 2 * Math.max(0, makerOf(sym))) / (M[sym].tickPct || 0.01)));
+  // round-trip fee of the coin in % (maker in + maker out; a rebate account still counts at least 0.01% per side)
+  const rtFee = (sym) => 2 * Math.max(0.01, makerOf(sym));
+  const takeGoal = (sym) => Math.max(P.takePct * takeMult(sym), P.feeX * rtFee(sym));      // e.g. 10 × 0.04% = 0.40%
+  const minTakeTicks = (sym) => Math.max(P.takeTicks, Math.ceil(takeGoal(sym) / (M[sym].tickPct || 0.01)));
   async function runMicro(sym, f) {
     const m = M[sym], a = acc(sym), thr = thrOf(sym);
     const entries = ordersOf(sym, "e"), takes = ordersOf(sym, "t"), exits = ordersOf(sym, "x");
@@ -445,13 +450,13 @@ function create(host) {
     const exitSide = long ? "Sell" : "Buy";
     const touch = long ? f.ba : f.bb;                              // maker exit at the best price on our side
     // soft exits only after minHoldSec: in profit -> take it when the flow turns; in loss -> only a strong reversal; time -> only if not losing
-    const feePct = 2 * makerOf(sym) + 0.01;
+    const feePct = rtFee(sym) + 0.01, half = takeGoal(sym) * 0.95;   // no early profit exits: profit is taken at the full feeX take
     if (P.beAtPct > 0 && mv >= P.beAtPct && !a.be) { a.be = true; a.lockPx = Number(px(sym, a.avg * (1 + (long ? 1 : -1) * feePct / 100), long)); stopDirty(sym); engineLog(`🛡 ${sym}: +${mv.toFixed(3)}% — стоп у беззбиток з комісіями`, "mute"); }
     const grown = held >= P.minHoldSec;
     const leave = !P.on ? "зупинка"
-      : grown && mv >= feePct && against >= thr * 0.6 ? "потік розвернувся (у плюсі)"
+      : grown && mv >= half && against >= thr * 0.6 ? "потік розвернувся (у плюсі)"
       : grown && against >= Math.min(0.95, thr * 1.2) ? "сильний розворот"
-      : held > P.maxHoldSec && mv >= feePct ? "час (у плюсі)"
+      : held > P.maxHoldSec && mv >= half ? "час (у плюсі)"
       : held > P.maxHoldSec * 3 ? "час" : "";
     if (leave && !exits.length) {
       for (const o of takes) await cancel(o.id);
@@ -491,8 +496,8 @@ function create(host) {
     if (a.q < 0) bq = Number(align(-a.q, m.step, false));
     // inventory is offered out with a profit over the fees, unless it is getting old or the flow runs against it (then at the market touch)
     const urgent = held > P.mmMaxHoldSec * 0.5 || (a.q > 0 && f.score <= -P.mmToxic) || (a.q < 0 && f.score >= P.mmToxic);
-    if (a.q > 0 && !urgent) ask = Math.max(ask, Number(px(sym, a.avg * (1 + (2 * MAKER + 0.005) / 100), true)));
-    if (a.q < 0 && !urgent) bid = Math.min(bid, Number(px(sym, a.avg * (1 - (2 * MAKER + 0.005) / 100), false)));
+    if (a.q > 0 && !urgent) ask = Math.max(ask, Number(px(sym, a.avg * (1 + P.feeX * rtFee(sym) / 100), true)));   // feeX × the fee per cycle
+    if (a.q < 0 && !urgent) bid = Math.min(bid, Number(px(sym, a.avg * (1 - P.feeX * rtFee(sym) / 100), false)));
     if (a.q > 0 && urgent) ask = f.ba;
     if (a.q < 0 && urgent) bid = f.bb;
     // toxic flow: do not stand in front of a strong one-way flow
@@ -734,7 +739,7 @@ function create(host) {
       return { sym, mode: m.mode, f, why: m.why || (m.ready ? "" : "підключаюсь"), thr: thrOf(sym), edgeMult: (P.learn && LEARN.edge[sym]) || 1, tickPct: m.tickPct ? +m.tickPct.toFixed(4) : null,
         pos: a.q ? { q: +a.q.toFixed(8), avg: +Number(a.avg).toPrecision(8), sec: Math.round((now() - a.at) / 1000), pnl: f ? +((f.mid - a.avg) * a.q - a.fees).toFixed(4) : null } : null, orders: os };
     });
-    return { avail: ST.avail, params: P, ws: ST.pubUp && now() - ST.lastPub < 5000, priv: ST.privUp, err: now() - (ST.errAt || 0) < 120000 ? ST.err : "", lat: { wsLagMs: Math.round(LAT.wsLag), orderMs: Math.round(LAT.rtt), fillMs: Math.round(LAT.fillMs) },
+    return { takeGoal: P.symbols[0] && M[P.symbols[0]] && M[P.symbols[0]].tick ? +takeGoal(P.symbols[0]).toFixed(3) : null, rtFee: P.symbols[0] ? +rtFee(P.symbols[0]).toFixed(4) : null, avail: ST.avail, params: P, ws: ST.pubUp && now() - ST.lastPub < 5000, priv: ST.privUp, err: now() - (ST.errAt || 0) < 120000 ? ST.err : "", lat: { wsLagMs: Math.round(LAT.wsLag), orderMs: Math.round(LAT.rtt), fillMs: Math.round(LAT.fillMs) },
       coins, stats: stats(TR), day: stats(day), byMode: { micro: stats(TR.filter(t => t.mode === "micro")), mm: stats(TR.filter(t => t.mode === "mm")) }, series: series(),
       learn: { thr: LEARN.thr, edge: LEARN.edge, take: LEARN.take || {} }, trades: TR.slice(-20).reverse(), vol: ST.vol, fees: (() => { const r = Object.values(M).find(m => m.maker != null); return r ? { maker: +r.maker.toFixed(4), taker: +r.taker.toFixed(4), real: true } : { maker: MAKER, taker: TAKER, real: false }; })() };
   }

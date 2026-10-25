@@ -105,7 +105,8 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
         <label class="f">Маржа на угоду, USDT<input id="sMargin" inputmode="decimal"></label>
         <label class="f">Плече<input id="sLev" inputmode="decimal"></label>
         <label class="f">Мікро: поріг сигналу 0.3–0.95<input id="sThr" inputmode="decimal"></label>
-        <label class="f">Мікро: тейк, %<input id="sTakeP" inputmode="decimal"></label>
+        <label class="f">Тейк у скільки разів більший за комісію<input id="sFeeX" inputmode="decimal"></label>
+        <label class="f">Мікро: тейк не менше, %<input id="sTakeP" inputmode="decimal"></label>
         <label class="f">Мікро: стоп, %<input id="sStop" inputmode="decimal"></label>
         <label class="f">Мікро: мін. час до виходу, с<input id="sMinHold" inputmode="decimal"></label>
         <label class="f">Мікро: макс. утримання, с<input id="sHold" inputmode="decimal"></label>
@@ -156,7 +157,7 @@ document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => act({ wh
 $("aiBtn").onclick = () => act({ what: S.ai.on ? "ai-off" : "ai-on" });
 $("aiNow").onclick = async () => { $("aiOut").textContent = await act({ what: "ai-now" }); };
 $("aiSave").onclick = async () => { $("aiOut").textContent = await act({ what: "limits", every: $("aiEvery").value, maxMargin: String($("aiMaxM").value).replace(",", "."), maxLev: $("aiMaxL").value }); };
-const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sThr", "thr"], ["sTakeP", "takePct"], ["sStop", "stopPct"], ["sMinHold", "minHoldSec"], ["sHold", "maxHoldSec"],
+const FIELDS = [["sMargin", "margin"], ["sLev", "leverage"], ["sThr", "thr"], ["sFeeX", "feeX"], ["sTakeP", "takePct"], ["sStop", "stopPct"], ["sMinHold", "minHoldSec"], ["sHold", "maxHoldSec"],
   ["sEdge", "mmEdgePct"], ["sQty", "mmQtyPct"], ["sTox", "mmToxic"], ["sMmStop", "mmStopPct"], ["sTurn", "minTurnoverM"]];
 $("sSave").onclick = async () => {
   const o = {};
@@ -241,7 +242,7 @@ function paint() {
   $("connCard").style.display = S.keys && S.fal && S.password && !ACC.err ? "none" : "";
   $("dot").className = "dot" + (on ? " on" : "");
   $("status").textContent = !on ? "Зупинено" : (AI.on ? "🧠 AI торгує · " : "Торгую · ") + (P.mode === "auto" ? "мікро + маркет-мейкінг" : P.mode === "mm" ? "маркет-мейкінг" : "мікроструктура");
-  $("status2").innerHTML = `монета <b>${esc(P.symbols[0] || "—")}</b> · ${X.ws ? "стакан наживо ✓" : "підключаюсь до біржі…"} · ${X.priv ? "ордери в реальному часі ✓" : '<span class="down">приватний канал — опитування REST</span>'} · маржа ${P.margin} USDT × x${P.leverage} · сервер 24/7`;
+  $("status2").innerHTML = `монета <b>${esc(P.symbols[0] || "—")}</b> · ${X.ws ? "стакан наживо ✓" : "підключаюсь до біржі…"} · ${X.priv ? "ордери в реальному часі ✓" : '<span class="down">приватний канал — опитування REST</span>'} · маржа ${P.margin} USDT × x${P.leverage} · тейк ${P.feeX}× комісії${X.takeGoal ? ` = ${X.takeGoal}%` : ""} (коло комісій ${X.rtFee ?? "—"}%) · сервер 24/7`;
   const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
   document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === P.mode));
   $("modeHint").textContent = P.mode === "micro" ? "Вхід лімітом по дисбалансу потоку ордерів, тейк кілька тіків, вихід одразу, коли потік розвернувся."

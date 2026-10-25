@@ -139,9 +139,13 @@ price change over 5/15 min (px5, px15, %), funding rate (%). Two scenarios ("str
    direction of the price -> enter that way.
  - squeeze: oi15 >= oiMin and oi5 >= oiMin5 while |px15| <= pxFlat and |funding| >= fundMin -> the crowd piles in (funding > 0 = longs crowded)
    -> enter against the crowd and wait for the flush.
+CVD (cumulative volume delta from the live tape: market buys minus market sells, as a share of volume -1..1; cvd5/cvd15, cvd15usd in $) is
+followed for the cvdWatch coins with the fastest OI growth. With useCvd: trend needs CVD >= cvdMin in the trade direction (aggressors really push);
+squeeze needs CVD >= cvdMin in the crowd's direction while the price stands still (the crowd's market orders are absorbed); a TREND position in profit
+is closed when the 5-min CVD turns >= cvdExit against it (not for squeeze trades: there the crowd's CVD is the setup itself). "wait" in topOiMovers says why a setup was not taken (e.g. CVD does not confirm).
 YOU decide which scenario works now: compare byStrategy / bySide / byExit and the live "topOiMovers"; set "strategy" accordingly (both = take the
 strongest signal of either). With learn on, a scenario that keeps losing while the other wins is skipped by itself.
-Entry: PostOnly limit at the best price (follows the price up to entryWaitSec). Exits: take max(takePct, feeX x round-trip fee) as a limit,
+Entry: PostOnly limit at the best price (follows the price up to entryWaitSec; after chaseSec with the signal still alive -> market entry). Exits: take max(takePct, feeX x round-trip fee) as a limit,
 exchange stop stopPct, trailing stop from trailStart at trailGap behind the best price, exit at the touch when OI falls oiExit % in 5 min while in
 profit (the move is over), maxHoldMin. A coin rests cooldownMin after a trade. Up to maxPositions positions at once, margin per trade, leverage
 (capped by the engine so liquidation never comes before the stop). Fees: maker ~0.02%, taker ~0.055% per side; every result is net of fees.
@@ -149,14 +153,14 @@ Rules: never remove stops; keep feeX >= 10; with few trades change one or two se
 no trades for a long time -> lower oiMin/pxMin a little.
 Answer with ONE JSON object only, no text around it:
 {"regime":"calm|range|trend|volatile|chaotic","oi":{"params":{optional: strategy,oiMin,oiMin5,pxMin,pxFlat,fundMin,minTurnoverM,maxSpreadPct,feeX,takePct,
-stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn}},
+stopPct,trailStart,trailGap,oiExit,maxHoldMin,entryWaitSec,chaseSec,cooldownMin,scanSec,margin,leverage,maxPositions,learn,useCvd,cvdMin,cvdExit,cvdWatch}},
 "reason":"short explanation in Ukrainian (1-3 sentences)","lesson":"one sentence in Ukrainian"}`;
 const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit open-interest trading app. The owner speaks (or types) an instruction in Ukrainian,
 Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while meaning Latin
 transliteration (e.g. "ыефке" = "start") - decode it. Turn it into actions the app can do now. Available actions (use only what was asked):
  "engine": "start" | "stop"       (stop also switches the AI off)
  "ai": true | false               (AI autopilot on/off)
- "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,...}}
+ "oi": {"params":{strategy:"trend"|"squeeze"|"both",oiMin,oiMin5,pxMin,pxFlat,fundMin,takePct,stopPct,trailStart,trailGap,oiExit,maxHoldMin,margin,leverage,maxPositions,minTurnoverM,cooldownMin,learn,useCvd,cvdMin,cvdExit,...}}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps for the AI autopilot - only when the owner asks)
  "aiEveryMin": n                  (how often the AI decides)
  "remember": "a standing instruction for the AI autopilot, in Ukrainian" (rules about the future)

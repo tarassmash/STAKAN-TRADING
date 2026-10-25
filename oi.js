@@ -22,6 +22,10 @@ const DEFAULTS = {
   pxFlat: 0.4,             // squeeze: price move over 15 min at most, %
   fundMin: 0.01,           // squeeze: |funding rate| at least, % (shows which side the crowd is on)
   minTurnoverM: 20,        // 24 h turnover, million $
+  useCvd: true,            // CVD (market buys minus market sells) must confirm: trend - aggressors push the same way; squeeze - the crowd's market orders are absorbed
+  cvdMin: 0.05,            // |CVD| / volume over the window at least (0.05 = 5% more buying than selling)
+  cvdExit: 0.3,            // CVD of the last 5 min turned this strongly against a position in profit -> leave
+  cvdWatch: 25,            // coins with the fastest OI growth whose tape is followed live for the CVD
   maxSpreadPct: 0.1,
   // exits
   feeX: 10,                // take at least feeX × the round-trip fee
@@ -32,14 +36,15 @@ const DEFAULTS = {
   oiExit: 1,               // OI fell this much in 5 min while in profit -> leave (the move is over)
   maxHoldMin: 240,
   entryWaitSec: 45,        // unfilled entry limit is cancelled after this (it follows the best price meanwhile)
+  chaseSec: 20,            // the limit did not fill in this time and the signal is still alive -> enter at market (a strong move rarely fills a passive order; 0 = never)
   cooldownMin: 30,         // after a trade the coin rests
   scanSec: 60,
   learn: true,             // a strategy that keeps losing is switched off by itself while the other one makes money
 };
 const NUM = { margin: [1, 100000], leverage: [1, 50], maxPositions: [1, 20], oiMin: [0.5, 50], oiMin5: [0, 20], pxMin: [0, 20], pxFlat: [0.05, 5], fundMin: [0, 1],
   minTurnoverM: [1, 5000], maxSpreadPct: [0.01, 1], feeX: [1, 50], takePct: [0.2, 30], stopPct: [0.2, 20], trailStart: [0, 20], trailGap: [0.1, 10], oiExit: [0, 20],
-  maxHoldMin: [5, 4320], entryWaitSec: [5, 600], cooldownMin: [0, 1440], scanSec: [20, 600] };
-const BOOL = ["learn"];
+  maxHoldMin: [5, 4320], entryWaitSec: [5, 600], chaseSec: [0, 600], cooldownMin: [0, 1440], scanSec: [20, 600], cvdMin: [0, 0.9], cvdExit: [0.05, 1], cvdWatch: [5, 60] };
+const BOOL = ["learn", "useCvd"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -88,18 +93,58 @@ function create(host) {
     const tk = TK[sym] || {};
     return { sym, oi15: +ch(last[1], p15[1]).toFixed(2), oi5: p5 ? +ch(last[1], p5[1]).toFixed(2) : null, oi60: p60 ? +ch(last[1], p60[1]).toFixed(2) : null,
       px15: +ch(last[2], p15[2]).toFixed(2), px5: p5 ? +ch(last[2], p5[2]).toFixed(2) : null, price: last[2], oiUsdM: +(last[1] * last[2] / 1e6).toFixed(1),
-      funding: tk.funding != null ? +(tk.funding * 100).toFixed(4) : null, turnoverM: tk.turnoverM, spreadPct: tk.spreadPct };
+      funding: tk.funding != null ? +(tk.funding * 100).toFixed(4) : null, turnoverM: tk.turnoverM, spreadPct: tk.spreadPct,
+      cvd5: (cvd(sym, 5) || {}).ratio ?? null, cvd15: (cvd(sym, 15) || {}).ratio ?? null, cvd15usd: (cvd(sym, 15) || {}).usd ?? null };
   }
+  // ---------------- CVD: cumulative volume delta from the tape (market buys − market sells, in $) per minute ----------------
+  const CV = {};   // sym -> { b: Map(minute -> [buy$, sell$]), from: ms since when the tape is complete }
+  function cvAdd(sym, t, side, usd) {
+    const c = CV[sym] = CV[sym] || { b: new Map(), from: t };
+    const k = Math.floor(t / 60000), v = c.b.get(k) || [0, 0];
+    if (side > 0) v[0] += usd; else v[1] += usd;
+    c.b.set(k, v);
+    if (c.b.size > 70) { const old = Math.floor(now() / 60000) - 65; for (const kk of c.b.keys()) if (kk < old) c.b.delete(kk); }
+  }
+  function cvd(sym, min) {                                        // {ratio -1..1, usd} over the last `min` minutes, null if the tape does not cover it yet
+    const c = CV[sym]; if (!c) return null;
+    if (now() - c.from < min * 60000 * 0.6) return null;
+    const k0 = Math.floor((now() - min * 60000) / 60000);
+    let b = 0, s2 = 0; for (const [k, v] of c.b) if (k >= k0) { b += v[0]; s2 += v[1]; }
+    return b + s2 > 0 ? { ratio: +((b - s2) / (b + s2)).toFixed(3), usd: Math.round(b - s2) } : null;
+  }
+  // a coin that just entered the watch list gets its recent tape at once (last 1000 trades)
+  async function cvBoot(sym) {
+    try {
+      const r = await bx("/v5/market/recent-trade", { query: { category: "linear", symbol: sym, limit: "1000" } });
+      const list = (r.list || []).map(x => [Number(x.time), x.side === "Buy" ? 1 : -1, Number(x.size) * Number(x.price)]).filter(x => x[0] > 0);
+      if (!list.length) return;
+      const from = Math.min(...list.map(x => x[0])), c = CV[sym] = CV[sym] || { b: new Map(), from: now() };
+      const liveFrom = c.from;
+      for (const [t, sd, usd] of list) if (t < liveFrom) cvAdd(sym, t, sd, usd);
+      c.from = Math.min(liveFrom, from);
+    } catch (e) { /* the live tape fills it */ }
+  }
+  ST.watch = new Set();
   // the two scenarios; score = how strong
   function signalOf(m) {
     if (!m || m.oi5 == null) return null;
     const out = [];
-    if (P.strategy !== "squeeze" && m.oi15 >= P.oiMin && m.oi5 >= P.oiMin5 && Math.abs(m.px15) >= P.pxMin && m.px5 != null && Math.sign(m.px5) === Math.sign(m.px15))
-      out.push({ strategy: "trend", side: m.px15 > 0 ? "Buy" : "Sell", score: +(m.oi15 * Math.abs(m.px15)).toFixed(2),
-        why: `OI +${m.oi15}% за 15 хв, ціна ${m.px15 > 0 ? "+" : ""}${m.px15}% — нові гроші заходять у ${m.px15 > 0 ? "лонг" : "шорт"}` });
-    if (P.strategy !== "trend" && m.oi15 >= P.oiMin && m.oi5 >= P.oiMin5 && Math.abs(m.px15) <= P.pxFlat && m.funding != null && Math.abs(m.funding) >= P.fundMin)
-      out.push({ strategy: "squeeze", side: m.funding > 0 ? "Sell" : "Buy", score: +(m.oi15 * Math.abs(m.funding) * 100).toFixed(2),
-        why: `OI +${m.oi15}% за 15 хв, ціна стоїть (${m.px15}%), фінансування ${m.funding}% — натовп у ${m.funding > 0 ? "лонгах" : "шортах"}, чекаю вибивання` });
+    const cv = m.cvd15 != null ? m.cvd15 : m.cvd5;                 // CVD over 15 min, or 5 min while the tape history is short
+    const cvTxt = cv != null ? `, CVD ${cv > 0 ? "+" : ""}${Math.round(cv * 100)}%` : "";
+    // trend: OI and price up together AND market buyers push (CVD > 0) - real new money, not a short squeeze or a thin book
+    if (P.strategy !== "squeeze" && m.oi15 >= P.oiMin && m.oi5 >= P.oiMin5 && Math.abs(m.px15) >= P.pxMin && m.px5 != null && Math.sign(m.px5) === Math.sign(m.px15)) {
+      const dir = Math.sign(m.px15), okCvd = !P.useCvd || (cv != null && cv * dir >= P.cvdMin);
+      if (okCvd) out.push({ strategy: "trend", side: dir > 0 ? "Buy" : "Sell", score: +(m.oi15 * Math.abs(m.px15) * (cv != null ? 1 + Math.abs(cv) * 2 : 1)).toFixed(2),
+        why: `OI +${m.oi15}% за 15 хв, ціна ${m.px15 > 0 ? "+" : ""}${m.px15}%${cvTxt} — нові гроші заходять у ${dir > 0 ? "лонг" : "шорт"}` });
+      else m.wait = P.useCvd && cv == null ? "чекаю CVD" : `CVD ${cv != null ? Math.round(cv * 100) + "%" : "—"} не підтверджує тренд`;
+    }
+    // squeeze: OI up, price flat, crowded funding AND the crowd's market orders are absorbed (CVD in the crowd's direction, yet the price does not move)
+    if (P.strategy !== "trend" && m.oi15 >= P.oiMin && m.oi5 >= P.oiMin5 && Math.abs(m.px15) <= P.pxFlat && m.funding != null && Math.abs(m.funding) >= P.fundMin) {
+      const crowd = Math.sign(m.funding), okCvd = !P.useCvd || (cv != null && cv * crowd >= P.cvdMin);
+      if (okCvd) out.push({ strategy: "squeeze", side: crowd > 0 ? "Sell" : "Buy", score: +(m.oi15 * Math.abs(m.funding) * 100 * (cv != null ? 1 + Math.abs(cv) * 2 : 1)).toFixed(2),
+        why: `OI +${m.oi15}% за 15 хв, ціна стоїть (${m.px15}%), фінансування ${m.funding}%${cvTxt} — ${crowd > 0 ? "покупці" : "продавці"} б'ють ринком, а ціна не йде: натовп у пастці` });
+      else m.wait = P.useCvd && cv == null ? "чекаю CVD" : `CVD ${cv != null ? Math.round(cv * 100) + "%" : "—"} не підтверджує сквіз`;
+    }
     // learning: a scenario that keeps losing while the other one makes money is skipped
     const ok = out.filter(s => !(P.learn && disabled(s.strategy)));
     return ok.sort((a, b) => b.score - a.score)[0] || null;
@@ -126,6 +171,12 @@ function create(host) {
       if (!bootDone) { bootDone = true; await bootstrap(); }
       ST.scanAt = t;
       const ms = Object.keys(TK).filter(s => TK[s].turnoverM >= P.minTurnoverM).map(metrics).filter(Boolean);
+      // follow the tape (for the CVD) of the coins whose OI grows fastest
+      const watch = ms.slice().sort((a, b) => b.oi15 - a.oi15).slice(0, P.cvdWatch).map(m => m.sym);
+      for (const s2 of watch) if (!ST.watch.has(s2)) { ST.watch.add(s2); cvBoot(s2); }
+      for (const s2 of [...ST.watch]) if (!watch.includes(s2) && !traded().has(s2)) { ST.watch.delete(s2); delete CV[s2]; }
+      for (const s2 of traded()) if (!ST.watch.has(s2)) { ST.watch.add(s2); cvBoot(s2); }
+      resub();
       ST.cands = ms.map(m => Object.assign(m, { sig: signalOf(m) })).sort((a, b) => (b.sig ? b.sig.score : -1) - (a.sig ? a.sig.score : -1) || b.oi15 - a.oi15).slice(0, 25);
       await entries();
     } catch (e) { setErr("сканер: " + e.message); }
@@ -157,9 +208,10 @@ function create(host) {
   let pub = null, pubPing = null, subs = new Set();
   function connectPub() {
     try { pub = new WS(PUB); } catch (e) { setTimeout(connectPub, 3000); return; }
-    pub.on("open", () => { ST.pubUp = true; subs = new Set(); resub(); clearInterval(pubPing); pubPing = setInterval(() => { try { pub.send(JSON.stringify({ op: "ping" })); } catch (e) { /* closed */ } }, 20000); });
+    pub.on("open", () => { ST.pubUp = true; subs = new Set(); tsubs = new Set(); resub(); clearInterval(pubPing); pubPing = setInterval(() => { try { pub.send(JSON.stringify({ op: "ping" })); } catch (e) { /* closed */ } }, 20000); });
     pub.on("message", (raw) => {
       let j; try { j = JSON.parse(String(raw)); } catch (e) { return; }
+      if (j.topic && j.topic.startsWith("publicTrade.") && Array.isArray(j.data)) { for (const x of j.data) cvAdd(x.s || j.topic.slice(12), Number(x.T) || now(), x.S === "Buy" ? 1 : -1, Number(x.v) * Number(x.p)); return; }
       if (!j.topic || !j.topic.startsWith("tickers.") || !j.data) return;
       const d = j.data, sym = d.symbol || j.topic.slice(8), tk = TK[sym] = TK[sym] || {};
       if (d.bid1Price) tk.bid = Number(d.bid1Price); if (d.ask1Price) tk.ask = Number(d.ask1Price);
@@ -171,12 +223,17 @@ function create(host) {
     pub.on("error", () => {});
   }
   const traded = () => new Set([...Object.keys(A).filter(s => A[s].q), ...Object.values(ORD).map(o => o.sym)]);
+  // tickers for the coins we trade, the tape (CVD) for those and for the watch list
+  let tsubs = new Set();
   function resub() {
     if (!pub || !ST.pubUp) return;
-    const want = traded();
+    const want = traded(), wantT = new Set([...want, ...(ST.watch || [])]);
     const add = [...want].filter(s => !subs.has(s)), del = [...subs].filter(s => !want.has(s));
-    if (add.length) { pub.send(JSON.stringify({ op: "subscribe", args: add.map(s => `tickers.${s}`) })); add.forEach(s => subs.add(s)); }
-    if (del.length) { pub.send(JSON.stringify({ op: "unsubscribe", args: del.map(s => `tickers.${s}`) })); del.forEach(s => subs.delete(s)); }
+    const addT = [...wantT].filter(s => !tsubs.has(s)), delT = [...tsubs].filter(s => !wantT.has(s));
+    const sub = add.map(s => `tickers.${s}`).concat(addT.map(s => `publicTrade.${s}`)), uns = del.map(s => `tickers.${s}`).concat(delT.map(s => `publicTrade.${s}`));
+    for (let i = 0; i < sub.length; i += 10) pub.send(JSON.stringify({ op: "subscribe", args: sub.slice(i, i + 10) }));
+    for (let i = 0; i < uns.length; i += 10) pub.send(JSON.stringify({ op: "unsubscribe", args: uns.slice(i, i + 10) }));
+    add.forEach(s => subs.add(s)); del.forEach(s => subs.delete(s)); addT.forEach(s => tsubs.add(s)); delT.forEach(s => tsubs.delete(s));
   }
   setInterval(resub, 2000);
 
@@ -355,7 +412,7 @@ function create(host) {
         const qty = qtyFor(sym, price);
         if (!qty) { c.why = `мало коштів (мінімальний ордер ${sizing(sym, price).minNotional.toFixed(2)} USDT)`; continue; }
         await setLev(sym, sizing(sym, price).lev);
-        m.sig = Object.assign({}, c.sig, { oi15: c.oi15, oi5: c.oi5, px15: c.px15, funding: c.funding });
+        m.sig = Object.assign({}, c.sig, { oi15: c.oi15, oi5: c.oi5, px15: c.px15, funding: c.funding, cvd: c.cvd15 != null ? c.cvd15 : c.cvd5 });
         const id = await place(sym, c.sig.side, price, qty, "e", { sig: m.sig });
         if (id) engineLog(`${c.sig.strategy === "squeeze" ? "🧲" : "📈"} ${sym}: ${c.sig.side === "Buy" ? "лонг" : "шорт"} лімітом ${price} — ${c.sig.why}`, c.sig.side === "Buy" ? "up" : "down");
       } catch (e) { setErr(`${sym}: ${e.message}`); }
@@ -377,6 +434,11 @@ function create(host) {
             const best = o.side === "Buy" ? tk.bid : tk.ask;
             const c = ST.cands.find(x => x.sym === sym);
             if (now() - o.at > P.entryWaitSec * 1000 || !P.on || (c && !c.sig)) { await cancel(o.id); continue; }
+            if (P.chaseSec > 0 && now() - o.at > P.chaseSec * 1000 && !o.filled && c && c.sig && c.sig.side === o.side) {   // still a signal, the move goes on without us: market
+              await cancel(o.id);
+              if (!ordersOf(sym, "e").length && !(A[sym] && A[sym].q)) { await place(sym, o.side, 0, o.qty, "e", { market: true, sig: o.sig }); engineLog(`⚡ ${sym}: ліміт не виконався за ${P.chaseSec} с, сигнал живий — вхід ринком`, "mute"); }
+              continue;
+            }
             if (Math.abs(best - o.price) >= m.tick * 0.5 && now() - (o.movedAt || 0) > 3000) { o.movedAt = now(); await amend(o.id, px(sym, best, o.side === "Sell")); }   // follow the best price
           }
           continue;
@@ -396,6 +458,7 @@ function create(host) {
         const mt = metrics(sym), held = (now() - a.at) / 60000;
         const leave = !P.on ? "зупинка"
           : mt && mt.oi5 != null && mt.oi5 <= -P.oiExit && mv >= rtFee(sym) * 2 ? `OI падає (${mt.oi5}% за 5 хв) — рух вичерпано`
+          : P.useCvd && (!a.sig || a.sig.strategy !== "squeeze") && mt && mt.cvd5 != null && mt.cvd5 * (long ? -1 : 1) >= P.cvdExit && mv >= rtFee(sym) * 2 ? `CVD розвернувся (${Math.round(mt.cvd5 * 100)}% за 5 хв) — ринкові ${long ? "продавці" : "покупці"} перехопили`
           : held > P.maxHoldMin ? "час" : "";
         if (leave && !xs.length) {
           for (const o of ts) await cancel(o.id);
@@ -523,9 +586,9 @@ function create(host) {
   function aiView() {
     const v = view(), by = (fn) => { const g = {}; for (const t of TR.slice(-300)) { const k = fn(t); (g[k] = g[k] || []).push(t); } return Object.fromEntries(Object.entries(g).map(([k, x]) => [k, stats(x)])); };
     return { params: P, stats: v.stats, today: v.day, byStrategy: v.byStrategy, byExit: by(t => t.how), bySide: by(t => t.strategy + ":" + t.side), learn: v.learn,
-      topOiMovers: v.cands.slice(0, 12).map(c => ({ sym: c.sym, oi15: c.oi15, oi5: c.oi5, oi60: c.oi60, px15: c.px15, px5: c.px5, funding: c.funding, oiUsdM: c.oiUsdM, turnoverM: c.turnoverM, signal: c.sig && { strategy: c.sig.strategy, side: c.sig.side, score: c.sig.score } })),
-      positions: v.positions.map(p => ({ sym: p.sym, side: p.side, mv: p.mv, peak: p.peak, min: p.min, strategy: p.strategy, oi5: p.oi && p.oi.oi5 })),
-      last: TR.slice(-20).map(t => ({ sym: t.sym, strategy: t.strategy, side: t.side, pnl: t.pnl, fees: t.fees, how: t.how, peak: t.peak, min: Math.round(t.holdMs / 60000), sig: t.sig && { oi15: t.sig.oi15, px15: t.sig.px15, funding: t.sig.funding } })) };
+      topOiMovers: v.cands.slice(0, 12).map(c => ({ sym: c.sym, oi15: c.oi15, oi5: c.oi5, oi60: c.oi60, px15: c.px15, px5: c.px5, funding: c.funding, cvd5: c.cvd5, cvd15: c.cvd15, cvd15usd: c.cvd15usd, wait: c.wait, oiUsdM: c.oiUsdM, turnoverM: c.turnoverM, signal: c.sig && { strategy: c.sig.strategy, side: c.sig.side, score: c.sig.score } })),
+      positions: v.positions.map(p => ({ sym: p.sym, side: p.side, mv: p.mv, peak: p.peak, min: p.min, strategy: p.strategy, oi5: p.oi && p.oi.oi5, cvd5: p.oi && p.oi.cvd5 })),
+      last: TR.slice(-20).map(t => ({ sym: t.sym, strategy: t.strategy, side: t.side, pnl: t.pnl, fees: t.fees, how: t.how, peak: t.peak, min: Math.round(t.holdMs / 60000), sig: t.sig && { oi15: t.sig.oi15, px15: t.sig.px15, funding: t.sig.funding, cvd: t.sig.cvd } })) };
   }
 
   boot();

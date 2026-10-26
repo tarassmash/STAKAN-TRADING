@@ -127,12 +127,15 @@ const AI = require("./ai").create({ BG, engineLog: (t, cls) => addLog(t, cls), l
 // ---------------- why the minus: exchange records + the bot's trades ----------------
 const DG = require("./diag").create({ bx, BG, keys: () => HAS_KEYS });
 
+// ---------------- strategy lab: every strategy on history, verdict on unseen data ----------------
+const LAB = require("./lab").create({ bx, lsGet, lsSet, engineLog: (t, cls) => addLog(t, cls) });
+
 // ---------------- the regime switcher ("brain" over both bots) ----------------
 const BR = require("./brain").create({ bx, spec, acc: () => ACC, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined });
 
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), ai: AI.view(), diag: DG.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), ai: AI.view(), diag: DG.view(), lab: LAB.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
 // "btc", "BTC", "btcusdt" -> "BTCUSDT"; checks that Bybit has such a futures coin
 async function coinOf(v) {
@@ -185,6 +188,7 @@ async function act(b) {
     if (b) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
     return sym ? `Переходжу на ${sym}${b && b.units.length ? " (спершу закриваю угоди на " + b.sym + ")" : ""}` : "Монету вибиратиму сам";
   }
+  if (what === "lab") { LAB.run(); return "Лабораторія запущена — перевіряю всі стратегії на історії (кілька хвилин)"; }
   if (what === "diag") { await DG.run(); return DG.view().err ? "Bybit: " + DG.view().err : "Розбір оновлено"; }
   if (what === "invert") return await BG.setInvert(!!b.on);
   if (what === "full-off") { BG.setOn(false); if (BR.params.on) BR.setOn(false); return "Зупинено: нових угод немає; відкриті закриються на тейку або в точці розвороту"; }

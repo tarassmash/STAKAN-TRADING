@@ -43,6 +43,9 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div id="fInvHint" style="font-size:12px;margin-top:6px"></div>
     <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
   </div>
+  <div class="card" style="margin-top:14px"><b>🧪 Лабораторія стратегій</b> <a href="#" id="labRun" class="mute" style="font-size:12px">перевірити зараз</a> <span class="mute" id="labAt" style="font-size:12px"></span>
+    <div class="mute" style="font-size:12px;margin-top:4px">Усі стратегії на історії 12 найліквідніших монет з комісіями. Параметри підбираються на перших 70% історії, а вердикт — лише на останніх 30%, яких стратегія не бачила. «Маточікування» — середній результат однієї угоди після комісій, % від суми угоди.</div>
+    <div id="lab" style="font-size:13px;margin-top:8px"></div></div>
   <div class="card" id="dgCard" style="margin-top:14px"><b>🔍 Чому мінус — розбір</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
   <details id="manual" style="display:none"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
@@ -407,6 +410,17 @@ function paintInv() {
     + (!on && better ? ' <b style="color:#a78bfa">— схоже, дзеркало зараз краще</b>' : on && m.n >= 10 && m.normal > m.mirror && m.normal > 0 ? ' <b class="up">— звичайний режим зараз кращий</b>' : "");
 }
 $("dgRun").onclick = (e) => { e.preventDefault(); $("dgAt").textContent = "рахую…"; act({ what: "diag" }); };
+$("labRun").onclick = (e) => { e.preventDefault(); act({ what: "lab" }); };
+function paintLab() {
+  const L = S.lab; if (!L) return; const R = L.res;
+  $("labAt").textContent = L.busy ? "· працює: " + L.progress : R ? "· " + new Date(R.at).toLocaleString() + " (сама — раз на добу)" : "";
+  if (!R) { $("lab").innerHTML = L.err ? `<div class="note">${esc(L.err)}</div>` : '<span class="mute">Перша перевірка запуститься сама за хвилину-дві.</span>'; return; }
+  const row = (x) => x.err ? `<tr><td>${esc(x.name)}</td><td colspan="7" class="mute">${esc(x.err)}</td></tr>`
+    : `<tr${x.ok ? ' style="background:rgba(14,203,129,.12)"' : ""}><td>${x.ok ? "✅ " : ""}${esc(x.name)}<div class="mute" style="font-size:11px">${x.tf} хв · ${esc(JSON.stringify(x.params))}</div></td><td>${sgn(x.oos.exp, 3)}%</td><td>${x.oos.n}</td><td>${x.oos.win}%</td><td>${x.oos.pf ?? "—"}</td><td>${x.coinsPos}/${x.coinsTot}</td><td>${x.oos.t ?? "—"}</td><td>${sgn(x.is.exp, 3)}%</td></tr>`;
+  $("lab").innerHTML = `<div style="border-left:3px solid ${R.out.some(x => x.ok) ? "var(--up)" : "var(--gold)"};padding-left:10px">${esc(R.verdict)}</div>`
+    + `<div class="scroll" style="margin-top:8px"><table><thead><tr><th>Стратегія</th><th>маточік. (нові дані)</th><th>угод</th><th>в плюс</th><th>PF</th><th>монет у плюсі</th><th>t (≥2 = не випадковість)</th><th>на підборі</th></tr></thead><tbody>${R.out.map(row).join("")}</tbody></table></div>`
+    + `<div class="mute" style="font-size:11px;margin-top:4px">Монети: ${R.coins.map(esc).join(", ")} · 15-хв свічки за ${R.days15} днів, 5-хв — за ${R.days5} днів. PF — скільки заробили прибуткові угоди на кожен 1 втрачений.</div>`;
+}
 function paintDiag() {
   const D = S.diag; if (!D) return; const R = D.res;
   $("dgAt").textContent = D.busy ? "рахую…" : R ? "· " + new Date(R.at).toLocaleTimeString() + " (саме оновлюється кожні 5 хв)" : "";
@@ -445,7 +459,7 @@ function paintFull() {
     : `<span class="dot on"></span>${X.waitIn != null ? `Монет із плюсом на історії зараз немає — нова перевірка через ${Math.ceil(X.waitIn / 60)} хв` : "Підбираю монету…"}`)
     + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } try { paintDiag(); } catch (e) { console.error(e); } };
+const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } try { paintDiag(); } catch (e) { console.error(e); } try { paintLab(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);
 </script>
 </body>

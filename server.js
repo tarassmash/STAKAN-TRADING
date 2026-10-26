@@ -103,7 +103,9 @@ async function refreshAccount() {
 const SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m) });
 
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, sg: SG.view() };
+  const cat = SG.params.category === "inverse" ? "inverse" : "linear";
+  const ws = (process.env.TEST_WS_URL || "").trim() || (ENV === "testnet" ? "wss://stream-testnet.bybit.com/v5/public/" : "wss://stream.bybit.com/v5/public/") + cat;
+  return { env: ENV, ws, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, sg: SG.view() };
 }
 async function act(b) {
   const what = String(b.what || "");

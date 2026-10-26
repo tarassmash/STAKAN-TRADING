@@ -285,7 +285,6 @@
         <option value="15">15m</option>
       </select>
     </div>
-    <button class="btn btn-sec" id="loadChartBtn">Загрузить график</button>
     <button class="btn btn-scan" id="scanBtn">🔍 Найти пампы под Short</button>
     <button class="btn btn-ultra" id="ultraVolBtn" title="Скан USDT-перпов по свечам 1m: кто сейчас дёргается сильнее всех">⚡ Найти ультра-волатильные (1m сейчас)</button>
     <button class="btn btn-shukin" id="shukinBtn" title="Логика Дмитрия Щукина: шорт от пампа, сетка от 1%, тейк от 0.7%, аварийный стоп 10%">⚡ Режим Щукина</button>
@@ -530,6 +529,35 @@
     [['volChart', volChart], ['oiChart', oiChart], ['cvdChart', cvdChart]].forEach(([id, c]) => c && c.applyOptions({ width: $(id).clientWidth, height: $(id).clientHeight || 110 }));
   }
   const uniq = (pts) => { const m = new Map(); for (const p of pts) if (p && isFinite(p.time) && p.time) m.set(p.time, p); return [...m.values()].sort((a, b) => a.time - b.time); };
+  // ---------- real time: Bybit kline stream straight into the chart (every price change) ----------
+  let ws = null, wsTopic = '', wsUrl = '', wsPing = null, cvdBase = 0, cvdT = 0, lastWs = 0;
+  function wsConnect() {
+    if (!S || !S.ws) return;
+    if (ws && wsUrl === S.ws && ws.readyState <= 1) return;
+    try { if (ws) ws.close(); } catch (e) {}
+    wsUrl = S.ws; wsTopic = '';
+    try { ws = new WebSocket(wsUrl); } catch (e) { return; }
+    ws.onopen = () => { wsTopic = ''; wsSub(); clearInterval(wsPing); wsPing = setInterval(() => { try { ws.send(JSON.stringify({ op: 'ping' })); } catch (e) {} }, 20000); };
+    ws.onmessage = (m) => { let j; try { j = JSON.parse(m.data); } catch (e) { return; } if (j.topic && j.topic === wsTopic && Array.isArray(j.data)) j.data.forEach(onKline); };
+    ws.onclose = () => { clearInterval(wsPing); setTimeout(wsConnect, 2000); };
+    ws.onerror = () => {};
+  }
+  function wsSub() {
+    if (!ws || ws.readyState !== 1 || !chartSym) return;
+    const t = `kline.${chartIv}.${chartSym}`; if (t === wsTopic) return;
+    if (wsTopic) ws.send(JSON.stringify({ op: 'unsubscribe', args: [wsTopic] }));
+    ws.send(JSON.stringify({ op: 'subscribe', args: [t] })); wsTopic = t;
+  }
+  function onKline(k) {
+    if (!candleSeries) return;
+    const bar = { time: Math.floor(Number(k.start) / 1000), open: +k.open, high: +k.high, low: +k.low, close: +k.close, volume: +k.volume || 0 };
+    const have = candleSeries.data(), lastT = have.length ? have[have.length - 1].time : 0;
+    if (!bar.time || bar.time < lastT) return;
+    if (bar.time > cvdT) { const cv = cvdSeries.data(); cvdBase = cv.length ? cv[cv.length - 1].value : 0; cvdT = bar.time; }
+    try { candleSeries.update(bar); volSeries.update({ time: bar.time, value: bar.volume, color: bar.close >= bar.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update({ time: bar.time, value: cvdBase + (bar.close >= bar.open ? bar.volume : -bar.volume) }); } catch (e) {}
+    lastWs = Date.now(); $('chartLive').textContent = '● LIVE ' + new Date().toLocaleTimeString('ru-RU') + ' · ' + bar.close;
+  }
+
   // every 5 s: the last candles, OI and the filter are updated in place (the zoom stays)
   let liveBusy = false;
   async function liveChart() {
@@ -541,11 +569,11 @@
       const have = candleSeries.data(), lastT = have.length ? have[have.length - 1].time : 0;
       if (c[c.length - 1].time - lastT > 3 * 3600) return loadChart(true);
       let cum = 0; const cvd = c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; });
-      for (let i = 0; i < c.length; i++) { const x = c[i]; if (x.time < lastT - 120) continue;
+      if (Date.now() - lastWs > 10000) for (let i = 0; i < c.length; i++) { const x = c[i]; if (x.time < lastT - 120) continue;
         candleSeries.update(x); volSeries.update({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update(cvd[i]); }
       const oi = uniq(r.oi || []); if (oi.length) oiSeries.setData(oi);
       if (r.sig) showSig(r.sig);
-      $('chartLive').textContent = '● LIVE ' + new Date().toLocaleTimeString('ru-RU');
+      if (Date.now() - lastWs > 10000) $('chartLive').textContent = '● обновлено ' + new Date().toLocaleTimeString('ru-RU');
     } catch (e) { /* next tick */ } finally { liveBusy = false; }
   }
   // price precision for the coin: 60000 -> 2 decimals, 0.05 -> 6, 0.00001 -> 8 (otherwise a cheap coin looks flat)
@@ -571,8 +599,10 @@
     chart.priceScale('right').applyOptions({ autoScale: true });
     candleSeries.setData(c);
     volSeries.setData(c.map(x => ({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' })));
-    let cum = 0; cvdSeries.setData(c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }));
+    let cum = 0; const cvdArr = c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }); cvdSeries.setData(cvdArr);
+    const lb = c[c.length - 1]; cvdT = lb ? lb.time : 0; cvdBase = cvdArr.length > 1 ? cvdArr[cvdArr.length - 2].value : 0;
     oiSeries.setData(uniq(r.oi || []));
+    wsConnect(); wsSub();
     resizeAll(); [chart, volChart, oiChart, cvdChart].forEach(x => { try { x.timeScale().fitContent(); } catch (e) {} });
     if (r.sig) showSig(r.sig);
     setConn(true, 'OK');
@@ -686,7 +716,6 @@
   $('saveKeysBtn').onclick = () => act('save').then(() => toast('Сохранено', 'Настройки на сервере', true));
   $('testConnBtn').onclick = () => act('test');
   $('clearTargetsBtn').onclick = () => act('clearTargets');
-  $('loadChartBtn').onclick = () => loadChart(true);
   $('scanBtn').onclick = async () => { const b = $('scanBtn'); b.disabled = true; b.textContent = '⏳ Поиск…'; await act('scan'); b.disabled = false; b.textContent = '🔍 Найти пампы под Short'; loadChart(true); };
   $('ultraVolBtn').onclick = async () => { const b = $('ultraVolBtn'); b.disabled = true; b.textContent = '⏳ 1m скан…'; await act('ultra'); b.disabled = false; b.textContent = '⚡ Найти ультра-волатильные (1m сейчас)'; loadChart(true); };
   $('shukinBtn').onclick = () => act('shukin');
@@ -701,7 +730,8 @@
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
   load().then(() => loadChart(true));
   setInterval(load, 2000);
-  setInterval(liveChart, 5000);
+  setInterval(liveChart, 15000);
+  setInterval(() => { if (S) { wsConnect(); wsSub(); } }, 3000);
   setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { const s2 = (S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
 })();
 

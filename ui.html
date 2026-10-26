@@ -1,107 +1,629 @@
-<!doctype html>
-<html lang="uk">
+<!DOCTYPE html>
+<html lang="ru">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Пробій після стиснення</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sell Grid — Short 24/7</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-:root{--bg:#0b0e11;--panel:#161a1e;--line:#2b3139;--ink:#eaecef;--mute:#848e9c;--up:#0ecb81;--down:#f6465d;--gold:#f7a600;--cyan:#22d3ee}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
-.wrap{max-width:760px;margin:0 auto;padding:16px}h1{font-size:20px;margin:4px 0 2px}.mute{color:var(--mute)}.up{color:var(--up)}.down{color:var(--down)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:14px}
-.big{width:100%;min-height:68px;border-radius:16px;border:0;font-size:21px;font-weight:700;cursor:pointer}.go{background:var(--up);color:#06281b}.stop{background:var(--down);color:#fff}
-.big:disabled{opacity:.5;cursor:default}
-.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:6px}
-.seg button{min-height:42px;border:0;background:var(--bg);color:var(--mute);font-size:14px;cursor:pointer}.seg button.on{background:var(--cyan);color:#062a30;font-weight:700}
-.seg.inv button.on{background:#f59e0b;color:#111}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
-label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute)}
-input,select{min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font:14px ui-monospace,monospace;width:100%}
-.btn{min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 12px;cursor:pointer}
-.k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
-table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--mute);font-weight:500}
-.scroll{overflow-x:auto}.log div{font:12px ui-monospace,monospace;padding:4px 0;border-bottom:1px solid var(--line);color:var(--mute)}
-.note{border-radius:12px;padding:10px 12px;margin-top:10px;font-size:13px;background:rgba(246,70,93,.1);border:1px solid rgba(246,70,93,.4)}
-.ok{background:rgba(14,203,129,.08);border-color:rgba(14,203,129,.4)}
-details summary{cursor:pointer;color:var(--mute);font-size:13px}
+  :root {
+    --bg: #0b0e11;
+    --panel: #12161c;
+    --border: #1e2329;
+    --text: #eaecef;
+    --muted: #848e9c;
+    --green: #0ecb81;
+    --red: #f6465d;
+    --blue: #3861fb;
+    --yellow: #f0b90b;
+    --input: #1a1f27;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 1.15rem; font-weight: 600; }
+  header h1 span { color: var(--red); }
+  .badge {
+    font-size: 0.75rem; padding: 4px 10px; border-radius: 20px;
+    background: #1a1f27; color: var(--muted);
+  }
+  .badge.on { background: rgba(14,203,129,.15); color: var(--green); }
+  .badge.err { background: rgba(246,70,93,.15); color: var(--red); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    min-height: calc(100vh - 56px);
+  }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  .sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .main { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+
+  h2 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 16px 0 8px;
+  }
+  h2:first-child { margin-top: 0; }
+
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 8px;
+  }
+  .row label { font-size: 0.85rem; color: var(--muted); flex: 1; }
+  input, select {
+    background: var(--input); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 6px 8px;
+    font-size: 0.85rem; width: 110px;
+  }
+  input[type="checkbox"] { width: auto; }
+  input[type="password"], #apiKey, #apiSecret { width: 100%; }
+
+  .btn {
+    width: 100%; border: none; border-radius: 8px; padding: 10px;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer; margin-top: 8px;
+  }
+  .btn-start { background: var(--green); color: #000; }
+  .btn-stop { background: #2b3139; color: var(--text); }
+  .btn-once { background: var(--blue); color: #fff; }
+  .btn-sec { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .btn-scan { background: rgba(246,70,93,.2); border: 1px solid var(--red); color: var(--red); }
+  .btn-ultra {
+    background: rgba(240,185,11,.12); border: 1px solid var(--yellow); color: #f0b90b;
+  }
+  .btn-shukin {
+    background: rgba(168, 85, 247, 0.15); border: 1px solid #a855f7; color: #c4b5fd;
+  }
+  .btn-shukin.active {
+    background: linear-gradient(135deg, #7c3aed, #a855f7);
+    color: #fff; border-color: #c4b5fd;
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.35);
+  }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .info {
+    font-size: 0.8rem; color: var(--muted); line-height: 1.45;
+    background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; margin-bottom: 8px;
+  }
+
+  .stats {
+    background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; margin-top: 10px;
+  }
+  .stats .row { margin-bottom: 4px; }
+  .stats .val { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .log {
+    background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; height: 200px; overflow-y: auto;
+    font-size: 0.75rem; font-family: ui-monospace, monospace; margin-top: 10px;
+  }
+  .log div { margin-bottom: 3px; }
+
+  #chart {
+    flex: 1; min-height: 320px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .sub-charts {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .sub-chart-wrap {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden;
+  }
+  .sub-chart-label {
+    font-size: 0.7rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .05em; padding: 6px 10px 0; font-weight: 600;
+  }
+  .sub-chart {
+    height: 110px; width: 100%;
+  }
+
+  .pos-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px;
+  }
+  .pos-card .k { font-size: 0.75rem; color: var(--muted); }
+  .pos-card .v { font-size: 1rem; font-weight: 600; }
+  .pos-card .v.pos { color: var(--green); }
+  .pos-card .v.neg { color: var(--red); }
+
+  .toast {
+    position: fixed; right: 16px; bottom: 16px; z-index: 99;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px; min-width: 200px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); display: none;
+  }
+  .toast.show { display: block; }
+  .toast.ok { border-color: var(--green); }
+  .toast.err { border-color: var(--red); }
+
+  .targets-box {
+    background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px; margin-top: 8px;
+    max-height: 280px; overflow-y: auto;
+  }
+  .targets-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px; gap: 6px;
+  }
+  .targets-head span {
+    font-size: 0.72rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .05em; font-weight: 600;
+  }
+  .targets-head button {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); border-radius: 6px; padding: 3px 8px;
+    font-size: 0.7rem; cursor: pointer;
+  }
+  .targets-head button:hover { border-color: var(--red); color: var(--red); }
+  .target-item {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 6px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel);
+    margin-bottom: 5px; cursor: pointer; transition: border-color .15s;
+  }
+  .target-item:hover { border-color: #3a4450; }
+  .target-item.active { border-color: var(--yellow); }
+  .target-item .sym { font-size: 0.82rem; font-weight: 700; }
+  .target-item .meta {
+    font-size: 0.7rem; color: var(--muted);
+    display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  }
+  .target-item .chg.up { color: var(--green); font-weight: 600; }
+  .target-item .chg.dn { color: var(--red); font-weight: 600; }
+  .target-item .rsi { font-variant-numeric: tabular-nums; }
+  .targets-empty {
+    font-size: 0.78rem; color: var(--muted); padding: 10px 4px; text-align: center;
+  }
+
+  .watch-section { margin-bottom: 4px; }
+  .watch-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 8px;
+  }
+  .watch-head h3 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); font-weight: 600;
+  }
+  .watch-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+  }
+  .watch-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px; cursor: pointer;
+    transition: border-color .15s;
+  }
+  .watch-card:hover { border-color: #3a4450; }
+  .watch-card.active { border-color: var(--yellow); }
+  .watch-card.spike { border-color: var(--red); box-shadow: 0 0 0 1px rgba(246,70,93,.25); }
+  .watch-card .wc-top {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px;
+  }
+  .watch-card .wc-sym { font-weight: 700; font-size: 0.88rem; }
+  .watch-card .wc-badge {
+    font-size: 0.65rem; padding: 2px 6px; border-radius: 10px;
+    background: #1a1f27; color: var(--muted);
+  }
+  .watch-card .wc-badge.pos { background: rgba(246,70,93,.2); color: var(--red); }
+  .watch-card .wc-badge.ord { background: rgba(56,97,251,.2); color: #93b4ff; }
+  .watch-card .wc-badge.ok { background: rgba(14,203,129,.15); color: var(--green); }
+  .watch-card .wc-badge.warn { background: rgba(240,185,11,.15); color: var(--yellow); }
+  .watch-card .wc-mini {
+    height: 72px; width: 100%; border-radius: 6px;
+    background: #0d1117; margin-bottom: 6px; overflow: hidden;
+  }
+  .watch-card .wc-meta {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px;
+    font-size: 0.72rem; color: var(--muted);
+  }
+  .watch-card .wc-meta b { color: var(--text); font-weight: 600; }
+  .watch-card .wc-meta .up { color: var(--green); }
+  .watch-card .wc-meta .dn { color: var(--red); }
+  .watch-empty {
+    font-size: 0.8rem; color: var(--muted); padding: 12px;
+    text-align: center; border: 1px dashed var(--border); border-radius: 10px;
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>💥 Пробій після стиснення</h1>
-  <div class="mute" style="font-size:13px">Бот торгує одну стратегію: смуги Боллінджера стискаються до мінімуму → ціна закривається за смугою → вхід у бік пробою лімітом. Стоп стоїть на біржі з моменту входу й підтягується за ціною (трейлінг на ATR). Кілька монет одночасно, розмір угоди — від ризику. Торгує сервер 24/7.</div>
-
-  <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
-
-  <div class="card" style="border-color:#f7a600">
-    <button class="big go" id="main">▶ ЗАПУСТИТИ</button>
-    <div id="kpi" style="display:flex;gap:18px;flex-wrap:wrap;margin-top:12px"></div>
-    <div id="info" style="font-size:13px;margin-top:8px"></div>
+<header>
+  <h1>Sell <span>Grid</span> — Short <small style="font-size:.7rem;color:var(--muted);font-weight:400">· сервер 24/7</small></h1>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <span class="badge" id="connBadge">● Связь</span>
+    <span class="badge" id="runBadge">Стоп</span>
   </div>
+</header>
 
-  <div class="card"><b>Відкриті угоди</b> <a href="#" id="closeAll" class="mute" style="font-size:12px;display:none">закрити всі ринком</a>
-    <div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Стоп</th><th>Ціна</th><th>P&L</th><th>Хв</th></tr></thead><tbody id="pos"></tbody></table></div></div>
+<div class="layout">
+  <aside class="sidebar">
+    <h2>Bybit API</h2>
+    <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
+    <div class="row">
+      <label>Category</label>
+      <select id="category">
+        <option value="linear" selected>linear (USDT perp)</option>
+        <option value="inverse">inverse</option>
+      </select>
+    </div>
+    <div class="row"><label>Баланс USDT</label><span class="val" id="equityText" style="font-weight:600">—</span></div>
+    <button class="btn btn-sec" id="saveKeysBtn">Сохранить настройки</button>
+    <button class="btn btn-sec" id="testConnBtn">Проверить связь</button>
 
-  <div class="card"><b>Монети зараз</b> <span class="mute" id="boardAt" style="font-size:12px"></span>
-    <div class="scroll"><table><thead><tr><th>Монета</th><th>Стиснення</th><th>Ширина смуг</th><th>Сигнал</th></tr></thead><tbody id="board"></tbody></table></div>
-    <div class="mute" style="font-size:12px;margin-top:6px">«Стиснення» — ширина смуг відносно найвужчої за останні ~30 год (1.00 = найвужча). Нижче порогу — монета «заряджена»: чекаю закриття за смугою.</div></div>
+    <h2>Инструмент</h2>
+    <div class="row">
+      <label>Символ</label>
+      <input id="symbol" value="BTCUSDT" style="width:120px;text-transform:uppercase;" />
+    </div>
+    <div class="row">
+      <label>Таймфрейм</label>
+      <select id="interval">
+        <option value="1">1m</option>
+        <option value="3">3m</option>
+        <option value="5" selected>5m</option>
+        <option value="15">15m</option>
+      </select>
+    </div>
+    <button class="btn btn-sec" id="loadChartBtn">Загрузить график</button>
+    <button class="btn btn-scan" id="scanBtn">🔍 Найти пампы под Short</button>
+    <button class="btn btn-ultra" id="ultraVolBtn" title="Скан USDT-перпов по свечам 1m: кто сейчас дёргается сильнее всех">⚡ Найти ультра-волатильные (1m сейчас)</button>
+    <button class="btn btn-shukin" id="shukinBtn" title="Логика Дмитрия Щукина: шорт от пампа, сетка от 1%, тейк от 0.7%, аварийный стоп 10%">⚡ Режим Щукина</button>
 
-  <div class="card"><b>🧪 Перевірка стратегії на історії</b> <a href="#" id="labRun" class="mute" style="font-size:12px">перевірити зараз</a> <span class="mute" id="labAt" style="font-size:12px"></span>
-    <div class="mute" style="font-size:12px;margin-top:4px">Раз на добу: 15 найліквідніших монет, 15-хв свічки за 60 днів, з комісіями. Параметри підбираються на перших 70% історії, вердикт — на останніх 30%, яких стратегія не бачила. Бот торгує з параметрами, які вибрала ця перевірка.</div>
-    <div id="lab" style="font-size:13px;margin-top:8px"></div></div>
+    <div class="targets-box" id="targetsBox">
+      <div class="targets-head">
+        <span>Цели (клик → график)</span>
+        <button type="button" id="clearTargetsBtn" title="Очистить список">Очистить</button>
+      </div>
+      <div id="targetsList"><div class="targets-empty">Нажми «Найти пампы» или «ультра-волатильные 1m»</div></div>
+    </div>
 
-  <div class="card"><b>🔍 Розбір результату</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
+    <h2>Sell Grid</h2>
+    <div class="info">
+      Сетка SELL-лимитов выше цены. Ловит откат после пампа.
+    </div>
+    <div class="row">
+      <label>Шаг сетки %</label>
+      <input type="number" id="gridStepPct" value="0.25" min="0.05" step="0.05" />
+    </div>
+    <div class="row">
+      <label>Уровней вверх</label>
+      <input type="number" id="gridLevels" value="4" min="1" max="10" step="1" />
+    </div>
+    <div class="row">
+      <label>Тейк %</label>
+      <input type="number" id="tpPct" value="0.30" min="0.1" step="0.05" />
+    </div>
+    <div class="row">
+      <label>Стоп %</label>
+      <input type="number" id="slPct" value="1.0" min="0.2" max="15" step="0.1" />
+    </div>
+    <div class="row">
+      <label>Размер USDT</label>
+      <input type="number" id="orderUsdt" value="20" min="5" step="1" />
+    </div>
+    <div class="row">
+      <label>Макс. лосс / день</label>
+      <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
+    </div>
+    <div class="row">
+      <label>Интервал цикла (с)</label>
+      <input type="number" id="intervalSec" value="3" min="2" step="1" />
+    </div>
+    <div class="row">
+      <label>Live (реальные ордера)</label>
+      <input type="checkbox" id="liveEnabled" />
+    </div>
+    <div class="row">
+      <label>Maker TP (лимит)</label>
+      <input type="checkbox" id="makerExit" checked />
+    </div>
+    <div class="row">
+      <label>Защита от спайка</label>
+      <input type="checkbox" id="superSpikeProtect" checked />
+    </div>
+    <div class="row">
+      <label>Порог спайка %</label>
+      <input type="number" id="maxSpikePct" value="0.40" min="0.1" step="0.05" />
+    </div>
+    <div class="row">
+      <label>Фильтр ATR</label>
+      <input type="checkbox" id="volFilter" checked />
+    </div>
+    <div class="row">
+      <label>Мин ATR %</label>
+      <input type="number" id="minAtrPct" value="0.15" min="0.05" step="0.05" />
+    </div>
+    <div class="row">
+      <label>Макс ATR %</label>
+      <input type="number" id="maxAtrPct" value="4" min="0.5" step="0.1" />
+    </div>
 
-  <div class="card"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
-  <div class="card"><b>Закриті угоди</b><div class="log" id="trades"></div></div>
+    <button class="btn btn-start" id="startBtn">▶ Старт</button>
+    <button class="btn btn-stop" id="stopBtn">■ Стоп</button>
+    <button class="btn btn-once" id="onceBtn">1 цикл</button>
+
+    <div class="stats">
+      <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
+      <div class="row"><span>Режим</span><span class="val" id="modeStatusText" style="color:var(--muted)">Обычный</span></div>
+      <div class="row"><span>Mid</span><span class="val" id="midText">—</span></div>
+      <div class="row"><span>ATR %</span><span class="val" id="atrText">—</span></div>
+      <div class="row"><span>RSI(14)</span><span class="val" id="rsiText">—</span></div>
+      <div class="row"><span>Спайк</span><span class="val" id="spikeText">OK</span></div>
+      <div class="row"><span>OI тренд</span><span class="val" id="oiTrendText">—</span></div>
+      <div class="row"><span>CVD тренд</span><span class="val" id="cvdTrendText">—</span></div>
+      <div class="row"><span>Фильтр Щукина</span><span class="val" id="shukinFilterText">—</span></div>
+      <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
+      <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
+      <div class="row"><span>Win / Loss</span><span class="val" id="wlText">0 / 0</span></div>
+      <div class="row"><span>День PnL</span><span class="val" id="dayPnlText">0</span></div>
+    </div>
+    <div class="log" id="log">Лог пуст</div>
+  </aside>
+
+  <main class="main">
+    <div class="watch-section">
+      <div class="watch-head">
+        <h3>Активные на бирже (позиции + заявки)</h3>
+        <button class="btn btn-sec" id="syncWatchBtn" style="width:auto;margin:0;padding:6px 12px;">↻ Синхр. с биржи</button>
+      </div>
+      <div class="watch-grid" id="watchGrid">
+        <div class="watch-empty" id="watchEmpty">Нет активных. После ордеров/позиций или «Синхр. с биржи» появятся карточки с мини-графиками. При старте бота всё подтягивается автоматически.</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span style="color:var(--muted);font-size:0.85rem;">Позиция (выбранная)</span>
+      <button class="btn btn-sec" id="refreshPosBtn" style="width:auto;margin:0;padding:6px 12px;">Обновить</button>
+      <button class="btn btn-sec" id="closePosBtn" style="width:auto;margin:0;padding:6px 12px;color:var(--red);">Закрыть market</button>
+    </div>
+    <div class="pos-card" id="posCard">
+      <div><div class="k">Side</div><div class="v" id="posSide">FLAT</div></div>
+      <div><div class="k">Size</div><div class="v" id="posSize">—</div></div>
+      <div><div class="k">Entry</div><div class="v" id="posEntry">—</div></div>
+      <div><div class="k">uPnL</div><div class="v" id="posUpnl">—</div></div>
+    </div>
+    <div id="chart"></div>
+    <div class="sub-charts">
+      <div class="sub-chart-wrap">
+        <div class="sub-chart-label">Объём</div>
+        <div class="sub-chart" id="volChart"></div>
+      </div>
+      <div class="sub-chart-wrap">
+        <div class="sub-chart-label">Открытый интерес (OI)</div>
+        <div class="sub-chart" id="oiChart"></div>
+      </div>
+      <div class="sub-chart-wrap">
+        <div class="sub-chart-label">CVD (кумулятивная дельта объёма)</div>
+        <div class="sub-chart" id="cvdChart"></div>
+      </div>
+    </div>
+  </main>
 </div>
+
+<div class="toast" id="toast">
+  <b id="toastTitle"></b>
+  <div id="toastSub" style="font-size:0.8rem;color:var(--muted)"></div>
+</div>
+
 <script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const f = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toFixed(d);
-const sgn = (v, d = 2) => v == null ? "—" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(d)}</span>`;
-let S = null, BUSY = false;
-async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); paint(); } catch (e) { $("info").textContent = "немає зв'язку з сервером"; } }
-async function act(o, q) {
-  if (q && !confirm(q)) return "";
-  BUSY = true; paint();
-  const r = await fetch("/api/act", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
-  BUSY = false; if (r.error) alert(r.error); await load(); return r.text || "";
-}
-$("main").onclick = () => S.sq.params.on ? act({ what: "off" }, "Зупинити? Нових входів не буде. Відкриті угоди лишаються зі стопом на біржі.")
-  : act({ what: "on" }, `Запустити «Пробій після стиснення»${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nРизик на угоду ${S.sq.params.riskPct}% балансу, до ${S.sq.params.maxPos} угод одночасно, плече до x${S.sq.params.maxLev}.`);
-$("closeAll").onclick = (e) => { e.preventDefault(); act({ what: "close" }, "Закрити всі відкриті угоди ринком?"); };
-$("labRun").onclick = (e) => { e.preventDefault(); act({ what: "lab" }); };
-$("dgRun").onclick = (e) => { e.preventDefault(); act({ what: "diag" }); };
-function paint() {
-  if (!S) return; const X = S.sq, P = X.params, on = !!P.on, A = X.active;
-  const conn = []; if (!S.keys) conn.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY і BYBIT_API_SECRET"); if (!S.password) conn.push("Задайте UI_PASSWORD у Railway → Variables, щоб кнопка працювала"); if (S.acc.err) conn.push("Bybit: " + S.acc.err);
-  $("connCard").style.display = conn.length ? "" : "none"; $("conn").innerHTML = conn.map(esc).join("<br>");
-  const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
-  $("kpi").innerHTML = `<div class="k"><b>${f(S.acc.equity, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div>`;
-  $("info").innerHTML = (on ? `<span class="dot on"></span><b>Працює.</b> Наступна перевірка монет через ${X.next} хв (на закритті 15-хв свічки). ` : '<span class="mute">Зупинено. </span>')
-    + `Стоп ${A.trail}×ATR, поріг стиснення ${A.sq} (${esc(A.from)}${A.ok === false ? ', <b style="color:var(--gold)">на нових даних перевірку не пройшла</b>' : A.ok ? ', <b class="up">перевірку пройшла ✅</b>' : ""}) · ризик ${P.riskPct}% на угоду · до ${P.maxPos} угод · плече до x${P.maxLev}`
-    + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
-  $("closeAll").style.display = X.pos.length ? "" : "none";
-  $("pos").innerHTML = X.pos.length ? X.pos.map(p => `<tr><td><b>${esc(p.sym)}</b></td><td class="${p.d > 0 ? "up" : "down"}">${p.d > 0 ? "лонг" : "шорт"}${p.state === "pending" ? " (ліміт чекає)" : ""}</td><td>${p.e}</td><td>${p.sl}</td><td>${p.mark ?? "—"}</td><td>${sgn(p.upnl, 4)}</td><td>${p.min}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">Немає — чекаю пробою після стиснення</td></tr>';
-  $("boardAt").textContent = X.scanAt ? "· перевірено " + new Date(X.scanAt).toLocaleTimeString() : "";
-  $("board").innerHTML = X.board.length ? X.board.map(b => `<tr><td><b>${esc(b.sym)}</b></td><td>${b.ratio != null ? (b.squeeze ? `<b style="color:var(--gold)">${b.ratio} заряджена</b>` : b.ratio) : "—"}</td><td>${b.width ?? "—"}%</td><td>${b.sig > 0 ? '<b class="up">▲ пробій вгору</b>' : b.sig < 0 ? '<b class="down">▼ пробій вниз</b>' : '<span class="mute">—</span>'}</td></tr>`).join("") : '<tr><td colspan="4" class="mute">Перша перевірка — на закритті найближчої 15-хв свічки</td></tr>';
-  // lab
-  const L = S.lab, R = L && L.res;
-  $("labAt").textContent = L && L.busy ? "· працює: " + L.progress : R ? "· " + new Date(R.at).toLocaleString() : "";
-  if (R && R.out[0] && !R.out[0].err) { const x = R.out[0];
-    $("lab").innerHTML = `<div style="border-left:3px solid ${x.ok ? "var(--up)" : "var(--gold)"};padding-left:10px">${x.ok ? "✅ Пройшла" : "⚠ Не пройшла"} перевірку на даних, яких не бачила: маточікування ${sgn(x.oos.exp, 3)}% на угоду після комісій, ${x.oos.n} угод, в плюс ${x.oos.win}%, PF ${x.oos.pf}, у плюсі ${x.coinsPos} з ${x.coinsTot} монет, достовірність t=${x.oos.t}${x.ok ? "" : " (потрібно t ≥ 2, плюс і ≥ 60% монет)"}.<br><span class="mute">Найкращі параметри на підборі: стоп ${x.params[0]}×ATR, поріг стиснення ${x.params[1]} · на підборі ${sgn(x.is.exp, 3)}% на угоду (${x.is.n} угод)</span></div>`; }
-  else $("lab").innerHTML = L && L.err ? `<div class="note">${esc(L.err)}</div>` : R && R.out[0] ? esc(R.out[0].err) : '<span class="mute">Перша перевірка запуститься сама за хвилину.</span>';
-  // diag (exchange part)
-  const D = S.diag, DR = D && D.res;
-  $("dgAt").textContent = D && D.busy ? "рахую…" : DR ? "· " + new Date(DR.at).toLocaleTimeString() : "";
-  const ex = (x, t) => x && x.fills ? `<tr><td>${t}</td><td>${sgn(x.gross, 4)}</td><td class="down">−${f(x.fees, 4)}</td><td>${sgn(x.net, 4)}</td><td>${x.fills}</td><td>${x.takerShare ?? "—"}%</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
-  $("dg").innerHTML = DR ? `<div style="border-left:3px solid var(--gold);padding-left:10px">${DR.why.map(w => `<div style="margin-bottom:4px">${esc(w)}</div>`).join("")}</div><div class="scroll" style="margin-top:8px"><table><thead><tr><th>За даними Bybit</th><th>до комісій</th><th>комісії</th><th>результат</th><th>виконань</th><th>ринкових</th></tr></thead><tbody>${ex(DR.d1, "доба")}${ex(DR.d7, "7 днів")}</tbody></table></div>` : (D && D.err ? `<div class="note">${esc(D.err)}</div>` : '<span class="mute">Збираю дані з біржі…</span>');
-  $("log").innerHTML = S.events.map(e => `<div class="${e[2] || ""}">${new Date(e[0]).toLocaleTimeString()} · ${esc(e[1])}</div>`).join("") || "<div>Ще немає</div>";
-  $("trades").innerHTML = X.trades.map(t => `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.d > 0 ? "лонг" : "шорт"} ${t.e} → ${t.x} · ${esc(t.how)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
-}
-load(); setInterval(load, 3000);
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
+  let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
+  const minis = {};
+  const NUMS = ['gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+
+  function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
+  function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
+  function setConn(ok, text) { const b = $('connBadge'); b.textContent = '● ' + (text || (ok ? 'OK' : 'ERR')); b.className = 'badge ' + (ok === true ? 'on' : ok === false ? 'err' : ''); }
+  const esc = (x) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // ---------- settings: page <-> server ----------
+  function readForm() {
+    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value };
+    for (const k of NUMS) o[k] = parseFloat($(k).value);
+    for (const k of BOOLS) o[k] = $(k).checked;
+    return o;
+  }
+  function fillForm(P) {
+    if (DIRTY) return;
+    const act = document.activeElement;
+    for (const k of NUMS) if ($(k) !== act) $(k).value = P[k];
+    for (const k of BOOLS) $(k).checked = !!P[k];
+    if ($('symbol') !== act) $('symbol').value = P.symbol;
+    $('interval').value = P.interval; $('category').value = P.category;
+  }
+  document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('input', () => { DIRTY = true; }));
+  document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('change', () => { if (el.id !== 'symbol' && el.id !== 'interval') act('save'); }));
+
+  async function act(what, extra, confirmText) {
+    if (confirmText && !confirm(confirmText)) return '';
+    BUSY = true;
+    const body = Object.assign({ what, o: readForm() }, extra || {});
+    const r = await fetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({ error: 'нет связи с сервером' }));
+    BUSY = false; DIRTY = false;
+    if (r.error) { toast('Ошибка', r.error, false); } else if (r.text && what !== 'save') toast(what === 'start' ? 'Бот' : 'Готово', r.text, true);
+    await load();
+    return r.text || '';
+  }
+
+  // ---------- charts ----------
+  function subOpts(el) { return { layout: { background: { color: '#12161c' }, textColor: '#848e9c' }, grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } }, rightPriceScale: { borderColor: '#1e2329', scaleMargins: { top: 0.1, bottom: 0.05 } }, timeScale: { borderColor: '#1e2329', timeVisible: true, visible: true }, width: el.clientWidth, height: el.clientHeight || 110 }; }
+  function initChart() {
+    if (!window.LightweightCharts) return;
+    const el = $('chart');
+    chart = LightweightCharts.createChart(el, { layout: { background: { color: '#12161c' }, textColor: '#eaecef' }, grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } }, rightPriceScale: { borderColor: '#1e2329' }, timeScale: { borderColor: '#1e2329', timeVisible: true }, width: el.clientWidth, height: el.clientHeight || 320 });
+    candleSeries = chart.addCandlestickSeries({ upColor: '#0ecb81', downColor: '#f6465d', borderUpColor: '#0ecb81', borderDownColor: '#f6465d', wickUpColor: '#0ecb81', wickDownColor: '#f6465d' });
+    midSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 1, title: 'Mid' });
+    volChart = LightweightCharts.createChart($('volChart'), subOpts($('volChart'))); volSeries = volChart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '' }); volChart.priceScale('').applyOptions({ scaleMargins: { top: 0.15, bottom: 0 } });
+    oiChart = LightweightCharts.createChart($('oiChart'), subOpts($('oiChart'))); oiSeries = oiChart.addLineSeries({ color: '#a855f7', lineWidth: 2, title: 'OI' });
+    cvdChart = LightweightCharts.createChart($('cvdChart'), subOpts($('cvdChart'))); cvdSeries = cvdChart.addLineSeries({ color: '#06b6d4', lineWidth: 2, title: 'CVD' });
+    const all = [chart, volChart, oiChart, cvdChart];
+    all.forEach(c => c.timeScale().subscribeVisibleLogicalRangeChange(r => { if (!r) return; all.forEach(o => { if (o !== c) { try { o.timeScale().setVisibleLogicalRange(r); } catch (e) {} } }); }));
+    window.addEventListener('resize', resizeAll);
+  }
+  function resizeAll() {
+    if (!chart) return;
+    chart.applyOptions({ width: $('chart').clientWidth, height: $('chart').clientHeight || 320 });
+    [['volChart', volChart], ['oiChart', oiChart], ['cvdChart', cvdChart]].forEach(([id, c]) => c && c.applyOptions({ width: $(id).clientWidth, height: $(id).clientHeight || 110 }));
+  }
+  const uniq = (pts) => { const m = new Map(); for (const p of pts) if (p && isFinite(p.time) && p.time) m.set(p.time, p); return [...m.values()].sort((a, b) => a.time - b.time); };
+  async function loadChart(force) {
+    const sym = ($('symbol').value || '').toUpperCase().trim(), iv = $('interval').value;
+    if (!sym || !chart) return;
+    if (!force && sym === chartSym && iv === chartIv) return;
+    const my = ++loadId; setConn(null, 'загрузка ' + sym + '…');
+    const r = await fetch(`/api/chart?symbol=${encodeURIComponent(sym)}&interval=${iv}`).then(r => r.json()).catch(e => ({ error: e.message }));
+    if (my !== loadId) return;
+    if (r.error) { setConn(false, 'ошибка'); toast('График', r.error, false); return; }
+    chartSym = sym; chartIv = iv;
+    const c = uniq(r.candles || []);
+    candleSeries.setData(c);
+    volSeries.setData(c.map(x => ({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' })));
+    let cum = 0; cvdSeries.setData(c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }));
+    oiSeries.setData(uniq(r.oi || []));
+    resizeAll(); [chart, volChart, oiChart, cvdChart].forEach(x => { try { x.timeScale().fitContent(); } catch (e) {} });
+    if (r.sig) showSig(r.sig);
+    setConn(true, 'OK');
+  }
+  function drawLevels(w) {
+    if (!chart || !candleSeries) return;
+    gridLines.forEach(s => { try { chart.removeSeries(s); } catch (e) {} }); gridLines = [];
+    const d = candleSeries.data ? candleSeries.data() : null; if (!d || !d.length || !w || !w.mid) return;
+    const t0 = d[0].time, t1 = d[d.length - 1].time + 120;
+    midSeries.setData([{ time: t0, value: w.mid }, { time: t1, value: w.mid }]);
+    (w.targets || []).forEach(px => { const s = chart.addLineSeries({ color: '#f6465d', lineWidth: 1, lineStyle: 2, title: 'Sell ' + px }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
+  }
+  function showSig(sig) {
+    $('oiTrendText').textContent = sig.oiTrend + (sig.oiChangePct ? ' (' + Number(sig.oiChangePct).toFixed(1) + '%)' : '');
+    $('oiTrendText').style.color = sig.oiTrend === 'растёт' ? 'var(--green)' : sig.oiTrend === 'падает' ? 'var(--red)' : 'var(--muted)';
+    $('cvdTrendText').textContent = sig.cvdTrend;
+    $('cvdTrendText').style.color = sig.cvdTrend === 'покупки' ? 'var(--green)' : sig.cvdTrend === 'продажи' ? 'var(--red)' : 'var(--muted)';
+    const f = $('shukinFilterText');
+    if (!S || !S.sg.params.shukinMode) { f.textContent = 'выкл'; f.style.color = 'var(--muted)'; }
+    else if (sig.allowShort) { f.textContent = 'ШОРТ ОК ' + sig.reason; f.style.color = 'var(--green)'; }
+    else { f.textContent = 'ЖДАТЬ: ' + sig.reason; f.style.color = 'var(--yellow)'; }
+  }
+
+  // ---------- render from the server state ----------
+  function render() {
+    if (!S) return;
+    const G = S.sg, P = G.params;
+    fillForm(P);
+    $('keysInfo').innerHTML = (S.keys ? '✅ Ключи Bybit на сервере' : '❌ Нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET') + ' · ' + (S.env === 'testnet' ? 'TESTNET' : 'MAINNET')
+      + (S.password ? '' : '<br>⚠ Задайте UI_PASSWORD в Railway → Variables, чтобы кнопки работали') + '<br><span style="font-size:.75rem">Бот работает на сервере 24/7 — страницу можно закрыть.</span>';
+    $('equityText').textContent = S.acc.equity != null ? Number(S.acc.equity).toFixed(2) : (S.acc.err ? 'ошибка' : '—');
+    const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
+    if (G.conn) setConn(G.conn.ok, G.conn.text);
+    $('statusText').textContent = G.status;
+    const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
+    $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
+    const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
+    if (info) info.innerHTML = P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
+    $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
+    $('cyclesText').textContent = G.cycles; $('tradesText').textContent = G.trades; $('wlText').textContent = G.wins + ' / ' + G.losses;
+    $('dayPnlText').textContent = (G.dayPnl >= 0 ? '+' : '') + Number(G.dayPnl).toFixed(2); $('dayPnlText').style.color = G.dayPnl > 0 ? 'var(--green)' : G.dayPnl < 0 ? 'var(--red)' : '';
+    const cur = (P.symbol || '').toUpperCase(), w = G.watches.find(x => x.symbol === cur);
+    if (w) {
+      $('midText').textContent = fmt(w.mid);
+      $('spikeText').textContent = w.isSpike ? 'SPIKE!' : 'OK'; $('spikeText').style.color = w.isSpike ? 'var(--red)' : 'var(--green)';
+      $('atrText').textContent = w.atrPct != null ? (w.atrPct * 100).toFixed(3) + '%' : '—';
+      $('rsiText').textContent = w.rsi != null ? w.rsi.toFixed(1) : '—';
+      const p = w.pos || {}; $('posSide').textContent = p.size ? p.side : 'FLAT'; $('posSize').textContent = p.size ? fmt(p.size) : '—'; $('posEntry').textContent = p.size ? fmt(p.avgPrice) : '—';
+      const up = p.unrealisedPnl || 0; $('posUpnl').textContent = p.size ? (up >= 0 ? '+' : '') + up.toFixed(3) : '—'; $('posUpnl').className = 'v ' + (up > 0 ? 'pos' : up < 0 ? 'neg' : '');
+      drawLevels(w);
+      if (w.sig) showSig(w.sig);
+    }
+    if (G.shukin) showSig(G.shukin);
+    // log
+    $('log').innerHTML = G.log.map(l => `<div style="color:${l[2] === 'ok' ? 'var(--green)' : l[2] === 'err' ? 'var(--red)' : 'var(--muted)'}">[${new Date(l[0]).toLocaleTimeString('ru-RU')}] ${esc(l[1])}</div>`).join('') || 'Лог пуст';
+    renderTargets(G.targets, cur);
+    renderWatches(G.watches, cur);
+  }
+  function renderTargets(list, cur) {
+    const box = $('targetsList');
+    if (!list || !list.length) { box.innerHTML = '<div class="targets-empty">Нажми «Найти пампы» или «ультра-волатильные 1m»</div>'; return; }
+    box.innerHTML = list.map(t => { const chg = parseFloat(t.chg) || 0, vol = t.range1m != null ? '1m ±' + Number(t.range1m).toFixed(2) + '%' : (t.rsi != null ? 'RSI ' + Number(t.rsi).toFixed(0) : '—');
+      return `<div class="target-item${t.symbol === cur ? ' active' : ''}" data-sym="${esc(t.symbol)}" data-tf="${esc(t.tf || '')}"><span class="sym">${esc(t.symbol.replace(/USDT$/, ''))}</span><div class="meta"><span class="chg ${chg >= 0 ? 'up' : 'dn'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span><span class="rsi">${vol}</span></div></div>`; }).join('');
+    box.querySelectorAll('.target-item').forEach(el => el.onclick = () => pick(el.getAttribute('data-sym'), el.getAttribute('data-tf')));
+  }
+  function renderWatches(ws, cur) {
+    const grid = $('watchGrid');
+    if (!ws.length) { grid.innerHTML = '<div class="watch-empty">Нет активных. После ордеров/позиций или «Синхр. с биржи» появятся карточки. При старте бота всё подтягивается автоматически.</div>'; return; }
+    const sig = JSON.stringify(ws.map(w => [w.symbol, w.symbol === cur, w.isSpike, w.pos && w.pos.size, w.ourOrders, w.orders, w.status, w.mid && +w.mid.toPrecision(6), w.rsi && Math.round(w.rsi), w.pos && w.pos.unrealisedPnl && +w.pos.unrealisedPnl.toFixed(2)]));
+    if (grid.dataset.sig === sig) return; grid.dataset.sig = sig;
+    grid.innerHTML = ws.map(w => {
+      let badge = '<span class="wc-badge">idle</span>';
+      if (w.pos && w.pos.size > 0) badge = `<span class="wc-badge pos">${w.pos.side === 'Sell' ? 'SHORT' : 'LONG'}</span>`; else if (w.ourOrders > 0) badge = `<span class="wc-badge ord">${w.ourOrders} ord</span>`; else if (w.orders > 0) badge = `<span class="wc-badge">${w.orders} ord</span>`;
+      if (w.isSpike) badge += ' <span class="wc-badge warn">SPIKE</span>';
+      const up = w.pos && w.pos.size ? w.pos.unrealisedPnl : null;
+      return `<div class="watch-card${w.symbol === cur ? ' active' : ''}${w.isSpike ? ' spike' : ''}" data-sym="${esc(w.symbol)}"><div class="wc-top"><span class="wc-sym">${esc(w.symbol.replace(/USDT$/, ''))}</span><span>${badge}</span></div>
+        <div class="wc-mini">${spark(w.spark)}</div>
+        <div class="wc-meta"><span>Mid <b>${w.mid ? fmt(w.mid) : '—'}</b></span><span>uPnL <b class="${up == null ? '' : up >= 0 ? 'up' : 'dn'}">${up == null ? '—' : (up >= 0 ? '+' : '') + up.toFixed(2)}</b></span><span>RSI <b>${w.rsi != null ? w.rsi.toFixed(0) : '—'}</b></span><span>${esc(w.status || '—')}</span></div></div>`; }).join('');
+    grid.querySelectorAll('.watch-card').forEach(el => el.onclick = () => pick(el.getAttribute('data-sym')));
+  }
+  function spark(a) {
+    if (!a || a.length < 2) return '';
+    const mn = Math.min(...a), mx = Math.max(...a), W = 200, H = 72, X = (i) => i / (a.length - 1) * W, Y = (v) => H - 4 - (mx > mn ? (v - mn) / (mx - mn) : 0.5) * (H - 8);
+    const d = a.map((v, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ');
+    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%"><path d="${d} L${W} ${H} L0 ${H} Z" fill="rgba(246,70,93,0.15)"/><path d="${d}" fill="none" stroke="#f6465d" stroke-width="1.5"/></svg>`;
+  }
+  async function pick(sym, tf) {
+    if (!sym) return; $('symbol').value = sym; if (tf) $('interval').value = tf;
+    await act('save'); loadChart(true);
+  }
+
+  async function load() {
+    try { S = await fetch('/api/state', { cache: 'no-store' }).then(r => r.json()); render(); }
+    catch (e) { setConn(false, 'нет связи с сервером'); }
+  }
+
+  // ---------- wire ----------
+  initChart();
+  $('saveKeysBtn').onclick = () => act('save').then(() => toast('Сохранено', 'Настройки на сервере', true));
+  $('testConnBtn').onclick = () => act('test');
+  $('clearTargetsBtn').onclick = () => act('clearTargets');
+  $('loadChartBtn').onclick = () => loadChart(true);
+  $('scanBtn').onclick = async () => { const b = $('scanBtn'); b.disabled = true; b.textContent = '⏳ Поиск…'; await act('scan'); b.disabled = false; b.textContent = '🔍 Найти пампы под Short'; loadChart(true); };
+  $('ultraVolBtn').onclick = async () => { const b = $('ultraVolBtn'); b.disabled = true; b.textContent = '⏳ 1m скан…'; await act('ultra'); b.disabled = false; b.textContent = '⚡ Найти ультра-волатильные (1m сейчас)'; loadChart(true); };
+  $('shukinBtn').onclick = () => act('shukin');
+  $('syncWatchBtn').onclick = () => act('sync');
+  $('symbol').addEventListener('change', () => { $('symbol').value = ($('symbol').value || '').toUpperCase().trim(); act('save').then(() => loadChart(true)); });
+  $('symbol').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('symbol').blur(); } });
+  $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
+  $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
+  $('stopBtn').onclick = () => act('stop');
+  $('onceBtn').onclick = () => act('once');
+  $('refreshPosBtn').onclick = () => act('position');
+  $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
+  load().then(() => loadChart(true));
+  setInterval(load, 2000);
+  setInterval(() => loadChart(true), 60000);
+})();
+
 </script>
 </body>
 </html>

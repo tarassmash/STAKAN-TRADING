@@ -307,6 +307,10 @@
       <option value="sell">Sell Grid — шорт от пампа</option>
       <option value="follow">🧭 Автопилот за ценой — лимитки ±% в обе стороны</option>
     </select>
+    <button class="btn btn-shukin" id="aiBtn" style="background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#fff;border-color:#818cf8;margin-bottom:8px">🧠 AI: молниеносное обучение и оптимизация</button>
+    <div class="row"><label>Учиться постоянно</label><input type="checkbox" id="aiAuto" /></div>
+    <div class="row"><label>Каждые (мин)</label><input type="number" id="aiEveryMin" value="30" min="5" step="5" /></div>
+    <div class="info" id="aiInfo" style="font-size:.75rem">Нажми — бот за секунды прогонит тысячи вариантов настроек текущей стратегии на ~2 сутках минутных свечей монеты (с твоими комиссиями), проверит на последних 30% истории, которых варианты не видели, и применит лучший, если он в плюсе и лучше текущих.</div>
     <div id="bandBox" style="display:none">
       <div class="info"><b style="color:#0ecb81">🧭 Автопилот за ценой:</b> только лимитки. SELL выше цены и BUY ниже на заданный %, едут за ценой следом (по средней последних свечей — резкий прострел их исполняет). Исполнилась одна → трейлинг-тейк (с уровня тейка едет за лучшей ценой) или тейк лимитом, противоположная снимается, добор дальше, стоп на бирже. После тейка — снова пара вокруг цены.</div>
       <div class="row"><label>Отступ от цены % (вверх и вниз)</label><input type="number" id="bandPct" value="3" min="0.1" step="0.1" /></div>
@@ -478,8 +482,8 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
   const minis = {};
-  const NUMS = ['pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+  const NUMS = ['aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
   function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
@@ -652,6 +656,12 @@
     if (info) info.innerHTML = P.strategy === 'follow' ? 'Для «Автопилота за ценой» используются только «Размер USDT» и фильтр спайка ниже; отступ, тейк, стоп и доборы — в блоке выше.' : P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
     $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
     const cw = G.watches.find(x => x.symbol === (P.symbol || '').toUpperCase());
+    const A = G.ai, rs = (r) => r ? `${r.pnl >= 0 ? '+' : ''}${r.pnl}% · ${r.n} сд. · ${r.win}% в +` : '—';
+    if (G.aiBusy) $('aiBtn').textContent = '🧠 Учусь… (секунды)';
+    $('aiInfo').innerHTML = (A ? `<b>${A.applied ? '✅ Применено' : 'ℹ️ Оставлено как есть'}</b> · ${esc(A.sym)} · ${new Date(A.at).toLocaleTimeString('ru-RU')} · ${A.tested} вариантов за ${(A.ms / 1000).toFixed(1)} с · выбрал: ${esc(A.by)}<br>`
+      + (A.best ? `Лучшее: ${esc(A.best.p)}<br>на подборе ${rs(A.best.train)} · <b>на новых данных ${rs(A.best.valid)}</b><br>` : 'Подходящего варианта нет (мало сделок в истории)<br>')
+      + `Было: ${esc(A.current.p)}<br>на новых данных ${rs(A.current.valid)}` + (A.reason ? `<br>🤖 ${esc(A.reason)}` : '') : 'Нажми кнопку — бот за секунды переберёт тысячи настроек на истории монеты и применит лучшие.')
+      + `<br><span style="color:var(--muted)">${G.aiFal ? '🤖 AI fal.ai подключён: выбирает среди проверенных вариантов' : 'AI fal.ai не подключён (FAL_KEY в Railway) — выбирает оптимизатор'}</span>`;
     $('bandBox').style.display = P.strategy === 'follow' ? '' : 'none'; $('bandUsdt').textContent = P.orderUsdt;
     const stp = cw && cw.steps;
     $('feeInfo').innerHTML = stp ? `Комиссии ${esc(cw.symbol)}: maker ${stp.maker}% · taker ${stp.taker}%<br>Шаг сетки / доборов: <b>${stp.lim}%</b> (${P.feeX}× лимит+лимит)<br>${P.strategy === 'follow' ? `Трейлинг-тейк с <b>${cw.band ? cw.band.tp : stp.mkt}%</b>, отступ ${cw.band ? cw.band.gap : '—'}% (${P.feeX}× лимит+рынок)` : `Тейк: <b>${P.makerExit ? stp.lim : stp.mkt}%</b>`}${P.autoStep ? '' : '<br><span style="color:var(--yellow)">авто выкл — но не меньше ' + P.feeX + '× комиссии</span>'}` : 'Посчитаю после первого цикла';
@@ -726,6 +736,7 @@
   $('scanBtn').onclick = async () => { const b = $('scanBtn'); b.disabled = true; b.textContent = '⏳ Поиск…'; await act('scan'); b.disabled = false; b.textContent = '🔍 Найти пампы под Short'; loadChart(true); };
   $('ultraVolBtn').onclick = async () => { const b = $('ultraVolBtn'); b.disabled = true; b.textContent = '⏳ 1m скан…'; await act('ultra'); b.disabled = false; b.textContent = '⚡ Найти ультра-волатильные (1m сейчас)'; loadChart(true); };
   $('shukinBtn').onclick = () => act('shukin');
+  $('aiBtn').onclick = async () => { const b = $('aiBtn'); b.disabled = true; b.textContent = '🧠 Учусь… (секунды)'; await act('ai'); b.disabled = false; b.textContent = '🧠 AI: молниеносное обучение и оптимизация'; };
   $('syncWatchBtn').onclick = () => act('sync');
   $('symbol').addEventListener('change', () => { $('symbol').value = ($('symbol').value || '').toUpperCase().trim(); act('save').then(() => loadChart(true)); });
   $('symbol').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('symbol').blur(); } });

@@ -100,7 +100,19 @@ async function refreshAccount() {
 
 
 // ---------------- the engine ----------------
-const SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m) });
+// AI (fal.ai) for the lightning learning: FAL_KEY in Railway -> the AI chooses among the tested candidates
+const FAL_KEY = (process.env.FAL_KEY || process.env.FAL_API_KEY || "").trim();
+const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
+const FAL_URL = (process.env.TEST_FAL_URL || process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
+async function fal(prompt) {
+  const r = await fetch(FAL_URL, { method: "POST", headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: FAL_MODEL, system_prompt: "You optimise a crypto trading bot. Answer only with one JSON object.", prompt, temperature: 0.2, max_tokens: 400 }), signal: AbortSignal.timeout(60000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || "ошибка"}`);
+  const m = String(j.output || "").match(/\{[\s\S]*\}/); if (!m) throw new Error("AI не вернул JSON");
+  return JSON.parse(m[0]);
+}
+const SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m), fal: FAL_KEY ? fal : null });
 
 function state() {
   const cat = SG.params.category === "inverse" ? "inverse" : "linear";
@@ -111,6 +123,7 @@ async function act(b) {
   const what = String(b.what || "");
   if (b.o && typeof b.o === "object") SG.setParams(b.o);   // the page always sends its current settings with a command
   if (what === "save") return "Сохранено";
+  if (what === "ai") return await SG.aiLearn("по кнопке");
   if (what === "start") return await SG.start();
   if (what === "stop") return await SG.stop(true);
   if (what === "once") { await SG.runCycle(); return "1 цикл выполнен"; }

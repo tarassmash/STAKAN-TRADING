@@ -3,6 +3,7 @@
 //   защита от спайка, фильтр ATR, TP / SL по средней цене шорта, maker-тейк лимитом, сетка SELL-лимитов выше цены.
 // Режим Щукина: шаг сетки от 1%, тейк от 0.7%, аварийный SL 10%, добор выше при открытом шорте, фильтр OI/CVD.
 "use strict";
+const OPT = require("./optimizer");
 
 const DEFAULTS = {
   symbol: "BTCUSDT", interval: "5", category: "linear",
@@ -13,6 +14,8 @@ const DEFAULTS = {
   strategy: "sell",        // "sell" = Sell Grid (short from a pump) | "follow" = autopilot after the price (long or short where it goes)
   followBand: 0.08,
   leverage: 3,
+  aiAuto: false,           // 🧠 learn again by itself every aiEveryMin minutes
+  aiEveryMin: 30,
   pulseOn: true,           // sudden pump / dump: adapt at once (cut the position against it, go with the move)
   pulsePct: 1.5,           // a move of this % ...
   pulseSec: 60,            // ... within this many seconds is a pump / dump
@@ -30,8 +33,8 @@ const DEFAULTS = {
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
-const BOOLS = ["pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
+const NUMS = ["aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const BOOLS = ["aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -40,7 +43,7 @@ function create(host) {
   if (!lsGet("sg.v2", false)) { Object.assign(P, { leverage: 10, autoStep: true, feeX: 10, slPct: 10, bandSl: 10, bandPct: 3, bandLevels: 3, bandAdds: 5, gridLevels: 8 }); save(); lsSet("sg.v2", true); }
   if (!lsGet("sg.v3", false)) { P.leverage = 3; Object.assign(P, { pulseOn: true, pulsePct: 1.5, pulseSec: 60, momHoldMin: 10, momSl: 1.5 }); save(); lsSet("sg.v3", true); }
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
-  const saveS = () => lsSet("sg.s", { lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
+  const saveS = () => lsSet("sg.s", { ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
   const LOG = lsGet("sg.log", []);
   let busy = false, timer = null, status = "ВЫКЛ", conn = { ok: null, text: "—" }, shukinSig = null, lastSave = 0;
@@ -510,6 +513,66 @@ function create(host) {
   }
   setInterval(() => { autopilot().catch(() => {}); }, 30000);
 
+  // ---------- 🧠 lightning learning: history of the coin -> thousands of settings -> the best on unseen data -> applied ----------
+  let aiBusy = false;
+  async function history1m(symbol, category, n) {
+    let end = now(), out = [];
+    while (out.length < n) {
+      const r = await pub("/v5/market/kline", { category, symbol, interval: "1", limit: Math.min(1000, n - out.length), end });
+      const rows = (r.list || []).map(x => ({ t: +x[0], open: +x[1], high: +x[2], low: +x[3], close: +x[4] }));
+      if (!rows.length) break; out = rows.concat(out); end = rows[rows.length - 1].t - 1; if (rows.length < 200) break;
+    }
+    const seen = new Set(); return out.filter(x => !seen.has(x.t) && seen.add(x.t)).sort((a, b) => a.t - b.t);
+  }
+  const fmtP = (st, p) => st === "follow"
+    ? `лимитки ±${p.bandPct}% × ${p.levels}, доборов ${p.adds}, трейлинг с ${p.tp}% отступ ${p.gap}%, стоп ${p.sl}%, пульс ${p.pulse ? p.pulse + "%" : "выкл"}`
+    : `шаг ${p.step}%, уровней ${p.levels}, тейк ${p.tp}%, стоп ${p.sl}%`;
+  async function aiLearn(why) {
+    if (aiBusy) return "Обучение уже идёт"; aiBusy = true;
+    const t0 = now(), symbol = (P.symbol || "BTCUSDT").toUpperCase(), category = P.category, st = P.strategy === "follow" ? "follow" : "sell";
+    try {
+      log(`🧠 Обучение (${why}): ${symbol}, ${st === "follow" ? "Автопилот за ценой" : "Sell Grid"} — гружу историю…`, "info");
+      const c = await history1m(symbol, category, 3000);
+      if (c.length < 500) throw new Error("мало истории (" + c.length + " свечей)");
+      const steps = await stepsOf(symbol, category);
+      const R = await OPT.optimize(c, P, steps, st);
+      const ok = R.top.filter(x => x.enough);
+      let pick = ok[0] || null, by = "оптимизатор", reason = "";
+      // the AI (fal.ai) chooses among the candidates that held on unseen data
+      if (host.fal && ok.length) {
+        try {
+          const live = S.history.slice(-30).map(h => ({ min: Math.round((now() - h.at) / 60000), sym: h.sym, pnl: h.pnl, how: h.how }));
+          const d = await host.fal(`Strategy: ${st === "follow" ? "limits +-X% around the price, adds, trailing take, stop, pump/dump pulse" : "sell grid above the price, take/stop from the average"}. Coin ${symbol}, ${c.length} one-minute candles, fees maker ${steps.maker}% taker ${steps.taker}%.
+Candidates (results in % of one order, with fees; train = first 70% of history, valid = last 30% never seen while choosing):
+${ok.slice(0, 8).map((x, i) => `${i}: ${JSON.stringify(x.p)} train ${JSON.stringify(x.train)} valid ${JSON.stringify(x.valid)}`).join("\n")}
+Current settings: ${JSON.stringify(R.current.p)} train ${JSON.stringify(R.current.train)} valid ${JSON.stringify(R.current.valid)}
+Live trades of the bot (newest last): ${JSON.stringify(live)}
+Pick the candidate most likely to make money next hours (robust on valid, enough trades, low drawdown), or -1 to keep the current settings.
+Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-русски"}`);
+          const ch = Number(d.choice); reason = String(d.reason || "").slice(0, 300);
+          if (ch === -1) { pick = null; by = "AI (fal.ai)"; } else if (ok[ch]) { pick = ok[ch]; by = "AI (fal.ai)"; }
+        } catch (e) { log("🧠 AI (fal.ai) недоступен: " + e.message + " — выбирает оптимизатор", "err"); }
+      }
+      const curV = R.current.valid, curScore = curV.pnl - 0.5 * curV.dd;
+      let applied = false;
+      if (pick && pick.valid.pnl > 0 && pick.vscore > curScore + 0.5) {
+        const p = pick.p;
+        if (st === "follow") Object.assign(P, { autoStep: false, bandPct: p.bandPct, bandLevels: p.levels, bandAdds: p.adds, bandTp: p.tp, bandTrailGap: p.gap, bandSl: p.sl, pulseOn: p.pulse > 0, pulsePct: p.pulse || P.pulsePct });
+        else Object.assign(P, { autoStep: false, gridStepPct: p.step, gridLevels: p.levels, tpPct: p.tp, slPct: p.sl });
+        save(); applied = true;
+      }
+      S.ai = { at: now(), ms: now() - t0, why, sym: symbol, strategy: st, tested: R.tested, candles: c.length, by, reason, applied,
+        best: pick && { p: fmtP(st, pick.p), train: pick.train, valid: pick.valid }, current: { p: fmtP(st, R.current.p), train: R.current.train, valid: R.current.valid } };
+      saveS();
+      const msg = applied ? `🧠 Обучено за ${((now() - t0) / 1000).toFixed(1)} с (${R.tested} вариантов, ${c.length} свечей): ${fmtP(st, pick.p)} — на непросмотренных данных ${pick.valid.pnl >= 0 ? "+" : ""}${pick.valid.pnl}% (${pick.valid.n} сделок) против ${curV.pnl >= 0 ? "+" : ""}${curV.pnl}% у прежних — ПРИМЕНЕНО (${by})${reason ? ": " + reason : ""}`
+        : `🧠 Обучено за ${((now() - t0) / 1000).toFixed(1)} с (${R.tested} вариантов): ${pick ? `лучший вариант на непросмотренных данных ${pick.valid.pnl >= 0 ? "+" : ""}${pick.valid.pnl}% — не лучше текущих (${curV.pnl >= 0 ? "+" : ""}${curV.pnl}%) или не в плюсе` : "мало сделок в истории / AI решил оставить"} — настройки не меняю${reason ? " (" + reason + ")" : ""}`;
+      log(msg, applied ? "ok" : "info");
+      return msg;
+    } catch (e) { log("🧠 Обучение: " + e.message, "err"); return "Ошибка: " + e.message; }
+    finally { aiBusy = false; }
+  }
+  setInterval(() => { if (P.aiAuto && P.running && !aiBusy && now() - ((S.ai && S.ai.at) || 0) >= Math.max(5, P.aiEveryMin || 30) * 60000) aiLearn("автоматически").catch(() => {}); }, 60000);
+
   // ---------- commands from the page ----------
   async function start() {
     if (P.liveEnabled && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
@@ -551,11 +614,11 @@ function create(host) {
 
   function view() {
     ensureDayKey();
-    return { autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    return { ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
-  return { start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  return { aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

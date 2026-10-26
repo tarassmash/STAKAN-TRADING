@@ -200,7 +200,7 @@ function simulateFlip(c, o) {
   const r = 1 + stepPct / 100, a0 = c[0].o, lr = Math.log(r);
   const L = (j) => a0 * Math.pow(r, j), idx = (x) => Math.floor(Math.log(x / a0) / lr);
   const q = investment * lev / (maxUnits + 1) / a0, back = Math.pow(r, flipSteps);
-  let D = c.length > 12 && c[12].c < c[0].o ? -1 : 1, ext = a0, last = idx(a0), units = [], run = null, profit = 0, fees = 0, wins = 0, losses = 0, flips = 0;
+  let D = c.length > 12 && c[12].c < c[0].o ? -1 : 1, ext = a0, last = idx(a0), units = [], run = null, profit = 0, fees = 0, wins = 0, losses = 0, flips = 0, peak = 0, dd = 0;
   const shut = (x) => { for (const u of units.concat(run ? [run] : [])) { const p = (x - u.e) * q * u.d; profit += p; fees += q * x * taker / 100; p > 0 ? wins++ : losses++; } units = []; run = null; };
   const open = (j, way) => {
     const e = L(j);
@@ -209,7 +209,9 @@ function simulateFlip(c, o) {
   };
   for (const k of c) {
     for (const x of (k.c >= k.o ? [k.o, k.l, k.h, k.c] : [k.o, k.h, k.l, k.c])) {
-      if (investment + profit - fees + units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d, 0) <= investment * 0.05) return { roi: -100, wins, losses, flips, liquidated: true };
+      const eqNow = profit - fees + units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d, 0);
+      peak = Math.max(peak, eqNow); dd = Math.max(dd, peak - eqNow);
+      if (investment + eqNow <= investment * 0.05) return { roi: -100, wins, losses, flips, maxDD: 100, liquidated: true };
       units = units.filter(u => { if ((u.d > 0 && x >= u.tp) || (u.d < 0 && x <= u.tp)) { profit += (u.tp - u.e) * q * u.d; fees += q * u.tp * maker / 100; wins++; return false; } return true; });
       ext = D > 0 ? Math.max(ext, x) : Math.min(ext, x);
       if ((D > 0 && x <= ext / back) || (D < 0 && x >= ext * back)) {   // pulled back flipSteps levels: turn around
@@ -224,6 +226,6 @@ function simulateFlip(c, o) {
     }
   }
   const x = c[c.length - 1].c, unreal = units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d, 0);
-  return { roi: +((profit - fees + unreal) / investment * 100).toFixed(2), wins, losses, flips };
+  return { roi: +((profit - fees + unreal) / investment * 100).toFixed(2), wins, losses, flips, maxDD: +(dd / investment * 100).toFixed(1) };
 }
 module.exports.simulateFlip = simulateFlip;

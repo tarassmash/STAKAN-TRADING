@@ -118,14 +118,18 @@ const BG = require("./bgrid").create({
   flush: () => { dirty = true; dump(); },
   busySyms: () => { const g = GR.view().grid; return g ? [g.sym] : []; },
   equity: () => ACC.equity || 0,
+  onLoss: () => { if (AI) AI.onLoss(); },
 });
+
+// ---------------- AI autopilot (fal.ai) over the breakout bot ----------------
+const AI = require("./ai").create({ BG, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, equity: () => ACC.equity || 0 });
 
 // ---------------- the regime switcher ("brain" over both bots) ----------------
 const BR = require("./brain").create({ bx, spec, acc: () => ACC, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
   makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined });
 
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), ai: AI.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
 // "btc", "BTC", "btcusdt" -> "BTCUSDT"; checks that Bybit has such a futures coin
 async function coinOf(v) {

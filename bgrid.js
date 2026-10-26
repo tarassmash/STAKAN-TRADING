@@ -29,10 +29,12 @@ const DEFAULTS = {
   flipSteps: 0,            // 0 = chosen per coin on history (flipMin .. flipMin+2 levels)
   flipMin: 4,              // never turn on a smaller pullback than this many levels (2 levels = noise turns it back and forth)
   sawFlips: 4,             // this many turns within an hour = a saw -> leave the coin
-  autoInv: false,          // the size = 90% of the balance (taken at every new start)
+  autoInv: false,          // the size = 75% of the balance (taken at every new start)
+  ddCap: 25,               // flip: the leverage is the highest whose worst drawdown on history stays within this % of the balance
+  autoOpt: true,           // flip: live self-tuning - losing reversals -> less leverage and a wider turn, a plus series -> leverage back up
 };
-const NUM = { flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
+const NUM = { ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const BOOL = ["autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -134,7 +136,7 @@ function create(host) {
   function finish(u, x, fee, how) {
     const pnl = (x - u.e) * u.qty * u.d - (u.fee || 0) - fee;
     B.units = B.units.filter(z => z !== u); B.profit = +((B.profit || 0) + pnl).toFixed(6); if (pnl > 0) B.wins = (B.wins || 0) + 1; else B.losses = (B.losses || 0) + 1;
-    TR.push({ at: now(), sym: B.sym, d: u.d, runner: !!u.runner, e: +Number(u.e).toPrecision(8), x: +Number(x).toPrecision(8), pnl: +pnl.toFixed(5), how, min: Math.round((now() - (u.at || now())) / 60000) });
+    TR.push({ at: now(), sym: B.sym, lev: B.lev, fs: B.flipSteps, st: B.stepPct, d: u.d, runner: !!u.runner, e: +Number(u.e).toPrecision(8), x: +Number(x).toPrecision(8), pnl: +pnl.toFixed(5), how, min: Math.round((now() - (u.at || now())) / 60000) });
     if (TR.length > 3000) TR.splice(0, TR.length - 3000); lsSet("bg.trades", TR);
     if (u.tpOrd) cancel(u.tpOrd);
     saveB();
@@ -182,16 +184,22 @@ function create(host) {
         let best = null;
         if (P.flip) {   // the take is fixed (scalpStep, at least 2 × fees); the turn distance is chosen on history
           const st = +Math.max(P.scalpStep, 2 * (taker + maker)).toFixed(3);
-          for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [P.flipMin, P.flipMin + 1, P.flipMin + 2]) {
-            const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { stepPct: st, flipSteps: fs, maxUnits: units, investment: P.investment, lev, maker, taker, runner: P.runner }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
-            if (!best || res.roi > best.roi) best = Object.assign({ st, fs }, res);
+          // leverage: the highest whose worst drawdown on history stays within ddCap (and that still fits the exchange minimum)
+          let levs = [...new Set(LADDER.map(l => Math.min(l, lev)))].filter(l => P.investment * l / minNotional >= 2);
+          if (!levs.length) levs = [lev];
+          const good = (x) => x && !x.liquidated && (x.maxDD == null || x.maxDD <= P.ddCap);
+          for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [P.flipMin, P.flipMin + 1, P.flipMin + 2]) for (const l of levs) {
+            const un = Math.max(1, Math.min(P.maxUnits, Math.floor(P.investment * l / minNotional) - 1));
+            const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { stepPct: st, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker, taker, runner: P.runner }) : { roi: 0, wins: 0, losses: 0, flips: 0, maxDD: 0 };
+            const c2 = Object.assign({ st, fs, lev: l, units: un }, res);
+            if (!best || (good(c2) && !good(best)) || (good(c2) === good(best) && (good(c2) ? c2.roi > best.roi : c2.maxDD < best.maxDD))) best = c2;
           }
         }
         for (const st of P.flip ? [] : steps) {
           const res = cs.length > 120 && P.autoTune ? BT.simulateB2(cs, { stepPct: st, maxUnits: units, investment: P.investment, lev, maker, taker, stopSteps: P.stopSteps, runner: P.runner, trailSteps: P.trailSteps, band: P.band / 100 }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
           if (!best || res.roi > best.roi) best = Object.assign({ st }, res);
         }
-        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, fs: best.fs || 0, units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
+        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, fs: best.fs || 0, lev: best.lev || lev, maxDD: best.maxDD, units: best.units || units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
       } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
     }
     results.sort((a, b) => (b.roi ?? -1e9) - (a.roi ?? -1e9));
@@ -207,7 +215,7 @@ function create(host) {
     ST.spec = { tickStr: s.tick, step: s.step, minQty: Number(s.minQty || 0), minNotional: Number(s.minNotional || 5), maxLev: Number(s.maxLev || 10) };
     try { ST.hedge = ((await api("/v5/position/list", { query: { category: "linear", symbol: pl.sym }, auth: true })).list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { ST.hedge = false; }
     await ticker(pl.sym);
-    const lev = Math.min(P.leverage, Math.floor(ST.spec.maxLev));
+    const lev = Math.min(pl.lev || P.leverage, Math.floor(ST.spec.maxLev));
     try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: pl.sym, buyLeverage: String(lev), sellLeverage: String(lev) } }); } catch (e) { /* not modified */ }
     const qty = Math.max(qa(P.investment * lev / (pl.units + 1) / ST.price, false), qa(Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * ST.price) / ST.price, true));
     B = { scalp: P.scalp, fee: pl.fee, id: now().toString(36).slice(-5), sym: pl.sym, stepPct: pl.step, maxUnits: pl.units, qty, lev, anchor: ST.price, last: 0, d: 0, units: [], nextK: 1, profit: 0, wins: 0, losses: 0, startedAt: now(), idleAt: now(), bt: { roi: pl.roi, wins: pl.wins, losses: pl.losses, flips: pl.flips, days: P.btDays, tested: pl.tested } };
@@ -215,11 +223,11 @@ function create(host) {
     B.last = idxOf(ST.price);
     if (P.flip) {   // the first direction: the EMA if it has one, else the last hour's move
       const cs = await candles5m(pl.sym, 200), dd = dirOf(cs), h = cs.length > 12 ? cs[cs.length - 1].c - cs[cs.length - 13].c : 1;
-      Object.assign(B, { flip: true, flipSteps: Math.max(pl.fs || P.flipMin, P.flipMin), d: dd.d || (h < 0 ? -1 : 1), ext: ST.price, flipAt: [] });
+      Object.assign(B, { levCap: lev, tuneAt: now(), flipsSince: 0, tunes: [], flip: true, flipSteps: Math.max(pl.fs || P.flipMin, P.flipMin), d: dd.d || (h < 0 ? -1 : 1), ext: ST.price, flipAt: [] });
     }
     saveB(); subPub();
     if (B.flip) {
-      engineLog(`🔁 Пробій-розворот ${pl.sym}: тейки ${pl.step}% (комісії ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}%), розворот при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * pl.step).toFixed(2)}%), до ${B.maxUnits} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, розворотів ${pl.flips}` : ""} · старт ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, "up");
+      engineLog(`🔁 Пробій-розворот ${pl.sym}: плече x${lev} (на історії найгірша просадка ${pl.maxDD ?? "—"}% при межі ${P.ddCap}%), тейки ${pl.step}% (комісії ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}%), розворот при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * pl.step).toFixed(2)}%), до ${B.maxUnits} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, розворотів ${pl.flips}` : ""} · старт ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, "up");
       await openAt(B.last, B.d, "старт"); return;
     }
     engineLog(`🚀 ${P.scalp ? "⚡ Суперскальпінг" : "Пробійна сітка"} ${pl.sym}: ${P.scalp ? `тейки ${pl.step}% (комісії за коло ${pl.fee}% → чистими ≈ +${(pl.step - pl.fee).toFixed(3)}% з тейка)` : `крок ${pl.step}%`}, до ${B.maxUnits} юнітів по ${qty} + бігун, x${lev}${pl.tested ? ` · на історії за ${P.btDays} дні: ${pl.roi >= 0 ? "+" : ""}${pl.roi}%, тейків ${pl.wins}, стопів ${pl.losses}` : ""}`, "up");
@@ -318,6 +326,77 @@ function create(host) {
     engineLog(`💥 ${B.sym}: пробій ${dir > 0 ? "▲ ВГОРУ — лонг" : "▼ ВНИЗ — шорт"} (${fmt(x)}), друга межа знята`, dir > 0 ? "up" : "down");
     await openAt(B.last, dir, "пробій межі");
   }
+  // ---------------- self-tuning (flip mode) ----------------
+  const LADDER = [50, 30, 20, 10, 5, 3];
+  function minLevNow() { const sp = ST.spec || {}, x = ST.price || 1; const need = Math.max((sp.minNotional || 5) * 1.05, (sp.minQty || 0) * x); return Math.max(1, Math.ceil(need * 2 / Math.max(0.01, P.investment))); }
+  // change leverage / turn distance / take on the running coin (new units get the new size; open ones keep theirs)
+  async function tune(o, why, who) {
+    if (!B || !B.flip) return [];
+    const ch = [], x = ST.price, maxL = Math.min(50, Math.floor((ST.spec && ST.spec.maxLev) || 50));
+    if (o.lev != null && Number.isFinite(Number(o.lev))) {
+      const l = Math.max(minLevNow(), Math.min(maxL, Math.round(Number(o.lev))));
+      if (l !== B.lev) {
+        ch.push(`плече x${B.lev}→x${l}`); B.lev = l; sizeUnits();
+        try { await api("/v5/position/set-leverage", { method: "POST", auth: true, body: { category: "linear", symbol: B.sym, buyLeverage: String(l), sellLeverage: String(l) } }); } catch (e) { /* not modified / open position: the size above is what limits the risk */ }
+      }
+    }
+    if (o.flipSteps != null && Number.isFinite(Number(o.flipSteps))) { const fs = Math.max(3, Math.min(10, Math.round(Number(o.flipSteps)))); if (fs !== B.flipSteps) { ch.push(`розворот ${B.flipSteps}→${fs} рівнів`); B.flipSteps = fs; } }
+    if (o.takePct != null && Number.isFinite(Number(o.takePct))) {
+      const tp = +Math.max(2 * (B.fee || 0.075), Math.min(1.5, Number(o.takePct))).toFixed(3);
+      if (Math.abs(tp - B.stepPct) > 1e-9) { ch.push(`тейк ${B.stepPct}%→${tp}%`); B.stepPct = tp; B.anchor = x; B.last = idxOf(x); }
+    }
+    if (ch.length) {
+      B.tuneAt = now(); B.flipsSince = 0; B.tunes = (B.tunes || []).concat({ at: now(), ch: ch.join(", "), why, who }).slice(-20); saveB();
+      engineLog(`${who === "ai" ? "🤖 AI" : "🧪 Самонастройка"} ${B.sym}: ${ch.join(", ")} — ${why}`, "gold-t");
+    }
+    return ch;
+  }
+  // unit size from the money now (balance × 75% when sizing from the balance) and the leverage now
+  function sizeUnits() {
+    const x = ST.price; if (!B || !ST.spec || !x) return;
+    if (P.autoInv && host.equity) { const eq = host.equity(); if (eq > 0) P.investment = +Math.max(0.1, eq * 0.75).toFixed(2); }
+    const minN = Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * x);
+    const un = Math.max(1, Math.min(P.maxUnits, Math.floor(P.investment * B.lev / minN) - 1));
+    B.qty = Math.max(qa(P.investment * B.lev / (un + 1) / x, false), qa(minN / x, true));
+    B.maxUnits = Math.max(1, Math.min(un, Math.floor(P.investment * B.lev / (B.qty * x)) - 1));
+  }
+  // the bot's own rule on live results since the last change
+  async function selfTune() {
+    if (!B || !B.flip || B.leaving) return;
+    const since = TR.filter(t => t.sym === B.sym && t.at >= (B.tuneAt || 0)), sum = since.reduce((a, t) => a + t.pnl, 0);
+    if ((B.flipsSince || 0) >= 2 && sum < 0) {
+      const lower = LADDER.find(l => l < B.lev && l >= minLevNow()), fs = Math.min(8, B.flipSteps + 1);
+      if (lower == null && fs === B.flipSteps) {
+        if (P.autoCoin) { engineLog(`🧪 ${B.sym}: і з найменшим ризиком у мінус (${sum.toFixed(4)} USDT) — міняю монету`, "gold-t"); B.leaving = true; ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3; saveB(); for (const u of B.units.slice()) await closeUnit(u, "зміна монети"); }
+        return;
+      }
+      await tune({ lev: lower != null ? lower : B.lev, flipSteps: fs }, `за ${B.flipsSince} розвороти ${sum.toFixed(4)} USDT — зменшую ризик`, "self");
+      if (host.onLoss) host.onLoss();
+    } else if ((B.flipsSince || 0) >= 4 && sum > 0 && B.lev < (B.levCap || B.lev)) {
+      const up = LADDER.slice().reverse().find(l => l > B.lev && l <= B.levCap);
+      if (up) await tune({ lev: up }, `за ${B.flipsSince} розворотів +${sum.toFixed(4)} USDT — повертаю плече`, "self");
+    }
+  }
+  // what the AI sees
+  function brief() {
+    if (!B) return null;
+    const since = TR.filter(t => t.sym === B.sym && t.at >= (B.tuneAt || 0)), last = TR.slice(-40);
+    return { sym: B.sym, dir: B.d, price: ST.price, lev: B.lev, levCap: B.levCap, maxLev: ST.spec && ST.spec.maxLev, minLev: minLevNow(), takePct: B.stepPct, fee: B.fee, flipSteps: B.flipSteps, flips: B.flips || 0,
+      flipsLastHour: (B.flipAt || []).filter(t => now() - t < 3600e3).length, openUnits: B.units.length, coinProfit: B.profit, manualCoin: !P.autoCoin,
+      sinceLastChange: { min: Math.round((now() - (B.tuneAt || B.startedAt)) / 60000), trades: since.length, pnl: +since.reduce((a, t) => a + t.pnl, 0).toFixed(4), flips: B.flipsSince || 0 },
+      lastTrades: last.map(t => ({ min: Math.round((now() - t.at) / 60000), sym: t.sym, d: t.d, pnl: t.pnl, how: t.how, lev: t.lev, fs: t.fs })),
+      changes: (B.tunes || []).slice(-6).map(t => ({ min: Math.round((now() - t.at) / 60000), ch: t.ch, who: t.who })),
+      history: ST.bt ? ST.bt.results.filter(r2 => r2.roi != null).slice(0, 6).map(r2 => ({ sym: r2.sym, roi: r2.roi, maxDD: r2.maxDD, lev: r2.lev, fs: r2.fs, flips: r2.flips })) : [] };
+  }
+  async function changeCoin(sym, why) {
+    if (!B) return "";
+    engineLog(`🤖 AI: міняю монету ${B.sym}${sym ? " → " + sym : ""} — ${why}`, "gold-t");
+    ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3;
+    if (sym) { P.autoCoin = false; P.symbol = sym; save(); }
+    B.leaving = true; saveB(); for (const u of B.units.slice()) await closeUnit(u, "зміна монети (AI)");
+    return "ok";
+  }
+
   // ---------------- the loop: every 500 ms ----------------
   async function loop() {
     if (ST.busy) return; ST.busy = true;
@@ -352,7 +431,9 @@ function create(host) {
         if ((B.d > 0 && x <= B.ext / back) || (B.d < 0 && x >= B.ext * back)) {
           const nd = -B.d, was = B.ext;
           for (const u of B.units.slice()) await closeUnit(u, "розворот");
-          B.d = nd; B.ext = x; B.last = idxOf(x); B.flips = (B.flips || 0) + 1;
+          B.d = nd; B.ext = x; B.last = idxOf(x); B.flips = (B.flips || 0) + 1; B.flipsSince = (B.flipsSince || 0) + 1;
+          sizeUnits();   // the balance changed: the new direction's units fit the money now
+          if (P.autoOpt) { const b0 = B; setTimeout(() => { if (B === b0) selfTune().catch(e => setErr("самонастройка: " + e.message)); }, 6000); }
           B.flipAt = (B.flipAt || []).filter(t => now() - t < 3600e3).concat(now()); saveB();
           engineLog(`🔁 ${B.sym}: відкат ${B.flipSteps} рівні від ${fmt(was)} — розворот у ${nd > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} (${fmt(x)})`, nd > 0 ? "up" : "down");
           if (P.autoCoin && B.flipAt.length >= P.sawFlips) {   // a saw: the price twitches less than the turn distance -> another coin
@@ -452,7 +533,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { levCap: B.levCap || null, tunes: (B.tunes || []).slice(-5).reverse(), flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -469,6 +550,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

@@ -31,9 +31,12 @@ const DEFAULTS = {
   sawFlips: 4,             // this many turns within an hour = a saw -> leave the coin
   autoInv: false,          // the size = 75% of the balance (taken at every new start)
   ddCap: 25,               // flip: the leverage is the highest whose worst drawdown on history stays within this % of the balance
+  learnMin: 10,             // flip: every this many minutes re-learn take / turn / leverage on the last learnHours of 1-minute candles
+  learnHours: 6,
+  brakePct: 8,             // flip: the result since the last change below -brakePct % of the money -> cut the risk at once
   autoOpt: true,           // flip: live self-tuning - losing reversals -> less leverage and a wider turn, a plus series -> leverage back up
 };
-const NUM = { ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const NUM = { learnMin: [2, 240], learnHours: [1, 24], brakePct: [2, 50], ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
 const BOOL = ["autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
@@ -347,7 +350,7 @@ function create(host) {
     }
     if (ch.length) {
       B.tuneAt = now(); B.flipsSince = 0; B.tunes = (B.tunes || []).concat({ at: now(), ch: ch.join(", "), why, who }).slice(-20); saveB();
-      engineLog(`${who === "ai" ? "🤖 AI" : "🧪 Самонастройка"} ${B.sym}: ${ch.join(", ")} — ${why}`, "gold-t");
+      engineLog(`${who === "ai" ? "🤖 AI" : who === "learn" ? "⚡ Навчання" : "🧪 Самонастройка"} ${B.sym}: ${ch.join(", ")} — ${why}`, "gold-t");
     }
     return ch;
   }
@@ -364,19 +367,62 @@ function create(host) {
   async function selfTune() {
     if (!B || !B.flip || B.leaving) return;
     const since = TR.filter(t => t.sym === B.sym && t.at >= (B.tuneAt || 0)), sum = since.reduce((a, t) => a + t.pnl, 0);
-    if ((B.flipsSince || 0) >= 2 && sum < 0) {
+    if ((B.flipsSince || 0) >= 1 && sum < 0) {
       const lower = LADDER.find(l => l < B.lev && l >= minLevNow()), fs = Math.min(8, B.flipSteps + 1);
       if (lower == null && fs === B.flipSteps) {
         if (P.autoCoin) { engineLog(`🧪 ${B.sym}: і з найменшим ризиком у мінус (${sum.toFixed(4)} USDT) — міняю монету`, "gold-t"); B.leaving = true; ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3; saveB(); for (const u of B.units.slice()) await closeUnit(u, "зміна монети"); }
         return;
       }
-      await tune({ lev: lower != null ? lower : B.lev, flipSteps: fs }, `за ${B.flipsSince} розвороти ${sum.toFixed(4)} USDT — зменшую ризик`, "self");
+      await tune({ lev: lower != null ? lower : B.lev, flipSteps: fs }, `за ${B.flipsSince} розворот(и) ${sum.toFixed(4)} USDT — зменшую ризик`, "self");
       if (host.onLoss) host.onLoss();
+      setTimeout(() => learn("після мінусу").catch(() => {}), 3000);
     } else if ((B.flipsSince || 0) >= 4 && sum > 0 && B.lev < (B.levCap || B.lev)) {
       const up = LADDER.slice().reverse().find(l => l > B.lev && l <= B.levCap);
       if (up) await tune({ lev: up }, `за ${B.flipsSince} розворотів +${sum.toFixed(4)} USDT — повертаю плече`, "self");
     }
   }
+  // ⚡ fast learning: the freshest hours of this coin on 1-minute candles -> the take, the turn and the leverage that earned most just now
+  async function learn(why) {
+    if (!B || !B.flip || B.leaving || ST.learning) return;
+    ST.learning = true; ST.learnAt = now();
+    try {
+      const k = await bx("/v5/market/kline", { query: { category: "linear", symbol: B.sym, interval: "1", limit: String(Math.min(1000, P.learnHours * 60)) } });
+      const cs = (k.list || []).map(x => ({ o: Number(x[1]), h: Number(x[2]), l: Number(x[3]), c: Number(x[4]) })).reverse();
+      if (cs.length < 60) return;
+      const fr = await feeOf(B.sym), fee = fr.taker + fr.maker, x = ST.price, minN = Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * x);
+      const takes = [0.2, 0.3, 0.4, 0.5, 0.7, 1.0].filter(t => t >= 2 * fee), flipsC = [3, 4, 5, 6, 8], levs = LADDER.filter(l => l <= (B.levCap || B.lev) && l >= minLevNow());
+      if (!levs.length) levs.push(B.lev);
+      const sim = (t, fs, l) => { const un = Math.max(1, Math.min(P.maxUnits, Math.floor(P.investment * l / minN) - 1));
+        return BT.simulateFlip(cs, { stepPct: t, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker: fr.maker, taker: fr.taker, runner: P.runner }); };
+      const good = (r2) => !r2.liquidated && r2.maxDD <= P.ddCap;
+      let best = null;
+      for (const t of takes) for (const fs of flipsC) for (const l of levs) { const r2 = sim(t, fs, l); if (good(r2) && r2.roi > 0 && (!best || r2.roi > best.roi)) best = Object.assign({ t, fs, l }, r2); }
+      const cur = sim(B.stepPct, B.flipSteps, B.lev);
+      ST.learned = { at: now(), hours: +(cs.length / 60).toFixed(1), cur: cur.roi, best: best && { take: best.t, flipSteps: best.fs, lev: best.l, roi: best.roi, maxDD: best.maxDD } };
+      if (!best) {   // nothing earned on this coin in the last hours
+        if (P.autoCoin) { engineLog(`⚡ Навчання ${B.sym}: за останні ${ST.learned.hours} год жодні налаштування не дали плюсу — міняю монету`, "gold-t"); ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3; B.leaving = true; saveB(); for (const u of B.units.slice()) await closeUnit(u, "навчання: монета без плюсу"); }
+        else await tune({ lev: minLevNow(), flipSteps: Math.max(B.flipSteps, 6) }, `за останні ${ST.learned.hours} год жодні налаштування не дали плюсу — мінімальний ризик`, "learn");
+        return;
+      }
+      // switch only for a clear gain (otherwise the settings would jump on noise)
+      if (best.roi > cur.roi + Math.max(2, Math.abs(cur.roi) * 0.2) && (best.t !== B.stepPct || best.fs !== B.flipSteps || best.l !== B.lev))
+        await tune({ takePct: best.t, flipSteps: best.fs, lev: best.l }, `${why}: за останні ${ST.learned.hours} год так було б ${best.roi >= 0 ? "+" : ""}${best.roi}% (просадка ${best.maxDD}%) проти ${cur.roi >= 0 ? "+" : ""}${cur.roi}% із поточними`, "learn");
+    } catch (e) { setErr("навчання: " + e.message); }
+    finally { ST.learning = false; }
+  }
+  // emergency brake between reversals: the result since the last change (closed + open) below -brakePct % -> less risk at once
+  async function brake() {
+    if (!B || !B.flip || B.leaving || !P.autoOpt) return;
+    const x = ST.price, closed = TR.filter(t => t.sym === B.sym && t.at >= (B.tuneAt || 0)).reduce((a, t) => a + t.pnl, 0);
+    const open = B.units.filter(u => u.state === "open").reduce((a, u) => a + (x - u.e) * u.qty * u.d, 0);
+    if (closed + open < -P.investment * P.brakePct / 100 && now() - (B.tuneAt || 0) > 60000) {
+      const lower = LADDER.find(l => l < B.lev && l >= minLevNow());
+      if (lower != null) { await tune({ lev: lower }, `гальмо: ${(closed + open).toFixed(4)} USDT (−${P.brakePct}% суми) ще до розвороту`, "self"); if (host.onLoss) host.onLoss(); }
+      else B.tuneAt = now();
+    }
+  }
+  setInterval(() => { if (B && B.flip && P.autoOpt && now() - (ST.learnAt || 0) >= P.learnMin * 60000) learn("навчання").catch(() => {}); brake().catch(() => {}); }, 20000);
+
   // what the AI sees
   function brief() {
     if (!B) return null;
@@ -533,7 +579,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { levCap: B.levCap || null, tunes: (B.tunes || []).slice(-5).reverse(), flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { learned: ST.learned || null, levCap: B.levCap || null, tunes: (B.tunes || []).slice(-5).reverse(), flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -550,6 +596,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { learn, tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

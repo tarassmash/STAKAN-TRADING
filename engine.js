@@ -6,28 +6,33 @@
 
 const DEFAULTS = {
   symbol: "BTCUSDT", interval: "5", category: "linear",
-  gridStepPct: 0.25, gridLevels: 4, tpPct: 0.30, slPct: 1.0, orderUsdt: 20, maxDailyLoss: 15, intervalSec: 3,
+  gridStepPct: 0.40, gridLevels: 8, tpPct: 0.40, slPct: 10, orderUsdt: 20, maxDailyLoss: 15, intervalSec: 3,
   liveEnabled: false, makerExit: true, superSpikeProtect: true, maxSpikePct: 0.40, volFilter: true, minAtrPct: 0.15, maxAtrPct: 4,
   shukinMode: false, running: false,
   autopilot: true, autoScanMin: 5, autoScanMode: "pump",
   strategy: "sell",        // "sell" = Sell Grid (short from a pump) | "follow" = autopilot after the price (long or short where it goes)
   followBand: 0.08,
-  bandPct: 2,              // autopilot after the price: SELL limit this % above, BUY limit this % below (they follow the price behind it)
+  leverage: 10,            // set on every coin the bot trades
+  autoStep: true,          // the step and the take from the account's real fees: at least feeX × the round trip
+  feeX: 10,
+  bandLevels: 3,           // limits per side while flat: the first at bandPct, the next every step
+  bandPct: 3,              // autopilot after the price: SELL limit this % above, BUY limit this % below (they follow the price behind it)
   bandTp: 1.0,             // take (limit, maker) from the average entry, %
-  bandSl: 3.0,             // stop on the exchange from the average entry, %
+  bandSl: 10,             // stop on the exchange from the average entry, %
   bandTrail: true,         // trailing take: reaching the take activates a trailing exit on the exchange instead of closing at once
   bandTrailGap: 0.5,       // the trailing exit follows the best price at this %
-  bandAdds: 1,             // extra adding limits in the position's direction, each bandPct further
+  bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
-const BOOLS = ["bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
+const NUMS = ["leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const BOOLS = ["autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
   const P = Object.assign({}, DEFAULTS, lsGet("sg.p", {}));
   const save = () => lsSet("sg.p", P);
+  if (!lsGet("sg.v2", false)) { Object.assign(P, { leverage: 10, autoStep: true, feeX: 10, slPct: 10, bandSl: 10, bandPct: 3, bandLevels: 3, bandAdds: 5, gridLevels: 8 }); save(); lsSet("sg.v2", true); }
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
   const saveS = () => lsSet("sg.s", { lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
@@ -54,7 +59,18 @@ function create(host) {
 
   // ---------- Bybit ----------
   const pub = (path, q) => bx(path, { query: q });
-  const priv = (method, path, params) => method === "GET" ? bx(path, { query: params, auth: true }) : bx(path, { method: "POST", body: params, auth: true });
+  // order requests go one by one (>= 120 ms apart, Bybit allows 10/s); a rate-limit answer waits 1.5 s and retries
+  let qTail = Promise.resolve(), qLast = 0;
+  function priv(method, path, params) {
+    if (method === "GET") return bx(path, { query: params, auth: true });
+    const run = async () => {
+      const wait = Math.max(0, qLast + 120 - now()); if (wait) await new Promise(r => setTimeout(r, wait));
+      qLast = now();
+      try { return await bx(path, { method: "POST", body: params, auth: true }); }
+      catch (e) { if (String(e.code) === "10006" || /rate limit|too many visits/i.test(e.message)) { await new Promise(r => setTimeout(r, 1500)); qLast = now(); return bx(path, { method: "POST", body: params, auth: true }); } throw e; }
+    };
+    const p2 = qTail.then(run, run); qTail = p2.catch(() => {}); return p2;
+  }
   const INST = {};
   async function getInstrument(symbol, category) {
     if (INST[symbol]) return INST[symbol];
@@ -89,6 +105,28 @@ function create(host) {
   async function shortIdx(symbol, category) {
     if (HEDGE[symbol] == null) { try { const r = await priv("GET", "/v5/position/list", { category, symbol }); HEDGE[symbol] = (r.list || []).some(x => Number(x.positionIdx) > 0); } catch (e) { HEDGE[symbol] = false; } }
     return HEDGE[symbol] ? 2 : 0;
+  }
+
+  // ---------- real fees -> the densest step that still pays feeX × the round trip; leverage ----------
+  const FEES = {};
+  async function feeOf(symbol, category) {
+    const f = FEES[symbol]; if (f && now() - f.at < 3600e3) return f;
+    let maker = 0.02, taker = 0.055;
+    if (keys()) { try { const r = ((await priv("GET", "/v5/account/fee-rate", { category, symbol })).list || [])[0]; if (r) { maker = Math.max(0, Number(r.makerFeeRate) * 100); taker = Number(r.takerFeeRate) * 100; } } catch (e) { /* defaults */ } }
+    return (FEES[symbol] = { maker, taker, at: now() });
+  }
+  async function stepsOf(symbol, category) {
+    const f = await feeOf(symbol, category), X = Math.max(1, P.feeX || 10);
+    const lim = +(X * 2 * Math.max(f.maker, 0.01)).toFixed(3);            // limit in + limit out
+    const mkt = +(X * (Math.max(f.maker, 0.01) + f.taker)).toFixed(3);   // limit in + market out (stop / trailing)
+    return { maker: f.maker, taker: f.taker, lim, mkt };
+  }
+  const LEV = {};
+  async function ensureLev(symbol, category) {
+    const L = Math.max(1, Math.round(P.leverage || 10)); if (LEV[symbol] === L || !keys()) return;
+    try { await priv("POST", "/v5/position/set-leverage", { category, symbol, buyLeverage: String(L), sellLeverage: String(L) }); log(`${symbol}: плечо x${L}`, "info"); }
+    catch (e) { if (!/110043|not modified/i.test(String(e.code) + e.message)) log(`${symbol}: плечо: ${e.message}`, "err"); }
+    LEV[symbol] = L;
   }
 
   // ---------- orders ----------
@@ -164,6 +202,10 @@ function create(host) {
   async function runSellGridCycle(symbol, mid, inst, volOk, isSpike, candles, w) {
     const category = P.category, shukin = P.shukinMode, levels = Math.round(P.gridLevels) || 4;
     let gridStepPctVal = P.gridStepPct || 0.25, tpPctVal = P.tpPct || 0.3, slPctVal = P.slPct || 1.0;
+    const ST = await stepsOf(symbol, category); w.steps = ST;
+    if (P.autoStep) { gridStepPctVal = ST.lim; tpPctVal = P.makerExit ? ST.lim : ST.mkt; }
+    else { gridStepPctVal = Math.max(gridStepPctVal, ST.lim); tpPctVal = Math.max(tpPctVal, P.makerExit ? ST.lim : ST.mkt); }   // never below feeX × fees
+    if (P.liveEnabled) await ensureLev(symbol, category);
     if (shukin) { if (gridStepPctVal < 1) gridStepPctVal = 1; if (tpPctVal < 0.7) tpPctVal = 0.7; if (slPctVal < 10) slPctVal = 10; }
     const gridStep = gridStepPctVal / 100, tpPct = tpPctVal / 100, slPct = slPctVal / 100, usdt = P.orderUsdt || 20;
     let qty = floorToStep(usdt / mid, inst.qtyStep);
@@ -228,7 +270,12 @@ function create(host) {
   // limits only: flat -> SELL bandPct above + BUY bandPct below the price (following it behind);
   // a fill -> take by a limit from the average entry, the opposite limit removed, adds further on, the stop on the exchange
   async function runFollowCycle(symbol, mid, inst, volOk, isSpike, candles, w) {
-    const category = P.category, off = (P.bandPct || 2) / 100, tp = (P.bandTp || 1) / 100, sl = (P.bandSl || 3) / 100, usdt = P.orderUsdt || 20;
+    const category = P.category, ST = await stepsOf(symbol, category); w.steps = ST;
+    const off = (P.bandPct || 3) / 100, step = ST.lim / 100;
+    let tpP = P.bandTrail ? Math.max(P.bandTp || 0, ST.mkt) : Math.max(P.bandTp || 0, ST.lim); if (P.autoStep) tpP = P.bandTrail ? ST.mkt : ST.lim;
+    const tp = tpP / 100, gapP = P.autoStep ? +(tpP * 0.4).toFixed(3) : P.bandTrailGap, sl = (P.bandSl || 10) / 100, usdt = P.orderUsdt || 20;
+    w.band = { off: P.bandPct, step: ST.lim, tp: +tpP.toFixed(3), gap: gapP };
+    if (P.liveEnabled) await ensureLev(symbol, category);
     let qty = floorToStep(usdt / mid, inst.qtyStep);
     if (qty < parseFloat(inst.minQty)) qty = parseFloat(inst.minQty);
     if (qty * mid < inst.minNotional) qty = roundToStep(Math.ceil(inst.minNotional * 1.02 / mid / parseFloat(inst.qtyStep)) * parseFloat(inst.qtyStep), inst.qtyStep);
@@ -248,10 +295,11 @@ function create(host) {
     const idxOf = (d) => (HEDGE[symbol] ? (d > 0 ? 1 : 2) : 0);
     // the wanted orders
     let want = [];
-    if (!pd) want = [{ side: "Sell", d: -1, px: roundToStep(ref * (1 + off), inst.tickSize) }, { side: "Buy", d: 1, px: roundToStep(ref * (1 - off), inst.tickSize) }];
-    else for (let k = 1; k <= Math.max(0, Math.round(P.bandAdds)); k++) want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pos.avgPrice * (1 - pd * off * k), inst.tickSize), add: true });
+    const nL = Math.max(1, Math.round(P.bandLevels) || 3);
+    if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
+    else for (let k = 1; k <= Math.max(0, Math.round(P.bandAdds)); k++) want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pos.avgPrice * (1 - pd * step * k), inst.tickSize), add: true });   // dense adds beyond the average
     w.levels = want.map(x => ({ px: x.px, side: x.d })); w.targets = want.map(x => x.px); w.side = pd || 0;
-    w.dir = { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${P.bandTp}%, отступ ${P.bandTrailGap}%` : `тейк лимитом ${P.bandTp}%`} от средней` : `жду: SELL +${P.bandPct}% / BUY −${P.bandPct}% от цены (средняя ${n} свечей ${fmt(ref)})` };
+    w.dir = { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (средняя ${n} свечей ${fmt(ref)})` };
     if (!live) { log(`[SIM АВТОПИЛОТ] ${symbol}: ${want.map(x => `${x.side} @ ${x.px}`).join(" · ")}${pd ? "" : ` (цена ${fmt(mid)})`}`, "info"); return; }
     if (symbol !== (P.symbol || "").toUpperCase() && !pd) { if (w.ourOrders > 0) { await cancelOurOrders(symbol, category); w.ourOrders = 0; } w.status = "свободна"; return; }
     const open = await getOpenOrders(symbol, category), ours = open.filter(o => (o.orderLinkId || "").startsWith("sg_b_")), tps = open.filter(o => (o.orderLinkId || "").startsWith("sg_tp_"));
@@ -260,10 +308,10 @@ function create(host) {
       if (P.bandTrail) {
         // trailing take on the exchange: activates at the take level, then follows the best price at bandTrailGap % (works with the server down)
         for (const o of tps) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
-        const dist = roundToStep(pos.avgPrice * (P.bandTrailGap || 0.5) / 100, inst.tickSize), key = tpPx + "|" + dist;
+        const dist = roundToStep(pos.avgPrice * (gapP || 0.5) / 100, inst.tickSize), key = tpPx + "|" + dist;
         if (w.trailSet !== key) {
           try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", trailingStop: String(dist), activePrice: String(tpPx), positionIdx: pos.positionIdx });
-            w.trailSet = key; log(`${symbol}: 🎯 трейлинг-тейк: включится на ${tpPx} (+${P.bandTp}% от средней), дальше едет за лучшей ценой на ${P.bandTrailGap}%`, "ok"); }
+            w.trailSet = key; log(`${symbol}: 🎯 трейлинг-тейк: включится на ${tpPx} (+${tpP.toFixed(2)}% от средней = ${P.feeX}× комиссии), дальше едет за лучшей ценой на ${gapP}%`, "ok"); }
           catch (e) { if (String(e.code) === "34040") w.trailSet = key; else log(`${symbol}: трейлинг-тейк: ${e.message}`, "err"); }
         }
       } else {
@@ -274,13 +322,13 @@ function create(host) {
       // the stop of the whole position on the exchange (from the average)
       const slPx = roundToStep(pos.avgPrice * (1 - pd * sl), inst.tickSize);
       if (Math.abs((w.slSet || 0) - slPx) > parseFloat(inst.tickSize) / 2) {
-        try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: String(slPx), slTriggerBy: "LastPrice", positionIdx: pos.positionIdx }); w.slSet = slPx; log(`${symbol}: стоп позиции ${slPx} (−${P.bandSl}% от средней)`, "info"); }
+        try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: String(slPx), slTriggerBy: "LastPrice", positionIdx: pos.positionIdx }); w.slSet = slPx; log(`${symbol}: стоп позиции ${slPx} (−${P.bandSl}% от средней, плечо x${P.leverage})`, "info"); }
         catch (e) { if (String(e.code) === "34040") w.slSet = slPx; else log(`${symbol}: стоп: ${e.message}`, "err"); }
       }
     } else { w.slSet = 0; w.trailSet = null; }
     if (isSpike && !pd) { w.status = "SPIKE — лимиты держу"; }
     // sync the entry limits: the opposite side goes, the others follow the price behind it
-    const tol = ref * off * 0.15, keep = new Set();
+    const tol = ref * Math.min(off * 0.15, step * 0.4), keep = new Set();
     for (const o of ours) {
       const m = want.find((x, i2) => !keep.has(i2) && x.side === o.side && Math.abs(parseFloat(o.price) - x.px) <= tol);
       if (m) { keep.add(want.indexOf(m)); continue; }
@@ -477,7 +525,7 @@ function create(host) {
     ensureDayKey();
     return { autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
   return { start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };

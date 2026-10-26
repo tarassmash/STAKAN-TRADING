@@ -7,6 +7,7 @@
 "use strict";
 const WebSocketNode = (() => { try { return require("ws"); } catch (e) { return null; } })();
 const BT = require("./backtest");
+const FLOWMOD = require("./flow");
 
 const DEFAULTS = {
   on: false,
@@ -34,10 +35,13 @@ const DEFAULTS = {
   learnMin: 10,             // flip: every this many minutes re-learn take / turn / leverage on the last learnHours of 1-minute candles
   learnHours: 6,
   brakePct: 8,             // flip: the result since the last change below -brakePct % of the money -> cut the risk at once
-  autoOpt: true,           // flip: live self-tuning - losing reversals -> less leverage and a wider turn, a plus series -> leverage back up
+  autoOpt: true,
+  useFlow: true,           // flip: the tape + the book + speed + indicators steer entries and turns
+  flowGate: 0.35,          // flow against the direction stronger than this -> no new micro entries; at a turn -> close but wait for confirmation
+  earlyFlip: 0.6,          // flow against stronger than this and the pullback already half way -> turn early (a smaller loss)           // flip: live self-tuning - losing reversals -> less leverage and a wider turn, a plus series -> leverage back up
 };
-const NUM = { learnMin: [2, 240], learnHours: [1, 24], brakePct: [2, 50], ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
+const NUM = { flowGate: [0.05, 0.95], earlyFlip: [0.2, 1], learnMin: [2, 240], learnHours: [1, 24], brakePct: [2, 50], ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const BOOL = ["useFlow", "autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -54,6 +58,7 @@ function create(host) {
   const ST = { err: "", errAt: 0, price: 0, bid: 0, ask: 0, priceAt: 0, spec: null, hedge: false, busy: false, seen: new Set(), ex: {}, waitUntil: lsGet("bg.wait", 0), pubUp: false, privUp: false, dirAt: 0, mis: 0 };
   const setErr = (t) => { ST.err = t; ST.errAt = now(); log("bgrid", t); };
   const fmt = (v) => Number(v).toPrecision(6);
+  const FLOW = FLOWMOD.create({ bx });
 
   // one queue for private requests (≤ 4/s; the grid bot has its own), a 10006 pauses and retries
   let qTail = Promise.resolve(), qLast = 0;
@@ -79,12 +84,16 @@ function create(host) {
   function connectPub() {
     try { pub = new WS(PUB); } catch (e) { setTimeout(connectPub, 3000); return; }
     pub.on("open", () => { ST.pubUp = true; pubSym = ""; subPub(); clearInterval(pubPing); pubPing = setInterval(() => { try { pub.send(JSON.stringify({ op: "ping" })); } catch (e) { /* closed */ } }, 20000); });
-    pub.on("message", (raw) => { let j; try { j = JSON.parse(String(raw)); } catch (e) { return; } if (!j.topic || !j.topic.startsWith("tickers.") || !j.data) return; const d = j.data;
+    pub.on("message", (raw) => { let j; try { j = JSON.parse(String(raw)); } catch (e) { return; } if (!j.topic || !j.data) return;
+      if (j.topic.startsWith("orderbook.")) return FLOW.onBook(j);
+      if (j.topic.startsWith("publicTrade.")) return FLOW.onTrades(j.data);
+      if (!j.topic.startsWith("tickers.")) return; const d = j.data;
       if (d.lastPrice) ST.price = Number(d.lastPrice); if (d.bid1Price) ST.bid = Number(d.bid1Price); if (d.ask1Price) ST.ask = Number(d.ask1Price); ST.priceAt = now(); });
     pub.on("close", () => { ST.pubUp = false; clearInterval(pubPing); setTimeout(connectPub, 2000); });
     pub.on("error", () => {});
   }
-  function subPub() { if (!pub || !ST.pubUp || !B || pubSym === B.sym) return; if (pubSym) pub.send(JSON.stringify({ op: "unsubscribe", args: [`tickers.${pubSym}`] })); pub.send(JSON.stringify({ op: "subscribe", args: [`tickers.${B.sym}`] })); pubSym = B.sym; }
+  const topics = (s2) => [`tickers.${s2}`, `orderbook.50.${s2}`, `publicTrade.${s2}`];
+  function subPub() { if (!pub || !ST.pubUp || !B || pubSym === B.sym) return; if (pubSym) pub.send(JSON.stringify({ op: "unsubscribe", args: topics(pubSym) })); FLOW.reset(B.sym); pub.send(JSON.stringify({ op: "subscribe", args: topics(B.sym) })); pubSym = B.sym; }
   async function ticker(sym) {
     const x = ((await bx("/v5/market/tickers", { query: { category: "linear", symbol: sym } })).list || [])[0]; if (!x) throw new Error("немає " + sym);
     ST.price = Number(x.lastPrice); ST.bid = Number(x.bid1Price); ST.ask = Number(x.ask1Price); ST.priceAt = now(); return x;
@@ -262,6 +271,11 @@ function create(host) {
 
   async function openAt(j, way, why) {
     const out = [];
+    if (B.flip && P.useFlow && !why && FLOW.sym() === B.sym) {
+      const f = FLOW.snapshot();
+      if (f.trades1m >= 5 && f.score * B.d < -P.flowGate) { B.gate = B.gate || {}; B.gate.skipped = (B.gate.skipped || 0) + 1; if (now() - (ST.gateLogAt || 0) > 60000) { ST.gateLogAt = now(); engineLog(`📊 ${B.sym}: потік проти ${B.d > 0 ? "лонгів" : "шортів"} (стрічка ${f.cvd1}, стакан ${f.imb}, сила ${f.score}) — нові входи пропускаю`, "mute"); } return out; }
+    }
+    if ((B.pausedUntil && now() < B.pausedUntil) || B.hold) return out;
     const microN = B.units.filter(u => !u.runner).length;
     if (microN < B.maxUnits && !B.units.some(u => !u.runner && u.j === j)) {
       const u = { k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", tp: L(j + B.d), sl: L(j - B.d * P.stopSteps), way };
@@ -348,6 +362,9 @@ function create(host) {
       const tp = +Math.max(2 * (B.fee || 0.075), Math.min(1.5, Number(o.takePct))).toFixed(3);
       if (Math.abs(tp - B.stepPct) > 1e-9) { ch.push(`тейк ${B.stepPct}%→${tp}%`); B.stepPct = tp; B.anchor = x; B.last = idxOf(x); }
     }
+    if (typeof o.useFlow === "boolean" && o.useFlow !== P.useFlow) { P.useFlow = o.useFlow; save(); ch.push(`потік ${o.useFlow ? "увімкнено" : "вимкнено"}`); }
+    if (o.flowGate != null && Number.isFinite(Number(o.flowGate))) { const g = Math.max(0.05, Math.min(0.95, Number(o.flowGate))); if (Math.abs(g - P.flowGate) > 0.009) { ch.push(`поріг потоку ${P.flowGate}→${+g.toFixed(2)}`); P.flowGate = +g.toFixed(2); save(); } }
+    if (o.maxUnits != null && Number.isFinite(Number(o.maxUnits))) { const m = Math.max(1, Math.min(10, Math.round(Number(o.maxUnits)))); if (m !== P.maxUnits) { ch.push(`юнітів ${P.maxUnits}→${m}`); P.maxUnits = m; save(); sizeUnits(); } }
     if (ch.length) {
       B.tuneAt = now(); B.flipsSince = 0; B.tunes = (B.tunes || []).concat({ at: now(), ch: ch.join(", "), why, who }).slice(-20); saveB();
       engineLog(`${who === "ai" ? "🤖 AI" : who === "learn" ? "⚡ Навчання" : "🧪 Самонастройка"} ${B.sym}: ${ch.join(", ")} — ${why}`, "gold-t");
@@ -432,13 +449,23 @@ function create(host) {
       sinceLastChange: { min: Math.round((now() - (B.tuneAt || B.startedAt)) / 60000), trades: since.length, pnl: +since.reduce((a, t) => a + t.pnl, 0).toFixed(4), flips: B.flipsSince || 0 },
       lastTrades: last.map(t => ({ min: Math.round((now() - t.at) / 60000), sym: t.sym, d: t.d, pnl: t.pnl, how: t.how, lev: t.lev, fs: t.fs })),
       changes: (B.tunes || []).slice(-6).map(t => ({ min: Math.round((now() - t.at) / 60000), ch: t.ch, who: t.who })),
+      flow: FLOW.sym() === B.sym ? FLOW.snapshot() : null, flowGate: P.flowGate, useFlow: P.useFlow, maxUnits: P.maxUnits, hold: !!B.hold, gate: B.gate || {}, learned: ST.learned || null,
       history: ST.bt ? ST.bt.results.filter(r2 => r2.roi != null).slice(0, 6).map(r2 => ({ sym: r2.sym, roi: r2.roi, maxDD: r2.maxDD, lev: r2.lev, fs: r2.fs, flips: r2.flips })) : [] };
   }
+  // AI: take a direction now / pause new entries
+  async function forceDir(d, why) {
+    if (!B || !B.flip || (d !== 1 && d !== -1)) return "";
+    if (d !== B.d) { for (const u of B.units.slice()) await closeUnit(u, "напрям від AI"); B.d = d; }
+    B.hold = null; B.ext = ST.price; B.last = idxOf(ST.price); saveB();
+    engineLog(`🤖 AI ${B.sym}: ${d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} зараз — ${why}`, d > 0 ? "up" : "down");
+    if (P.on) await openAt(B.last, d, "AI"); return "ok";
+  }
+  function pause(min, why) { if (!B) return ""; B.pausedUntil = now() + Math.max(1, Math.min(120, min)) * 60000; saveB(); engineLog(`🤖 AI ${B.sym}: пауза нових входів на ${Math.round(min)} хв — ${why}`, "gold-t"); return "ok"; }
   async function changeCoin(sym, why) {
     if (!B) return "";
     engineLog(`🤖 AI: міняю монету ${B.sym}${sym ? " → " + sym : ""} — ${why}`, "gold-t");
     ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3;
-    if (sym) { P.autoCoin = false; P.symbol = sym; save(); }
+    if (sym) ST.nextSym = /USDT$/.test(sym) ? sym : sym + "USDT";   // a one-time hint: after it the bot picks coins itself again
     B.leaving = true; saveB(); for (const u of B.units.slice()) await closeUnit(u, "зміна монети (AI)");
     return "ok";
   }
@@ -448,11 +475,12 @@ function create(host) {
     if (ST.busy) return; ST.busy = true;
     try {
       if (!keys || !keys.key) return;
-      if (!B) { if (P.on && now() >= ST.waitUntil) { try { await start(); } catch (e) { setErr(e.message); ST.waitUntil = now() + (e.wait || 1) * 60000; lsSet("bg.wait", ST.waitUntil); if (e.wait) engineLog("⏸ " + e.message, "gold-t"); } } return; }
+      if (!B) { if (P.on && now() >= ST.waitUntil) { try { const hint = ST.nextSym; ST.nextSym = null; await start(hint ? { sym: hint, force: true } : {}); } catch (e) { setErr(e.message); ST.waitUntil = now() + (e.wait || 1) * 60000; lsSet("bg.wait", ST.waitUntil); if (e.wait) engineLog("⏸ " + e.message, "gold-t"); } } return; }
       if (!ST.spec) { const s = await spec(B.sym); ST.spec = { tickStr: s.tick, step: s.step, minQty: Number(s.minQty || 0), minNotional: Number(s.minNotional || 5), maxLev: Number(s.maxLev || 10) }; }
       if (!ST.price || now() - ST.priceAt > 10000) await ticker(B.sym);
       subPub();
       await updateDir(false);
+      if (B.flip && P.useFlow) FLOW.refresh();
       const x = ST.price;
       if (B.resync) { B.resync = false; B.last = idxOf(x); saveB(); }
       if (B.straddle) { await checkStraddle(x); if (B.straddle) { B.idleAt = now(); return; } }
@@ -474,8 +502,27 @@ function create(host) {
         B.ext = B.d > 0 ? Math.max(B.ext || x, x) : Math.min(B.ext || x, x);
         if (B.flipSteps < P.flipMin) { B.flipSteps = P.flipMin; saveB(); engineLog(`🔁 ${B.sym}: розворот тепер лише при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * B.stepPct).toFixed(2)}%) — шум більше не розвертає`, "gold-t"); }
         const back = Math.pow(r(), B.flipSteps);
-        if ((B.d > 0 && x <= B.ext / back) || (B.d < 0 && x >= B.ext * back)) {
+        const f = P.useFlow && FLOW.sym() === B.sym ? FLOW.snapshot() : null, live = f && f.trades1m >= 5;
+        // a hold after a turn the flow did not confirm: wait for the flow, a level in the new direction, or a new extreme of the old one
+        if (B.hold) {
+          const h = B.hold, lvl = Math.pow(r(), 1);
+          if ((h.old > 0 && x > h.ext) || (h.old < 0 && x < h.ext)) {   // the pullback was absorbed: the old direction goes on
+            B.d = h.old; B.ext = x; B.last = idxOf(x); B.hold = null; B.gate = B.gate || {}; B.gate.saved = (B.gate.saved || 0) + 1; saveB();
+            engineLog(`📊 ${B.sym}: відкат поглинули — продовжую ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"} без розвороту (уникнув пилки)`, "up");
+            if (P.on) await openAt(B.last, B.d, "продовження"); return;
+          }
+          const confirmed = (live && f.score * B.d > 0.1) || (B.d > 0 ? x >= h.px * lvl : x <= h.px / lvl) || now() - h.at > 15 * 60000;
+          if (!confirmed) return;
+          B.hold = null; B.ext = x; B.last = idxOf(x); saveB();
+          engineLog(`📊 ${B.sym}: розворот підтверджено${live ? ` (потік ${f.score})` : ""} — входжу в ${B.d > 0 ? "▲ ЛОНГ" : "▼ ШОРТ"}`, B.d > 0 ? "up" : "down");
+          if (P.on) await openAt(B.last, B.d, "розворот"); return;
+        }
+        const full = (B.d > 0 && x <= B.ext / back) || (B.d < 0 && x >= B.ext * back);
+        const half = (B.d > 0 && x <= B.ext / Math.sqrt(back)) || (B.d < 0 && x >= B.ext * Math.sqrt(back));
+        const early = !full && half && live && f.score * B.d < -P.earlyFlip;
+        if (full || early) {
           const nd = -B.d, was = B.ext;
+          if (early) { B.gate = B.gate || {}; B.gate.early = (B.gate.early || 0) + 1; engineLog(`📊 ${B.sym}: сильний потік проти (сила ${f.score}, стрічка ${f.cvd1}, швидкість ×${f.speedX}) — розвертаюсь раніше, на півдорозі`, "gold-t"); }
           for (const u of B.units.slice()) await closeUnit(u, "розворот");
           B.d = nd; B.ext = x; B.last = idxOf(x); B.flips = (B.flips || 0) + 1; B.flipsSince = (B.flipsSince || 0) + 1;
           sizeUnits();   // the balance changed: the new direction's units fit the money now
@@ -487,6 +534,9 @@ function create(host) {
             B.leaving = true; saveB(); ST.cool = ST.cool || {}; ST.cool[B.sym] = now() + 3 * 3600e3;
             return;
           }
+          // the flow still pushes the old way -> positions closed, but the new direction waits for confirmation
+          if (live && f.score * (-nd) > P.flowGate) { B.hold = { at: now(), px: x, ext: was, old: -nd }; B.gate = B.gate || {}; B.gate.holds = (B.gate.holds || 0) + 1; saveB();
+            engineLog(`📊 ${B.sym}: потік ще за ${-nd > 0 ? "покупців" : "продавців"} (сила ${f.score}) — позиції закрив, у ${nd > 0 ? "лонг" : "шорт"} увійду після підтвердження`, "mute"); return; }
           if (P.on) await openAt(B.last, nd, "розворот");
           return;
         }
@@ -579,7 +629,7 @@ function create(host) {
   }
   function view() {
     const x = ST.price, day = TR.filter(t => t.at >= now() - 86400e3);
-    const b = B && { learned: ST.learned || null, levCap: B.levCap || null, tunes: (B.tunes || []).slice(-5).reverse(), flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
+    const b = B && { flow: B.flip && FLOW.sym() === B.sym ? FLOW.snapshot() : null, hold: !!B.hold, gate: B.gate || {}, paused: B.pausedUntil > now() ? Math.ceil((B.pausedUntil - now()) / 60000) : 0, learned: ST.learned || null, levCap: B.levCap || null, tunes: (B.tunes || []).slice(-5).reverse(), flip: !!B.flip, flipSteps: B.flipSteps, flips: B.flips || 0, leaving: !!B.leaving, ext: B.ext ? +fmt(B.ext) : null, turnPx: B.flip && B.ext ? +fmt(B.d > 0 ? B.ext / Math.pow(1 + B.stepPct / 100, B.flipSteps) : B.ext * Math.pow(1 + B.stepPct / 100, B.flipSteps)) : null, box: B.box ? { up: +fmt(B.box.up), dn: +fmt(B.box.dn) } : null, straddle: B.straddle ? { up: +fmt(B.straddle.up), dn: +fmt(B.straddle.dn), pct: B.straddle.pct } : null, rearm: !!B.rearm, manual: !!B.manual, scalp: !!B.scalp, fee: B.fee, pending: !!B.pendingRestart, sym: B.sym, stepPct: B.stepPct, qty: B.qty, lev: B.lev, maxUnits: B.maxUnits, d: B.d, dir: B.dirInfo || null, profit: +(B.profit || 0).toFixed(4), wins: B.wins || 0, losses: B.losses || 0, bt: B.bt, startedAt: B.startedAt,
       levels: [-3, -2, -1, 0, 1, 2, 3].map(k => +fmt(L(B.last + k + (k > 0 ? 0 : 0)))),
       units: B.units.map(u => ({ d: u.d, runner: !!u.runner, state: u.state, e: u.e || null, tp: u.tp ? +fmt(u.tp) : null, sl: u.sl ? +fmt(u.sl) : null, pnl: u.e && x ? +((x - u.e) * u.qty * u.d).toFixed(4) : null, way: u.way })),
       unreal: +B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + (x - u.e) * u.qty * u.d, 0).toFixed(4) };
@@ -596,6 +646,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { learn, tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { flow: () => FLOW.snapshot(), forceDir, pause, learn, tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

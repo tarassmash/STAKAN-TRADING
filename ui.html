@@ -304,9 +304,11 @@
       <option value="follow">🧭 Автопилот за ценой — лимитки ±% в обе стороны</option>
     </select>
     <div id="bandBox" style="display:none">
-      <div class="info"><b style="color:#0ecb81">🧭 Автопилот за ценой:</b> только лимитки. SELL выше цены и BUY ниже на заданный %, едут за ценой следом (по средней последних свечей — резкий прострел их исполняет). Исполнилась одна → тейк лимитом от средней, противоположная снимается, добор дальше, стоп на бирже. После тейка — снова пара вокруг цены.</div>
+      <div class="info"><b style="color:#0ecb81">🧭 Автопилот за ценой:</b> только лимитки. SELL выше цены и BUY ниже на заданный %, едут за ценой следом (по средней последних свечей — резкий прострел их исполняет). Исполнилась одна → трейлинг-тейк (с уровня тейка едет за лучшей ценой) или тейк лимитом, противоположная снимается, добор дальше, стоп на бирже. После тейка — снова пара вокруг цены.</div>
       <div class="row"><label>Отступ лимиток %</label><input type="number" id="bandPct" value="2" min="0.1" step="0.1" /></div>
-      <div class="row"><label>Тейк лимитом %</label><input type="number" id="bandTp" value="1" min="0.1" step="0.1" /></div>
+      <div class="row"><label>Тейк % (старт трейлинга)</label><input type="number" id="bandTp" value="1" min="0.1" step="0.1" /></div>
+      <div class="row"><label>Трейлинг тейка</label><input type="checkbox" id="bandTrail" /></div>
+      <div class="row"><label>Отступ трейлинга %</label><input type="number" id="bandTrailGap" value="0.5" min="0.1" step="0.1" /></div>
       <div class="row"><label>Стоп % (на бирже)</label><input type="number" id="bandSl" value="3" min="0.3" step="0.1" /></div>
       <div class="row"><label>Доборов</label><input type="number" id="bandAdds" value="1" min="0" max="5" step="1" /></div>
       <div class="row"><label>Следом за средней N свечей</label><input type="number" id="bandRef" value="5" min="1" max="60" step="1" /></div>
@@ -464,8 +466,8 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
   const minis = {};
-  const NUMS = ['bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+  const NUMS = ['bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
   function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
@@ -596,7 +598,7 @@
     $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
     const cw = G.watches.find(x => x.symbol === (P.symbol || '').toUpperCase());
     $('bandBox').style.display = P.strategy === 'follow' ? '' : 'none'; $('bandUsdt').textContent = P.orderUsdt;
-    $('dirText').textContent = P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ (тейк лимитом)' : cw.dir.d < 0 ? '▼ ШОРТ (тейк лимитом)' : `± ${P.bandPct}% лимитки`) : '—';
+    $('dirText').textContent = P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : cw.dir.d < 0 ? '▼ ШОРТ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : `± ${P.bandPct}% лимитки`) : '—';
     $('dirText').style.color = P.strategy !== 'follow' ? 'var(--red)' : cw && cw.dir && cw.dir.d > 0 ? 'var(--green)' : cw && cw.dir && cw.dir.d < 0 ? 'var(--red)' : 'var(--muted)';
     $('dirText').title = cw && cw.dir ? cw.dir.why : '';
     $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' || P.strategy === 'follow' ? '1m движение' : 'пампы'})` : 'ждёт Старт';

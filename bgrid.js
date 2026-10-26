@@ -26,11 +26,12 @@ const DEFAULTS = {
   scalp: false,            // ⚡ super scalping: takes of scalpStep % on every micro move (the step is fixed, the coin is still chosen on history)
   scalpStep: 0.3,
   flip: false,             // 🔁 no stops, no EMA: the price sets the direction; a pullback of flipSteps levels from the best price closes all and turns around
-  flipSteps: 0,            // 0 = chosen per coin on history (2-5 levels)
+  flipSteps: 0,            // 0 = chosen per coin on history (flipMin .. flipMin+2 levels)
+  flipMin: 4,              // never turn on a smaller pullback than this many levels (2 levels = noise turns it back and forth)
   sawFlips: 4,             // this many turns within an hour = a saw -> leave the coin
   autoInv: false,          // the size = 90% of the balance (taken at every new start)
 };
-const NUM = { flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
+const NUM = { flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
 const BOOL = ["flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
@@ -181,7 +182,7 @@ function create(host) {
         let best = null;
         if (P.flip) {   // the take is fixed (scalpStep, at least 2 × fees); the turn distance is chosen on history
           const st = +Math.max(P.scalpStep, 2 * (taker + maker)).toFixed(3);
-          for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [2, 3, 4, 5]) {
+          for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [P.flipMin, P.flipMin + 1, P.flipMin + 2]) {
             const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { stepPct: st, flipSteps: fs, maxUnits: units, investment: P.investment, lev, maker, taker, runner: P.runner }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
             if (!best || res.roi > best.roi) best = Object.assign({ st, fs }, res);
           }
@@ -214,7 +215,7 @@ function create(host) {
     B.last = idxOf(ST.price);
     if (P.flip) {   // the first direction: the EMA if it has one, else the last hour's move
       const cs = await candles5m(pl.sym, 200), dd = dirOf(cs), h = cs.length > 12 ? cs[cs.length - 1].c - cs[cs.length - 13].c : 1;
-      Object.assign(B, { flip: true, flipSteps: pl.fs || 3, d: dd.d || (h < 0 ? -1 : 1), ext: ST.price, flipAt: [] });
+      Object.assign(B, { flip: true, flipSteps: Math.max(pl.fs || P.flipMin, P.flipMin), d: dd.d || (h < 0 ? -1 : 1), ext: ST.price, flipAt: [] });
     }
     saveB(); subPub();
     if (B.flip) {
@@ -346,6 +347,7 @@ function create(host) {
         // units left from the old direction (their entry was still in flight at the turn) are closed
         for (const u of B.units.slice()) if (u.d !== B.d && u.state === "open" && !u.closing) await closeUnit(u, "розворот");
         B.ext = B.d > 0 ? Math.max(B.ext || x, x) : Math.min(B.ext || x, x);
+        if (B.flipSteps < P.flipMin) { B.flipSteps = P.flipMin; saveB(); engineLog(`🔁 ${B.sym}: розворот тепер лише при відкаті на ${B.flipSteps} рівні (${(B.flipSteps * B.stepPct).toFixed(2)}%) — шум більше не розвертає`, "gold-t"); }
         const back = Math.pow(r(), B.flipSteps);
         if ((B.d > 0 && x <= B.ext / back) || (B.d < 0 && x >= B.ext * back)) {
           const nd = -B.d, was = B.ext;

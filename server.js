@@ -169,7 +169,7 @@ async function act(b) {
     const sym = await coinOf(b0.sym); if (sym && sym.err) return sym.err;
     BG.setParams({ flip: true, flipSteps: 0, scalp: true, scalpStep: 0.3, leverage: 50, autoCoin: !sym, symbol: sym || "", autoTune: true, btNeedPlus: true, runner: true, autoInv: true });
     const b = BG.view().b;
-    if (b && (!b.flip || (sym && b.sym !== sym))) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
+    if (b && (!b.flip || !b.levCap || (sym && b.sym !== sym))) {   /* !levCap = started by the old version: re-pick the leverage on history */ if (b.units.length) await BG.closeAll(); else await BG.restart(); }
     BG.setOn(true);
     return `Запущено${sym ? " на " + sym : ""}: баланс ${ACC.equity.toFixed(2)} USDT, x50, тейки 0.3%, розворот замість стопу${sym ? "" : " — підбираю монету"}`;
   }

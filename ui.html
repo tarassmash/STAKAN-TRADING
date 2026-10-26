@@ -359,6 +359,20 @@
       <input type="number" id="maxAtrPct" value="4" min="0.5" step="0.1" />
     </div>
 
+    <h2>Автопилот 24/7</h2>
+    <div class="row">
+      <label>Автопилот (сам ищет цели)</label>
+      <input type="checkbox" id="autopilot" />
+    </div>
+    <div class="row">
+      <label>Скан каждые (мин)</label>
+      <input type="number" id="autoScanMin" value="5" min="1" step="1" />
+    </div>
+    <div class="row">
+      <label>Что искать</label>
+      <select id="autoScanMode"><option value="pump">Пампы под Short</option><option value="ultra">Ультра-волатильные 1m</option></select>
+    </div>
+
     <button class="btn btn-start" id="startBtn">▶ Старт</button>
     <button class="btn btn-stop" id="stopBtn">■ Стоп</button>
     <button class="btn btn-once" id="onceBtn">1 цикл</button>
@@ -373,6 +387,7 @@
       <div class="row"><span>OI тренд</span><span class="val" id="oiTrendText">—</span></div>
       <div class="row"><span>CVD тренд</span><span class="val" id="cvdTrendText">—</span></div>
       <div class="row"><span>Фильтр Щукина</span><span class="val" id="shukinFilterText">—</span></div>
+      <div class="row"><span>Автопилот</span><span class="val" id="autoText">—</span></div>
       <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
       <div class="row"><span>Win / Loss</span><span class="val" id="wlText">0 / 0</span></div>
@@ -403,6 +418,7 @@
       <div><div class="k">Entry</div><div class="v" id="posEntry">—</div></div>
       <div><div class="k">uPnL</div><div class="v" id="posUpnl">—</div></div>
     </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Красные пунктиры — уровни SELL-сетки (едут за ценой каждый цикл), жёлтая — Mid</span><span id="chartLive" style="color:var(--green)"></span></div>
     <div id="chart"></div>
     <div class="sub-charts">
       <div class="sub-chart-wrap">
@@ -433,8 +449,8 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
   const minis = {};
-  const NUMS = ['gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+  const NUMS = ['autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
   function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
@@ -443,7 +459,7 @@
 
   // ---------- settings: page <-> server ----------
   function readForm() {
-    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value };
+    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value, autoScanMode: $('autoScanMode').value };
     for (const k of NUMS) o[k] = parseFloat($(k).value);
     for (const k of BOOLS) o[k] = $(k).checked;
     return o;
@@ -454,7 +470,7 @@
     for (const k of NUMS) if ($(k) !== act) $(k).value = P[k];
     for (const k of BOOLS) $(k).checked = !!P[k];
     if ($('symbol') !== act) $('symbol').value = P.symbol;
-    $('interval').value = P.interval; $('category').value = P.category;
+    $('interval').value = P.interval; $('category').value = P.category; if ($('autoScanMode') !== act) $('autoScanMode').value = P.autoScanMode || 'pump';
   }
   document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('input', () => { DIRTY = true; }));
   document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('change', () => { if (el.id !== 'symbol' && el.id !== 'interval') act('save'); }));
@@ -491,6 +507,24 @@
     [['volChart', volChart], ['oiChart', oiChart], ['cvdChart', cvdChart]].forEach(([id, c]) => c && c.applyOptions({ width: $(id).clientWidth, height: $(id).clientHeight || 110 }));
   }
   const uniq = (pts) => { const m = new Map(); for (const p of pts) if (p && isFinite(p.time) && p.time) m.set(p.time, p); return [...m.values()].sort((a, b) => a.time - b.time); };
+  // every 5 s: the last candles, OI and the filter are updated in place (the zoom stays)
+  let liveBusy = false;
+  async function liveChart() {
+    if (liveBusy || !chart || !chartSym) return; liveBusy = true;
+    try {
+      const r = await fetch(`/api/chart?symbol=${encodeURIComponent(chartSym)}&interval=${chartIv}`).then(r => r.json());
+      if (r.error || r.symbol !== chartSym) return;
+      const c = uniq(r.candles || []); if (!c.length) return;
+      const have = candleSeries.data(), lastT = have.length ? have[have.length - 1].time : 0;
+      if (c[c.length - 1].time - lastT > 3 * 3600) return loadChart(true);
+      let cum = 0; const cvd = c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; });
+      for (let i = 0; i < c.length; i++) { const x = c[i]; if (x.time < lastT - 120) continue;
+        candleSeries.update(x); volSeries.update({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update(cvd[i]); }
+      const oi = uniq(r.oi || []); if (oi.length) oiSeries.setData(oi);
+      if (r.sig) showSig(r.sig);
+      $('chartLive').textContent = '● LIVE ' + new Date().toLocaleTimeString('ru-RU');
+    } catch (e) { /* next tick */ } finally { liveBusy = false; }
+  }
   async function loadChart(force) {
     const sym = ($('symbol').value || '').toUpperCase().trim(), iv = $('interval').value;
     if (!sym || !chart) return;
@@ -544,6 +578,8 @@
     const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
     if (info) info.innerHTML = P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
     $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
+    $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' ? '1m вола' : 'пампы'})` : 'ждёт Старт';
+    $('autoText').style.color = P.autopilot && P.running ? 'var(--green)' : 'var(--muted)';
     $('cyclesText').textContent = G.cycles; $('tradesText').textContent = G.trades; $('wlText').textContent = G.wins + ' / ' + G.losses;
     $('dayPnlText').textContent = (G.dayPnl >= 0 ? '+' : '') + Number(G.dayPnl).toFixed(2); $('dayPnlText').style.color = G.dayPnl > 0 ? 'var(--green)' : G.dayPnl < 0 ? 'var(--red)' : '';
     const cur = (P.symbol || '').toUpperCase(), w = G.watches.find(x => x.symbol === cur);
@@ -621,7 +657,8 @@
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
   load().then(() => loadChart(true));
   setInterval(load, 2000);
-  setInterval(() => loadChart(true), 60000);
+  setInterval(liveChart, 5000);
+  setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { const s2 = (S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
 })();
 
 </script>

@@ -9,17 +9,18 @@ const DEFAULTS = {
   gridStepPct: 0.25, gridLevels: 4, tpPct: 0.30, slPct: 1.0, orderUsdt: 20, maxDailyLoss: 15, intervalSec: 3,
   liveEnabled: false, makerExit: true, superSpikeProtect: true, maxSpikePct: 0.40, volFilter: true, minAtrPct: 0.15, maxAtrPct: 4,
   shukinMode: false, running: false,
+  autopilot: true, autoScanMin: 5, autoScanMode: "pump",   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
-const BOOLS = ["liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
+const NUMS = ["autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const BOOLS = ["autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
   const P = Object.assign({}, DEFAULTS, lsGet("sg.p", {}));
   const save = () => lsSet("sg.p", P);
-  const S = Object.assign({ cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
-  const saveS = () => lsSet("sg.s", { cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
+  const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
+  const saveS = () => lsSet("sg.s", { lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
   const LOG = lsGet("sg.log", []);
   let busy = false, timer = null, status = "ВЫКЛ", conn = { ok: null, text: "—" }, shukinSig = null, lastSave = 0;
@@ -182,6 +183,11 @@ function create(host) {
       if (P.makerExit) { const open = await getOpenOrders(symbol, category); if (!open.some(o => (o.orderLinkId || "").startsWith("sg_tp_"))) await placeMakerExit(symbol, category, pos, entry * (1 - tpPct), inst); }
       if (!shukin) return;   // normal mode: no new entries while in a position; Shukin: keep adding above (averaging)
     }
+    // a new grid only on the current target; another coin is only led while it holds a short (its stray grid orders are removed)
+    if (symbol !== (P.symbol || "").toUpperCase() && !(pos.size > 0)) {
+      if (w.ourOrders > 0) { await cancelOurOrders(symbol, category); w.ourOrders = 0; }
+      w.status = "свободна"; return;
+    }
     if (isSpike || !volOk) { w.status = isSpike ? "SPIKE PAUSE" : "VOL FILTER"; return; }
     if (shukin) {
       let oi = w.oi || [];
@@ -193,7 +199,8 @@ function create(host) {
     const ourSells = (await getOpenOrders(symbol, category)).filter(o => (o.orderLinkId || "").startsWith("sg_s_") && o.side === "Sell");
     const tol = mid * gridStep * 0.35, matched = new Set(), toCancel = [];
     for (const o of ourSells) { const px = parseFloat(o.price); if (!px || isNaN(px)) { toCancel.push(o); continue; } let found = null; for (const t of targets) if (Math.abs(px - t) <= tol) { found = t; break; } if (found != null && !matched.has(found)) matched.add(found); else toCancel.push(o); }
-    for (const o of toCancel) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); log(`${symbol}: снят лишний @ ${o.price}`, "info"); } catch (e) { /* gone */ } }
+    if (toCancel.length && ourSells.length) log(`${symbol}: ↕ трейлинг сетки за ценой ${fmt(mid)} — переставляю ${toCancel.length} ур.`, "info");
+    for (const o of toCancel) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
     for (const px of targets) {
       if (matched.has(px)) continue;
       const tp = roundToStep(px * (1 - tpPct), inst.tickSize), sl = (!shukin || pos.size === 0) ? roundToStep(px * (1 + slPct), inst.tickSize) : null;
@@ -310,6 +317,28 @@ function create(host) {
     return found.length + " горячих пар";
   }
 
+  // ---------- autopilot: every autoScanMin minutes - scan, move the grid to the best target ----------
+  let autoBusy = false;
+  async function autopilot() {
+    if (!P.running || !P.autopilot || autoBusy || now() - (S.lastAuto || 0) < Math.max(1, P.autoScanMin) * 60000) return;
+    autoBusy = true; S.lastAuto = now();
+    const old = (P.symbol || "").toUpperCase();
+    try {
+      log(`🤖 Автопилот: скан ${P.autoScanMode === "ultra" ? "ультра-волатильных 1m" : "пампов под Short"}…`, "info");
+      if (P.autoScanMode === "ultra") await scanUltraVol1m(); else await scanPump();
+      // hysteresis: the current coin stays while it is still among the top-3 targets
+      if (old && S.targets.slice(0, 3).some(t => t.symbol === old)) { P.symbol = old; save(); }
+      const neu = (P.symbol || "").toUpperCase();
+      if (neu && neu !== old) {
+        const w = W[old], hasPos = w && w.pos && w.pos.size > 0;
+        if (!hasPos && P.liveEnabled && keys()) await cancelOurOrders(old, P.category);   // the old coin is free: its grid is removed
+        log(`🤖 Автопилот: сетка → ${neu}${hasPos ? ` (по ${old} открыт шорт — веду его до TP/SL)` : old ? ` (с ${old} сетка снята)` : ""}`, "ok");
+      } else log(`🤖 Автопилот: остаюсь на ${neu || old}`, "info");
+    } catch (e) { log("Автопилот: " + e.message, "err"); }
+    finally { autoBusy = false; saveS(); }
+  }
+  setInterval(() => { autopilot().catch(() => {}); }, 30000);
+
   // ---------- commands from the page ----------
   async function start() {
     if (P.liveEnabled && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
@@ -332,6 +361,7 @@ function create(host) {
     if (typeof o.symbol === "string" && o.symbol.trim()) { const s = o.symbol.trim().toUpperCase(); if (s !== P.symbol) { P.symbol = s; ch.push("symbol"); } }
     if (["1", "3", "5", "15"].includes(String(o.interval)) && String(o.interval) !== P.interval) { P.interval = String(o.interval); ch.push("interval"); }
     if (["linear", "inverse"].includes(o.category) && o.category !== P.category) { P.category = o.category; ch.push("category"); }
+    if (["pump", "ultra"].includes(o.autoScanMode) && o.autoScanMode !== P.autoScanMode) { P.autoScanMode = o.autoScanMode; ch.push("autoScanMode"); }
     save(); if (ch.includes("intervalSec")) schedule();
     if (ch.includes("liveEnabled")) log(P.liveEnabled ? "⚠ LIVE включён: реальные ордера" : "Live выключен: только симуляция", P.liveEnabled ? "err" : "info");
     return ch;
@@ -349,7 +379,7 @@ function create(host) {
 
   function view() {
     ensureDayKey();
-    return { params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    return { autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, targets: w.targets || [], spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }

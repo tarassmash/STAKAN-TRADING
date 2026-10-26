@@ -162,6 +162,10 @@ http.createServer(async (req, res) => {
   } catch (e) { return json(500, { error: String(e && e.message || e) }); }
 }).listen(PORT, "0.0.0.0", () => log(`SELL GRID :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
 
+// 24/7: a stray error is logged, the server keeps running (and Railway restarts it if it ever stops)
+process.on("unhandledRejection", (e) => log("unhandledRejection", e && e.message || e));
+process.on("uncaughtException", (e) => log("uncaughtException", e && e.stack || e));
+
 // ---------------- one-time: the previous bot of this project («Пробій після стиснення») is retired ----------------
 // its pending entries are cancelled and its positions closed, otherwise the sell grid would take them over
 async function retireSqueeze() {

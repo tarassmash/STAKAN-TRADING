@@ -196,12 +196,13 @@ module.exports.regimeOf = regimeOf;
 // Every level crossed opens a unit in the current direction with a micro take one level further (+ one runner without a take).
 // When the price pulls back flipSteps levels from its best point, everything is closed and the direction turns.
 function simulateFlip(c, o) {
-  const { stepPct, flipSteps = 2, maxUnits = 6, investment, lev, maker = 0.02, taker = 0.055, runner = true } = o;
+  const { stepPct, flipSteps = 2, maxUnits = 6, investment, lev, maker = 0.02, taker = 0.055, runner = true, invert = false } = o;
+  const sg = invert ? -1 : 1, tpFee = invert ? taker : maker;   // the mirror: the opposite side of every trade, its "take" exits by market
   const r = 1 + stepPct / 100, a0 = c[0].o, lr = Math.log(r);
   const L = (j) => a0 * Math.pow(r, j), idx = (x) => Math.floor(Math.log(x / a0) / lr);
   const q = investment * lev / (maxUnits + 1) / a0, back = Math.pow(r, flipSteps);
   let D = c.length > 12 && c[12].c < c[0].o ? -1 : 1, ext = a0, last = idx(a0), units = [], run = null, profit = 0, fees = 0, wins = 0, losses = 0, flips = 0, peak = 0, dd = 0;
-  const shut = (x) => { for (const u of units.concat(run ? [run] : [])) { const p = (x - u.e) * q * u.d; profit += p; fees += q * x * taker / 100; p > 0 ? wins++ : losses++; } units = []; run = null; };
+  const shut = (x) => { for (const u of units.concat(run ? [run] : [])) { const p = (x - u.e) * q * u.d * sg; profit += p; fees += q * x * taker / 100; p > 0 ? wins++ : losses++; } units = []; run = null; };
   const open = (j, way) => {
     const e = L(j);
     if (units.length < maxUnits && !units.some(u => u.j === j)) { units.push({ d: D, j, e, tp: L(j + D) }); fees += q * e * taker / 100; }
@@ -209,10 +210,10 @@ function simulateFlip(c, o) {
   };
   for (const k of c) {
     for (const x of (k.c >= k.o ? [k.o, k.l, k.h, k.c] : [k.o, k.h, k.l, k.c])) {
-      const eqNow = profit - fees + units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d, 0);
+      const eqNow = profit - fees + units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d * sg, 0);
       peak = Math.max(peak, eqNow); dd = Math.max(dd, peak - eqNow);
       if (investment + eqNow <= investment * 0.05) return { roi: -100, wins, losses, flips, maxDD: 100, liquidated: true };
-      units = units.filter(u => { if ((u.d > 0 && x >= u.tp) || (u.d < 0 && x <= u.tp)) { profit += (u.tp - u.e) * q * u.d; fees += q * u.tp * maker / 100; wins++; return false; } return true; });
+      units = units.filter(u => { if ((u.d > 0 && x >= u.tp) || (u.d < 0 && x <= u.tp)) { const p = (u.tp - u.e) * q * u.d * sg; profit += p; fees += q * u.tp * tpFee / 100; p > 0 ? wins++ : losses++; return false; } return true; });
       ext = D > 0 ? Math.max(ext, x) : Math.min(ext, x);
       if ((D > 0 && x <= ext / back) || (D < 0 && x >= ext * back)) {   // pulled back flipSteps levels: turn around
         shut(x); D = -D; ext = x; flips++; last = idx(x); open(last, D); continue;
@@ -225,7 +226,7 @@ function simulateFlip(c, o) {
       }
     }
   }
-  const x = c[c.length - 1].c, unreal = units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d, 0);
+  const x = c[c.length - 1].c, unreal = units.concat(run ? [run] : []).reduce((s, u) => s + (x - u.e) * q * u.d * sg, 0);
   return { roi: +((profit - fees + unreal) / investment * 100).toFixed(2), wins, losses, flips, maxDD: +(dd / investment * 100).toFixed(1) };
 }
 module.exports.simulateFlip = simulateFlip;

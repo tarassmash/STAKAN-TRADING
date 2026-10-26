@@ -182,6 +182,7 @@ async function act(b) {
     if (b) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
     return sym ? `Переходжу на ${sym}${b && b.units.length ? " (спершу закриваю угоди на " + b.sym + ")" : ""}` : "Монету вибиратиму сам";
   }
+  if (what === "invert") return await BG.setInvert(!!b.on);
   if (what === "full-off") { BG.setOn(false); if (BR.params.on) BR.setOn(false); return "Зупинено: нових угод немає; відкриті закриються на тейку або в точці розвороту"; }
   if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
   if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }

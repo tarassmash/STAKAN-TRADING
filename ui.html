@@ -39,6 +39,8 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
       <label class="f" style="flex:1">Монета (порожньо — бот вибирає сам)<input id="fSym" placeholder="напр. BTC, SOL, PEPE" autocapitalize="characters" autocomplete="off"></label>
     </div>
     <button class="big go" id="fMain">▶ ЗАПУСТИТИ</button>
+    <button class="btn" id="fInv" style="width:100%;margin-top:10px;min-height:48px;font-size:16px;font-weight:600">🔄 Дзеркало: торгувати навпаки</button>
+    <div id="fInvHint" style="font-size:12px;margin-top:6px"></div>
     <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
   </div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
@@ -392,6 +394,17 @@ $("fSym").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("f
 $("fSym").onchange = goCoin;
 $("fMain").onclick = () => FULL_ON() ? act({ what: "full-off" }, "Зупинити бота? Нових угод не буде; відкриті закриються на тейку або в точці розвороту.")
   : act({ what: "full-on", sym: $("fSym").value.trim() }, `Запустити бота${$("fSym").value.trim() ? " на " + $("fSym").value.trim().toUpperCase() : ""}${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nВін сам вибирає монету, іде за ціною в будь-який бік, бере тейки по 0.3%, а замість стопу розвертається. Плече до x50, розмір — від балансу.\nРизик: у «пилці» (дрібні смикання туди-сюди) розвороти дають збитки.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
+$("fInv").onclick = () => { const on = !(S.bg.params.invert); act({ what: "invert", on }, on ? "Увімкнути ДЗЕРКАЛО?\n\nУсе лишається як є, але замість купівель — продажі, замість продажів — купівлі. Відкриті угоди закриються ринком.\nПрацює, коли звичайний режим стабільно в мінус. Комісії платяться в обидва боки, тому дзеркало прибуткове лише якщо звичайний мінус більший за комісії." : "Вимкнути дзеркало й повернутися до звичайної торгівлі? Відкриті угоди закриються ринком.").then(t => { if (t) $("fInfo").innerHTML = esc(t); }); };
+function paintInv() {
+  const X = S.bg, b = X.b, on = !!X.params.invert, btn = $("fInv");
+  btn.textContent = on ? "🔄 ДЗЕРКАЛО УВІМКНЕНЕ — повернути звичайну торгівлю" : "🔄 Дзеркало: торгувати навпаки"; btn.disabled = BUSY;
+  btn.style.background = on ? "#7c3aed" : "var(--bg)"; btn.style.color = on ? "#fff" : "var(--ink)"; btn.style.borderColor = on ? "#7c3aed" : "var(--line)";
+  const m = b && b.mirror6, m24 = b && b.mirror24;
+  if (!m24 || !m24.n) { $("fInvHint").innerHTML = '<span class="mute">Покажу тут, скільки дало б дзеркало на ваших реальних угодах, щойно вони з\'являться.</span>'; return; }
+  const better = m.n >= 10 && m.mirror > m.normal && m.mirror > 0;
+  $("fInvHint").innerHTML = `На ваших угодах (з комісіями): за 6 год звичайно ${sgn(m.normal, 4)} / дзеркало ${sgn(m.mirror, 4)} (${m.n} угод) · за добу ${sgn(m24.normal, 4)} / ${sgn(m24.mirror, 4)}`
+    + (!on && better ? ' <b style="color:#a78bfa">— схоже, дзеркало зараз краще</b>' : on && m.n >= 10 && m.normal > m.mirror && m.normal > 0 ? ' <b class="up">— звичайний режим зараз кращий</b>' : "");
+}
 function paintFull() {
   const on = FULL_ON(), m = $("fMain"), X = S.bg, b = X.b, eq = S.acc.equity;
   m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.disabled = BUSY;
@@ -402,8 +415,8 @@ function paintFull() {
   $("fSym").parentElement.firstChild.textContent = on ? (typed !== cur ? "Монета — натисніть Enter, щоб перейти" : "Монета (впишіть іншу й Enter — бот перейде; порожньо — вибирає сам)") : "Монета (порожньо — бот вибирає сам)";
   const kpi = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px"><div class="k"><b>${f(eq, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div></div>`;
   if (!on) { $("fInfo").innerHTML = kpi + '<span class="mute">Натисніть — і бот усе робить сам: вибирає монету, що рухається, іде за ціною куди б вона не пішла, кожен рух на 0.3% забирає тейком (чистими після комісій), а замість стопу — розворот: якщо ціна відкотилась на кілька рівнів від найкращої точки, закриває все і йде в інший бік. Плече до x50, розмір від балансу — працює навіть з 1 USDT.</span>' + (b && b.units.length ? `<div style="margin-top:6px">Відкриті угоди: ${b.units.length} на ${esc(b.sym)} (закриються на тейку або розвороті)</div>` : ""); return; }
-  $("fInfo").innerHTML = kpi + (b ? `<span class="dot on"></span><b>${esc(b.sym)}</b> · ${b.d > 0 ? '<b class="up">▲ ЛОНГ</b>' : '<b class="down">▼ ШОРТ</b>'} · ціна ${pr(X.price)}<br>`
-      + `тейк <b>${b.stepPct}%</b> (сам змінює) · розворот при відкаті ${b.flipSteps} рівні (${(b.flipSteps * b.stepPct).toFixed(2)}%)${b.turnPx ? ` → у ${b.d > 0 ? "шорт нижче" : "лонг вище"} <b>${pr(b.turnPx)}</b>` : ""}<br>`
+  $("fInfo").innerHTML = kpi + (b ? `<span class="dot on"></span><b>${esc(b.sym)}</b> · ${(b.inv ? -b.d : b.d) > 0 ? '<b class="up">▲ ЛОНГ</b>' : '<b class="down">▼ ШОРТ</b>'}${b.inv ? ' <b style="color:#a78bfa">(🔄 дзеркало)</b>' : ""} · ціна ${pr(X.price)}<br>`
+      + `тейк <b>${b.stepPct}%</b> (сам змінює) · розворот при відкаті ${b.flipSteps} рівні (${(b.flipSteps * b.stepPct).toFixed(2)}%)${b.turnPx ? ` → у ${b.d > 0 ? (b.inv ? "лонг нижче" : "шорт нижче") : (b.inv ? "шорт вище" : "лонг вище")} <b>${pr(b.turnPx)}</b>` : ""}<br>`
       + `угод відкрито: ${b.units.length} · тейків ${b.wins} · розворотів ${b.flips} · на цій монеті ${sgn(b.profit, 4)}${b.leaving ? ' · <span style="color:var(--gold)">переходжу на іншу монету</span>' : ""}<br>`
       + `плече <b>x${b.lev}</b>${b.levCap && b.levCap !== b.lev ? ` (макс. x${b.levCap})` : ""} — підбирає сам: на історії просадка ≤ ${X.params.ddCap}%, у мінус → менше, у плюс → повертає`
       + (b.tunes && b.tunes.length ? `<div style="margin-top:6px;font-size:12px">${b.tunes.slice(0, 3).map(t => `${t.who === "ai" ? "🤖" : t.who === "learn" ? "⚡" : "🧪"} ${new Date(t.at).toLocaleTimeString()} · ${esc(t.ch)} — <span class="mute">${esc(t.why)}</span>`).join("<br>")}</div>` : "")
@@ -416,7 +429,7 @@ function paintFull() {
     : `<span class="dot on"></span>${X.waitIn != null ? `Монет із плюсом на історії зараз немає — нова перевірка через ${Math.ceil(X.waitIn / 60)} хв` : "Підбираю монету…"}`)
     + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } };
+const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);
 </script>
 </body>

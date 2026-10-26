@@ -197,6 +197,7 @@ module.exports.regimeOf = regimeOf;
 // When the price pulls back flipSteps levels from its best point, everything is closed and the direction turns.
 function simulateFlip(c, o) {
   const { stepPct, flipSteps = 2, maxUnits = 6, investment, lev, maker = 0.02, taker = 0.055, runner = true, invert = false } = o;
+  const eFee = o.entryFee != null ? o.entryFee : taker;   // a limit entry pays maker
   const sg = invert ? -1 : 1, tpFee = invert ? taker : maker;   // the mirror: the opposite side of every trade, its "take" exits by market
   const r = 1 + stepPct / 100, a0 = c[0].o, lr = Math.log(r);
   const L = (j) => a0 * Math.pow(r, j), idx = (x) => Math.floor(Math.log(x / a0) / lr);
@@ -205,8 +206,8 @@ function simulateFlip(c, o) {
   const shut = (x) => { for (const u of units.concat(run ? [run] : [])) { const p = (x - u.e) * q * u.d * sg; profit += p; fees += q * x * taker / 100; p > 0 ? wins++ : losses++; } units = []; run = null; };
   const open = (j, way) => {
     const e = L(j);
-    if (units.length < maxUnits && !units.some(u => u.j === j)) { units.push({ d: D, j, e, tp: L(j + D) }); fees += q * e * taker / 100; }
-    if (runner && !run && way === D) { run = { d: D, e }; fees += q * e * taker / 100; }
+    if (units.length < maxUnits && !units.some(u => u.j === j)) { units.push({ d: D, j, e, tp: L(j + D) }); fees += q * e * eFee / 100; }
+    if (runner && !run && way === D) { run = { d: D, e }; fees += q * e * eFee / 100; }
   };
   for (const k of c) {
     for (const x of (k.c >= k.o ? [k.o, k.l, k.h, k.c] : [k.o, k.h, k.l, k.c])) {

@@ -35,6 +35,7 @@ const DEFAULTS = {
   learnMin: 10,             // flip: every this many minutes re-learn take / turn / leverage on the last learnHours of 1-minute candles
   learnHours: 6,
   brakePct: 8,             // flip: the result since the last change below -brakePct % of the money -> cut the risk at once
+  limitEntry: true,        // entries only by fast PostOnly limits at the best price (maker fee), chased to the new best price; never market
   invert: false,           // 🔄 mirror: everything as is, but the account takes the opposite side of every trade
   autoOpt: true,
   useFlow: true,           // flip: the tape + the book + speed + indicators steer entries and turns
@@ -42,7 +43,7 @@ const DEFAULTS = {
   earlyFlip: 0.6,          // flow against stronger than this and the pullback already half way -> turn early (a smaller loss)           // flip: live self-tuning - losing reversals -> less leverage and a wider turn, a plus series -> leverage back up
 };
 const NUM = { flowGate: [0.05, 0.95], earlyFlip: [0.2, 1], learnMin: [2, 240], learnHours: [1, 24], brakePct: [2, 50], ddCap: [5, 90], flipMin: [1, 20], flipSteps: [0, 20], sawFlips: [2, 100], straddlePct: [0.1, 20], scalpStep: [0.1, 2], investment: [0.1, 1e6], leverage: [1, 50], stepPct: [0.1, 10], maxUnits: [1, 30], stopSteps: [1, 20], trailSteps: [1, 20], band: [0, 5], feeX: [1, 30], btDays: [1, 3.4], minTurnoverM: [1, 10000], idleMin: [5, 1440] };
-const BOOL = ["invert", "useFlow", "autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
+const BOOL = ["limitEntry", "invert", "useFlow", "autoOpt", "flip", "autoInv", "straddleRearm", "scalp", "autoCoin", "runner", "autoTune", "btNeedPlus"];
 
 function create(host) {
   const { bx, spec, align, sign, log, engineLog, lsGet, lsSet, env, keys } = host;
@@ -145,7 +146,10 @@ function create(host) {
     }
     else if ((p.kind === "t" || p.kind === "s") && u.state !== "closed") finish(u, avg, e.fee, p.kind === "t" ? "тейк" : u.closeWhy || "стоп");
   }
-  function onOrder(o) { const p = parse(o.orderLinkId); if (!p) return; const u = unit(p.k); if (u && u.tpOrd === o.orderLinkId && ["Cancelled", "Rejected", "Deactivated"].includes(o.orderStatus)) { u.tpOrd = null; saveB(); } }
+  function onOrder(o) { const p = parse(o.orderLinkId); if (!p) return;
+    { const u = unit(p.k); if (u && u.openOrd === o.orderLinkId && u.state === "opening" && u.lim && ["Cancelled", "Rejected", "Deactivated"].includes(o.orderStatus)) {
+        if (acceptPartial(u)) saveB(); else if (!u.lim.quit) u.lim.redo = true; else { B.units = B.units.filter(z => z !== u); saveB(); } return; } }
+    const u = unit(p.k); if (u && u.tpOrd === o.orderLinkId && ["Cancelled", "Rejected", "Deactivated"].includes(o.orderStatus)) { u.tpOrd = null; saveB(); } }
   function finish(u, x, fee, how) {
     const pnl = (x - u.e) * u.qty * real(u) - (u.fee || 0) - fee;
     B.units = B.units.filter(z => z !== u); B.profit = +((B.profit || 0) + pnl).toFixed(6); if (pnl > 0) B.wins = (B.wins || 0) + 1; else B.losses = (B.losses || 0) + 1;
@@ -156,7 +160,40 @@ function create(host) {
     engineLog(`${u.runner ? "🏃" : "⚡"} ${B.sym}: ${u.runner ? "бігун" : "юніт"} ${real(u) > 0 ? "лонг" : "шорт"}${u.inv ? " 🔄" : ""} ${fmt(u.e)} → ${fmt(x)} (${how}) ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`, pnl >= 0 ? "up" : "down");
   }
   async function cancel(id) { try { await api("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: B.sym, orderLinkId: id } }); } catch (e) { /* gone */ } }
-  const real = (u) => (u.inv ? -u.d : u.d);   // 🔄 mirror: the logic says long -> the account holds a short (and back)
+  const real = (u) => (u.inv ? -u.d : u.d);
+  const touch = (side) => side === "Buy" ? px(ST.bid || ST.price, false) : px(ST.ask || ST.price, true);
+  // ⚡ entry: a PostOnly limit at the best price of our side (maker); the loop moves it to the new best price until it fills
+  async function enter(u) {
+    const side = real(u) > 0 ? "Buy" : "Sell";
+    if (!P.limitEntry) return market(u, "o", side, false);
+    const id = lid(u.k, "o"), p0 = touch(side);
+    u.openOrd = id; u.lim = Object.assign(u.lim || { n: 0, want: ST.price, t0: now() }, { at: now(), px: p0, redo: false });
+    await api("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: B.sym, side, orderType: "Limit", price: String(p0), qty: String(u.qty), timeInForce: "PostOnly", orderLinkId: id, positionIdx: ix(real(u)), reduceOnly: false } });
+  }
+  function acceptPartial(u) {   // an entry limit that stopped with part filled: the unit is that part
+    const e = ST.ex[u.openOrd]; if (!e || !(e.q > 0)) return false;
+    u.qty = +e.q.toFixed(8); u.state = "open"; u.e = e.v / e.q; u.fee = e.fee; u.at = now(); if (u.runner) u.pk = u.e;
+    if (u.tp) u.tp = u.d > 0 ? Math.max(u.tp, u.e * r()) : Math.min(u.tp, u.e / r()); return true;
+  }
+  async function chase(x) {
+    for (const u of B.units.slice()) {
+      if (u.state !== "opening" || !u.lim) continue;
+      const L2 = u.lim, side = real(u) > 0 ? "Buy" : "Sell", p0 = touch(side);
+      if (L2.quit) { if (now() - L2.quitAt > 4000 && u.state === "opening") { if (!acceptPartial(u)) B.units = B.units.filter(z => z !== u); saveB(); } continue; }
+      const far = Math.abs(x / L2.want - 1) * 100 > 2 * B.stepPct;
+      if (far || L2.n >= 40 || (B.hold && !u.manualEntry)) {   // the price ran away: this entry is missed (no market chase)
+        L2.quit = true; L2.quitAt = now(); saveB(); await cancel(u.openOrd);
+        if (now() - (ST.missLogAt || 0) > 30000) { ST.missLogAt = now(); engineLog(`⏭ ${B.sym}: лімітний вхід не виконався — ціна пішла (${fmt(L2.want)} → ${fmt(x)}), вхід пропущено, ринком не доганяю`, "mute"); }
+        continue;
+      }
+      if (L2.redo) { L2.n++; try { await enter(u); } catch (e) { setErr("лімітний вхід: " + e.message); } continue; }
+      if (now() - L2.at > 1200 && p0 !== L2.px) {
+        L2.n++; L2.at = now();
+        try { await api("/v5/order/amend", { method: "POST", auth: true, body: { category: "linear", symbol: B.sym, orderLinkId: u.openOrd, price: String(p0) } }); L2.px = p0; }
+        catch (e) { if (e.code === 110001 && !(ST.ex[u.openOrd] && ST.ex[u.openOrd].q > 0)) L2.redo = true; }
+      }
+    }
+  }   // 🔄 mirror: the logic says long -> the account holds a short (and back)
   async function market(u, kind, side, reduce) {
     const id = lid(u.k, kind);
     if (kind === "o") u.openOrd = id; else u.closeOrd = id;
@@ -187,7 +224,8 @@ function create(host) {
       try {
         const s = await spec(cd.sym), fr = await feeOf(cd.sym), maker = fr.maker, taker = fr.taker;
         // every take must clearly beat the round trip (market entry + limit take): the step ≥ feeX × fees, and in scalping at least 2 × fees
-        const minStep = P.scalp ? 2 * (taker + maker) : P.feeX * (taker + maker);
+        const entryFee = P.limitEntry ? maker : taker;
+        const minStep = P.scalp ? 2 * (entryFee + maker) : P.feeX * (entryFee + maker);
         const cs = await candles5m(cd.sym, P.autoTune ? Math.min(1000, Math.round(P.btDays * 288)) : 120);
         const price = cs.length ? cs[cs.length - 1].c : 0, lev = Math.min(P.leverage, Math.floor(Number(s.maxLev || 10)));
         const minNotional = Math.max(Number(s.minNotional || 5) * 1.05, Number(s.minQty || 0) * price);
@@ -197,14 +235,14 @@ function create(host) {
         const steps = P.scalp ? [+Math.max(P.scalpStep, minStep).toFixed(3)] : P.autoTune ? [...new Set([0.3, 0.5, 0.8, 1.2, P.stepPct].map(x => Math.max(x, minStep)).map(x => +x.toFixed(2)))] : [Math.max(P.stepPct, minStep)];
         let best = null;
         if (P.flip) {   // the take is fixed (scalpStep, at least 2 × fees); the turn distance is chosen on history
-          const st = +Math.max(P.scalpStep, 2 * (taker + maker)).toFixed(3);
+          const st = +Math.max(P.scalpStep, 2 * (entryFee + maker)).toFixed(3);
           // leverage: the highest whose worst drawdown on history stays within ddCap (and that still fits the exchange minimum)
           let levs = [...new Set(LADDER.map(l => Math.min(l, lev)))].filter(l => P.investment * l / minNotional >= 2);
           if (!levs.length) levs = [lev];
           const good = (x) => x && !x.liquidated && (x.maxDD == null || x.maxDD <= P.ddCap);
           for (const fs of P.flipSteps > 0 ? [P.flipSteps] : [P.flipMin, P.flipMin + 1, P.flipMin + 2]) for (const l of levs) {
             const un = Math.max(1, Math.min(P.maxUnits, Math.floor(P.investment * l / minNotional) - 1));
-            const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { invert: !!P.invert, stepPct: st, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker, taker, runner: P.runner }) : { roi: 0, wins: 0, losses: 0, flips: 0, maxDD: 0 };
+            const res = cs.length > 120 && P.autoTune ? BT.simulateFlip(cs, { invert: !!P.invert, stepPct: st, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker, taker, runner: P.runner, entryFee: P.limitEntry ? maker : taker }) : { roi: 0, wins: 0, losses: 0, flips: 0, maxDD: 0 };
             const c2 = Object.assign({ st, fs, lev: l, units: un }, res);
             if (!best || (good(c2) && !good(best)) || (good(c2) === good(best) && (good(c2) ? c2.roi > best.roi : c2.maxDD < best.maxDD))) best = c2;
           }
@@ -213,7 +251,7 @@ function create(host) {
           const res = cs.length > 120 && P.autoTune ? BT.simulateB2(cs, { stepPct: st, maxUnits: units, investment: P.investment, lev, maker, taker, stopSteps: P.stopSteps, runner: P.runner, trailSteps: P.trailSteps, band: P.band / 100 }) : { roi: 0, wins: 0, losses: 0, flips: 0 };
           if (!best || res.roi > best.roi) best = Object.assign({ st }, res);
         }
-        results.push({ sym: cd.sym, fee: +(taker + maker).toFixed(4), step: best.st, fs: best.fs || 0, lev: best.lev || lev, maxDD: best.maxDD, units: best.units || units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
+        results.push({ sym: cd.sym, fee: +(entryFee + maker).toFixed(4), step: best.st, fs: best.fs || 0, lev: best.lev || lev, maxDD: best.maxDD, units: best.units || units, roi: best.roi, wins: best.wins, losses: best.losses, flips: best.flips, dir: dirOf(cs), tested: cs.length });
       } catch (e) { results.push({ sym: cd.sym, err: e.message }); }
     }
     results.sort((a, b) => (b.roi ?? -1e9) - (a.roi ?? -1e9));
@@ -282,13 +320,13 @@ function create(host) {
     if (microN < B.maxUnits && !B.units.some(u => !u.runner && u.j === j)) {
       const u = { inv: !!B.inv, k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", tp: L(j + B.d), sl: L(j - B.d * P.stopSteps), way };
       B.units.push(u); saveB();
-      try { await market(u, "o", real(u) > 0 ? "Buy" : "Sell", false); out.push("юніт"); engineLog(`⚡ ${B.sym}: ${why || (way === B.d ? "рух" : "відкат")} через ${fmt(L(j))} — ${real(u) > 0 ? "лонг" : "шорт"}${u.inv ? " 🔄" : ""} ${u.qty}, ${u.inv ? "вихід" : "тейк"} ${fmt(u.tp)}`, "mute"); }
+      try { await enter(u); out.push("юніт"); engineLog(`⚡ ${B.sym}: ${why || (way === B.d ? "рух" : "відкат")} через ${fmt(L(j))} — ${real(u) > 0 ? "лонг" : "шорт"}${u.inv ? " 🔄" : ""} ${u.qty}, ${u.inv ? "вихід" : "тейк"} ${fmt(u.tp)}`, "mute"); }
       catch (e) { B.units = B.units.filter(z => z !== u); saveB(); setErr(e.code === 110007 ? "маржі на ще одну угоду не вистачає — нові відкриються, коли закриються поточні" : "вхід юніта: " + e.message); }
     }
     if (P.runner && way === B.d && !B.units.some(u => u.runner)) {
       const u = { inv: !!B.inv, k: B.nextK++, j, d: B.d, qty: B.qty, state: "opening", runner: true, sl: L(j - B.d * P.trailSteps), tp: null };
       B.units.push(u); saveB();
-      try { await market(u, "o", real(u) > 0 ? "Buy" : "Sell", false); out.push("бігун"); engineLog(`🏃 ${B.sym}: бігун ${real(u) > 0 ? "лонг" : "шорт"}${u.inv ? " 🔄" : ""} — трейлінг-стоп ${P.trailSteps} рівні за найкращою ціною`, "up"); }
+      try { await enter(u); out.push("бігун"); engineLog(`🏃 ${B.sym}: бігун ${real(u) > 0 ? "лонг" : "шорт"}${u.inv ? " 🔄" : ""} — трейлінг-стоп ${P.trailSteps} рівні за найкращою ціною`, "up"); }
       catch (e) { B.units = B.units.filter(z => z !== u); saveB(); }
     }
     return out;
@@ -408,11 +446,11 @@ function create(host) {
       const k = await bx("/v5/market/kline", { query: { category: "linear", symbol: B.sym, interval: "1", limit: String(Math.min(1000, P.learnHours * 60)) } });
       const cs = (k.list || []).map(x => ({ o: Number(x[1]), h: Number(x[2]), l: Number(x[3]), c: Number(x[4]) })).reverse();
       if (cs.length < 60) return;
-      const fr = await feeOf(B.sym), fee = fr.taker + fr.maker, x = ST.price, minN = Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * x);
+      const fr = await feeOf(B.sym), fee = (P.limitEntry ? fr.maker : fr.taker) + fr.maker, x = ST.price, minN = Math.max(ST.spec.minNotional * 1.05, ST.spec.minQty * x);
       const takes = [0.2, 0.3, 0.4, 0.5, 0.7, 1.0].filter(t => t >= 2 * fee), flipsC = [3, 4, 5, 6, 8], levs = LADDER.filter(l => l <= (B.levCap || B.lev) && l >= minLevNow());
       if (!levs.length) levs.push(B.lev);
       const sim = (t, fs, l) => { const un = Math.max(1, Math.min(P.maxUnits, Math.floor(P.investment * l / minN) - 1));
-        return BT.simulateFlip(cs, { invert: !!B.inv, stepPct: t, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker: fr.maker, taker: fr.taker, runner: P.runner }); };
+        return BT.simulateFlip(cs, { invert: !!B.inv, stepPct: t, flipSteps: fs, maxUnits: un, investment: P.investment, lev: l, maker: fr.maker, taker: fr.taker, runner: P.runner, entryFee: P.limitEntry ? fr.maker : fr.taker }); };
       const good = (r2) => !r2.liquidated && r2.maxDD <= P.ddCap;
       let best = null;
       for (const t of takes) for (const fs of flipsC) for (const l of levs) { const r2 = sim(t, fs, l); if (good(r2) && r2.roi > 0 && (!best || r2.roi > best.roi)) best = Object.assign({ t, fs, l }, r2); }
@@ -501,6 +539,7 @@ function create(host) {
       subPub();
       await updateDir(false);
       if (B.flip && P.useFlow) FLOW.refresh();
+      if (P.limitEntry) await chase(ST.price);
       const x = ST.price;
       if (B.resync) { B.resync = false; B.last = idxOf(x); saveB(); }
       if (B.straddle) { await checkStraddle(x); if (B.straddle) { B.idleAt = now(); return; } }
@@ -543,7 +582,7 @@ function create(host) {
         if (full || early) {
           const nd = -B.d, was = B.ext;
           if (early) { B.gate = B.gate || {}; B.gate.early = (B.gate.early || 0) + 1; engineLog(`📊 ${B.sym}: сильний потік проти (сила ${f.score}, стрічка ${f.cvd1}, швидкість ×${f.speedX}) — розвертаюсь раніше, на півдорозі`, "gold-t"); }
-          for (const u of B.units.slice()) await closeUnit(u, "розворот");
+          for (const u of B.units.slice()) { if (u.state === "opening" && u.lim && !u.lim.quit) { u.lim.quit = true; u.lim.quitAt = now(); await cancel(u.openOrd); } else await closeUnit(u, "розворот"); }
           B.d = nd; B.ext = x; B.last = idxOf(x); B.flips = (B.flips || 0) + 1; B.flipsSince = (B.flipsSince || 0) + 1;
           sizeUnits();   // the balance changed: the new direction's units fit the money now
           if (P.autoOpt) { const b0 = B; setTimeout(() => { if (B === b0) selfTune().catch(e => setErr("самонастройка: " + e.message)); }, 6000); }
@@ -615,7 +654,7 @@ function create(host) {
           if (h && h.orderStatus === "Filled") finish(u, Number(h.avgPrice) || u.tp, Number(h.cumExecFee || 0), "тейк"); else u.tpOrd = null;
         }
       }
-      const owned = new Set(B.units.map(u => u.tpOrd).filter(Boolean));
+      const owned = new Set(B.units.flatMap(u => [u.tpOrd, u.state === "opening" ? u.openOrd : null]).filter(Boolean));
       for (const id of live) if (/^bg/.test(id) && !owned.has(id)) await cancel(id);
       const pos = ((await api("/v5/position/list", { query: { category: "linear", symbol: B.sym }, auth: true })).list || []).reduce((s2, z) => s2 + Number(z.size || 0) * (z.side === "Buy" ? 1 : z.side === "Sell" ? -1 : 0), 0);
       const mine = B.units.filter(u => u.state === "open").reduce((s2, u) => s2 + u.qty * real(u), 0);

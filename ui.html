@@ -298,6 +298,11 @@
       <div id="targetsList"><div class="targets-empty">Нажми «Найти пампы» или «ультра-волатильные 1m»</div></div>
     </div>
 
+    <h2>Стратегия</h2>
+    <select id="strategy" style="width:100%;margin-bottom:8px">
+      <option value="sell">Sell Grid — шорт от пампа</option>
+      <option value="follow">🧭 Автопилот за ценой — лонг/шорт куда идёт цена</option>
+    </select>
     <h2>Sell Grid</h2>
     <div class="info">
       Сетка SELL-лимитов выше цены. Ловит откат после пампа.
@@ -387,6 +392,7 @@
       <div class="row"><span>OI тренд</span><span class="val" id="oiTrendText">—</span></div>
       <div class="row"><span>CVD тренд</span><span class="val" id="cvdTrendText">—</span></div>
       <div class="row"><span>Фильтр Щукина</span><span class="val" id="shukinFilterText">—</span></div>
+      <div class="row"><span>Направление</span><span class="val" id="dirText">—</span></div>
       <div class="row"><span>Автопилот</span><span class="val" id="autoText">—</span></div>
       <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
@@ -459,7 +465,7 @@
 
   // ---------- settings: page <-> server ----------
   function readForm() {
-    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value, autoScanMode: $('autoScanMode').value };
+    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value, autoScanMode: $('autoScanMode').value, strategy: $('strategy').value };
     for (const k of NUMS) o[k] = parseFloat($(k).value);
     for (const k of BOOLS) o[k] = $(k).checked;
     return o;
@@ -470,7 +476,7 @@
     for (const k of NUMS) if ($(k) !== act) $(k).value = P[k];
     for (const k of BOOLS) $(k).checked = !!P[k];
     if ($('symbol') !== act) $('symbol').value = P.symbol;
-    $('interval').value = P.interval; $('category').value = P.category; if ($('autoScanMode') !== act) $('autoScanMode').value = P.autoScanMode || 'pump';
+    $('interval').value = P.interval; $('category').value = P.category; if ($('autoScanMode') !== act) $('autoScanMode').value = P.autoScanMode || 'pump'; if ($('strategy') !== act) $('strategy').value = P.strategy || 'sell';
   }
   document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('input', () => { DIRTY = true; }));
   document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('change', () => { if (el.id !== 'symbol' && el.id !== 'interval') act('save'); }));
@@ -549,7 +555,8 @@
     const d = candleSeries.data ? candleSeries.data() : null; if (!d || !d.length || !w || !w.mid) return;
     const t0 = d[0].time, t1 = d[d.length - 1].time + 120;
     midSeries.setData([{ time: t0, value: w.mid }, { time: t1, value: w.mid }]);
-    (w.targets || []).forEach(px => { const s = chart.addLineSeries({ color: '#f6465d', lineWidth: 1, lineStyle: 2, title: 'Sell ' + px }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
+    const buy = w.side > 0;
+    (w.targets || []).forEach(px => { const s = chart.addLineSeries({ color: buy ? '#0ecb81' : '#f6465d', lineWidth: 1, lineStyle: 2, title: (buy ? 'Buy ' : 'Sell ') + px }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
   }
   function showSig(sig) {
     $('oiTrendText').textContent = sig.oiTrend + (sig.oiChangePct ? ' (' + Number(sig.oiChangePct).toFixed(1) + '%)' : '');
@@ -576,9 +583,13 @@
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
     const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
-    if (info) info.innerHTML = P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
+    if (info) info.innerHTML = P.strategy === 'follow' ? '<b style="color:#0ecb81">🧭 Автопилот за ценой:</b> цена идёт вверх → сетка BUY ниже (добор на откатах), вниз → сетка SELL выше. Тейк и стоп от средней цены, при развороте — закрытие и сетка в другую сторону. Параметры ниже (шаг, уровни, тейк, стоп, размер) — общие.' : P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
     $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
-    $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' ? '1m вола' : 'пампы'})` : 'ждёт Старт';
+    const cw = G.watches.find(x => x.symbol === (P.symbol || '').toUpperCase());
+    $('dirText').textContent = P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ' : cw.dir.d < 0 ? '▼ ШОРТ' : '— жду') : '—';
+    $('dirText').style.color = P.strategy !== 'follow' ? 'var(--red)' : cw && cw.dir && cw.dir.d > 0 ? 'var(--green)' : cw && cw.dir && cw.dir.d < 0 ? 'var(--red)' : 'var(--muted)';
+    $('dirText').title = cw && cw.dir ? cw.dir.why : '';
+    $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' || P.strategy === 'follow' ? '1m движение' : 'пампы'})` : 'ждёт Старт';
     $('autoText').style.color = P.autopilot && P.running ? 'var(--green)' : 'var(--muted)';
     $('cyclesText').textContent = G.cycles; $('tradesText').textContent = G.trades; $('wlText').textContent = G.wins + ' / ' + G.losses;
     $('dayPnlText').textContent = (G.dayPnl >= 0 ? '+' : '') + Number(G.dayPnl).toFixed(2); $('dayPnlText').style.color = G.dayPnl > 0 ? 'var(--green)' : G.dayPnl < 0 ? 'var(--red)' : '';
@@ -613,7 +624,7 @@
     if (grid.dataset.sig === sig) return; grid.dataset.sig = sig;
     grid.innerHTML = ws.map(w => {
       let badge = '<span class="wc-badge">idle</span>';
-      if (w.pos && w.pos.size > 0) badge = `<span class="wc-badge pos">${w.pos.side === 'Sell' ? 'SHORT' : 'LONG'}</span>`; else if (w.ourOrders > 0) badge = `<span class="wc-badge ord">${w.ourOrders} ord</span>`; else if (w.orders > 0) badge = `<span class="wc-badge">${w.orders} ord</span>`;
+      if (w.pos && w.pos.size > 0) badge = w.pos.side === 'Sell' ? '<span class="wc-badge pos">SHORT</span>' : '<span class="wc-badge ok">LONG</span>'; else if (w.ourOrders > 0) badge = `<span class="wc-badge ord">${w.ourOrders} ord</span>`; else if (w.orders > 0) badge = `<span class="wc-badge">${w.orders} ord</span>`;
       if (w.isSpike) badge += ' <span class="wc-badge warn">SPIKE</span>';
       const up = w.pos && w.pos.size ? w.pos.unrealisedPnl : null;
       return `<div class="watch-card${w.symbol === cur ? ' active' : ''}${w.isSpike ? ' spike' : ''}" data-sym="${esc(w.symbol)}"><div class="wc-top"><span class="wc-sym">${esc(w.symbol.replace(/USDT$/, ''))}</span><span>${badge}</span></div>

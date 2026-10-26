@@ -44,7 +44,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
   </div>
   <div class="card" style="margin-top:14px"><b>🧪 Лабораторія стратегій</b> <a href="#" id="labRun" class="mute" style="font-size:12px">перевірити зараз</a> <span class="mute" id="labAt" style="font-size:12px"></span>
-    <div class="mute" style="font-size:12px;margin-top:4px">Усі стратегії на історії 12 найліквідніших монет з комісіями. Параметри підбираються на перших 70% історії, а вердикт — лише на останніх 30%, яких стратегія не бачила. «Маточікування» — середній результат однієї угоди після комісій, % від суми угоди.</div>
+    <div class="mute" style="font-size:12px;margin-top:4px">~30 найвідоміших стратегій світу на історії 12 найліквідніших монет з комісіями. Параметри підбираються на перших 70% історії, а вердикт — лише на останніх 30%, яких стратегія не бачила. «Маточікування» — середній результат однієї угоди після комісій, % від суми угоди.</div>
     <div id="lab" style="font-size:13px;margin-top:8px"></div></div>
   <div class="card" id="dgCard" style="margin-top:14px"><b>🔍 Чому мінус — розбір</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
@@ -419,7 +419,7 @@ function paintLab() {
     : `<tr${x.ok ? ' style="background:rgba(14,203,129,.12)"' : ""}><td>${x.ok ? "✅ " : ""}${esc(x.name)}<div class="mute" style="font-size:11px">${x.tf} хв · ${esc(JSON.stringify(x.params))}</div></td><td>${sgn(x.oos.exp, 3)}%</td><td>${x.oos.n}</td><td>${x.oos.win}%</td><td>${x.oos.pf ?? "—"}</td><td>${x.coinsPos}/${x.coinsTot}</td><td>${x.oos.t ?? "—"}</td><td>${sgn(x.is.exp, 3)}%</td></tr>`;
   $("lab").innerHTML = `<div style="border-left:3px solid ${R.out.some(x => x.ok) ? "var(--up)" : "var(--gold)"};padding-left:10px">${esc(R.verdict)}</div>`
     + `<div class="scroll" style="margin-top:8px"><table><thead><tr><th>Стратегія</th><th>маточік. (нові дані)</th><th>угод</th><th>в плюс</th><th>PF</th><th>монет у плюсі</th><th>t (≥2 = не випадковість)</th><th>на підборі</th></tr></thead><tbody>${R.out.map(row).join("")}</tbody></table></div>`
-    + `<div class="mute" style="font-size:11px;margin-top:4px">Монети: ${R.coins.map(esc).join(", ")} · 15-хв свічки за ${R.days15} днів, 5-хв — за ${R.days5} днів. PF — скільки заробили прибуткові угоди на кожен 1 втрачений.</div>`;
+    + `<div class="mute" style="font-size:11px;margin-top:4px">Монети: ${R.coins.map(esc).join(", ")} · ${R.n || R.out.length} стратегій · 15-хв свічки за ${R.days15} днів, 5-хв — за ${R.days5}, годинні — за ${R.days60 || 90}. PF — скільки заробили прибуткові угоди на кожен 1 втрачений.</div>`;
 }
 function paintDiag() {
   const D = S.diag; if (!D) return; const R = D.res;

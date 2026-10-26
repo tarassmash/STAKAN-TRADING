@@ -4,49 +4,12 @@
 "use strict";
 const BT = require("./backtest");
 
-const MAKER = 0.02, TAKER = 0.055, SLIP = 0.02;   // %
+const { MAKER, TAKER } = require("./ind");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const tick = () => new Promise(r => setImmediate(r));
 
-// ---------- indicators ----------
-const ema = BT.ema;
-function sma(a, n) { const o = new Array(a.length).fill(null); let s = 0; for (let i = 0; i < a.length; i++) { s += a[i]; if (i >= n) s -= a[i - n]; if (i >= n - 1) o[i] = s / n; } return o; }
-function std(a, n, m) { const o = new Array(a.length).fill(null); for (let i = n - 1; i < a.length; i++) { let s = 0; for (let j = i - n + 1; j <= i; j++) s += (a[j] - m[i]) ** 2; o[i] = Math.sqrt(s / n); } return o; }
-function atr(c, n) { const o = new Array(c.length).fill(null); let a = null; for (let i = 1; i < c.length; i++) { const tr = Math.max(c[i].h - c[i].l, Math.abs(c[i].h - c[i - 1].c), Math.abs(c[i].l - c[i - 1].c)); a = a == null ? tr : (a * (n - 1) + tr) / n; if (i >= n) o[i] = a; } return o; }
-function rsi(cl, n) { const o = new Array(cl.length).fill(null); let g = 0, l = 0; for (let i = 1; i < cl.length; i++) { const d = cl[i] - cl[i - 1], up = Math.max(d, 0), dn = Math.max(-d, 0);
-  if (i <= n) { g += up / n; l += dn / n; } else { g = (g * (n - 1) + up) / n; l = (l * (n - 1) + dn) / n; } if (i >= n) o[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l); } return o; }
-
-// ---------- one engine for the signal strategies ----------
-// sig(i) -> +1 / -1 / 0 at the close of bar i; entry: a limit at that close (maker) on bar i+1 if touched, else skipped.
-// exits: stop (taker + slippage), take (maker), trailing (taker + slippage), exitSig (at the close, taker), max bars.
-function runSig(c, from, to, sig, o) {
-  const A = o.atr, trades = []; let pos = null;
-  for (let i = from; i < to; i++) {
-    const k = c[i];
-    if (pos) {
-      let x = null, how = "", fee = TAKER + SLIP;
-      if (pos.d > 0) {
-        if (k.l <= pos.sl) { x = Math.min(pos.sl, k.o); how = "стоп"; }
-        else if (pos.tp && k.h >= pos.tp) { x = pos.tp; how = "тейк"; fee = MAKER; }
-      } else {
-        if (k.h >= pos.sl) { x = Math.max(pos.sl, k.o); how = "стоп"; }
-        else if (pos.tp && k.l <= pos.tp) { x = pos.tp; how = "тейк"; fee = MAKER; }
-      }
-      if (x == null && o.exitSig && o.exitSig(i, pos.d)) { x = k.c; how = "сигнал"; }
-      if (x == null && o.maxBars && i - pos.i >= o.maxBars) { x = k.c; how = "час"; }
-      if (x != null) { trades.push({ r: (x / pos.e - 1) * 100 * pos.d - MAKER - fee, how, i }); pos = null; }
-      else if (o.trail && A[i]) { const t = pos.d > 0 ? k.c - A[i] * o.trail : k.c + A[i] * o.trail; pos.sl = pos.d > 0 ? Math.max(pos.sl, t) : Math.min(pos.sl, t); }
-    }
-    if (!pos && i + 1 < to && A[i]) {
-      const d = sig(i); if (!d) continue;
-      const e = c[i].c, n = c[i + 1];
-      if ((d > 0 && n.l <= e) || (d < 0 && n.h >= e)) {    // the limit at the signal close got filled on the next bar
-        pos = { d, e, i: i + 1, sl: e - d * A[i] * o.stop, tp: o.take ? (typeof o.take === "function" ? o.take(i, d, e) : e + d * A[i] * o.take) : null };
-      }
-    }
-  }
-  return trades;
-}
+const { ema, sma, std, atr, rsi, runSig } = require("./ind");
+const MORE = require("./strats");
 
 // ---------- the strategies ----------
 const STRATS = [
@@ -76,7 +39,7 @@ const STRATS = [
   { id: "grid", name: "Звичайна сітка (флет)", tf: "5", grid: [[3, 10], [6, 15], [10, 20]], agg: true, run(c, f, t, [w, n]) {
       const r = BT.simulate(c.slice(f, t), { mode: "neutral", widthPct: w, n, investment: 100, lev: 1, maker: MAKER, slPct: 3, trailing: true, autoRestart: true, minNotional: 0 });
       return { roi: r.roi * n / 2, n: r.cycles + r.stops, wins: r.cycles }; } },
-];
+].concat(MORE);
 
 function stats(trades) {
   const n = trades.length; if (!n) return { n: 0, exp: 0, win: 0, pf: 0, sum: 0, dd: 0 };
@@ -93,7 +56,7 @@ function create(host) {
     const per = Number(tf) * 60000, need = Math.ceil(days * 86400e3 / per); let end = Date.now(), out = [];
     while (out.length < need) {
       const k = await bx("/v5/market/kline", { query: { category: "linear", symbol: sym, interval: tf, limit: String(Math.min(1000, need - out.length)), end: String(end) } });
-      const rows = (k.list || []).map(x => ({ t: Number(x[0]), o: Number(x[1]), h: Number(x[2]), l: Number(x[3]), c: Number(x[4]) }));
+      const rows = (k.list || []).map(x => ({ t: Number(x[0]), o: Number(x[1]), h: Number(x[2]), l: Number(x[3]), c: Number(x[4]), v: Number(x[5]) }));
       if (!rows.length) break; out = rows.concat(out); end = rows[rows.length - 1].t - 1; await sleep(120);
       if (rows.length < 200) break;
     }
@@ -107,7 +70,7 @@ function create(host) {
       const tk = await bx("/v5/market/tickers", { query: { category: "linear" } });
       const coins = (tk.list || []).filter(x => /USDT$/.test(x.symbol) && Number(x.lastPrice) > 0).sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h)).slice(0, nCoins).map(x => x.symbol);
       const data = {};
-      for (const [i, s] of coins.entries()) { ST.progress = `історія ${i + 1}/${coins.length}: ${s}`; data[s] = { "15": await candles(s, "15", 30), "5": await candles(s, "5", 10) }; }
+      for (const [i, s] of coins.entries()) { ST.progress = `історія ${i + 1}/${coins.length}: ${s}`; data[s] = { "15": await candles(s, "15", 30), "5": await candles(s, "5", 10), "60": await candles(s, "60", 90) }; }
       const out = [];
       for (const S of STRATS) {
         ST.progress = `перевіряю: ${S.name}`;
@@ -142,7 +105,7 @@ function create(host) {
       }
       out.sort((a, b) => (b.ok - a.ok) || ((b.oos ? b.oos.exp : -1e9) - (a.oos ? a.oos.exp : -1e9)));
       const win = out.find(x => x.ok);
-      ST.res = { at: Date.now(), coins, days15: 30, days5: 10, out,
+      ST.res = { at: Date.now(), coins, days15: 30, days5: 10, days60: 90, n: STRATS.length, out,
         verdict: win ? `Знайдено стратегію з додатним маточікуванням на даних, яких вона не бачила: «${win.name}» — у середньому ${win.oos.exp > 0 ? "+" : ""}${win.oos.exp}% на угоду після комісій (${win.oos.n} угод, у плюсі ${win.coinsPos} з ${win.coinsTot} монет, достовірність t=${win.oos.t}).`
           : `Жодна стратегія не показала стабільного додатного маточікування на даних, яких не бачила (після комісій). Найближча — «${out[0].name}»: ${out[0].oos ? (out[0].oos.exp > 0 ? "+" : "") + out[0].oos.exp + "% на угоду" : "—"}. Плюс, що може бути випадковим (t < 2), не рахується. Торгувати будь-яку з них на реальні гроші зараз — очікуваний мінус.` };
       lsSet("lab.res", ST.res);

@@ -112,11 +112,12 @@ async function fal(prompt) {
   const m = String(j.output || "").match(/\{[\s\S]*\}/); if (!m) throw new Error("AI не вернул JSON");
   return JSON.parse(m[0]);
 }
-const SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m), fal: FAL_KEY ? fal : null });
+let SG = null;
+const wsUrl = () => (process.env.TEST_WS_URL || "").trim() || (ENV === "testnet" ? "wss://stream-testnet.bybit.com/v5/public/" : "wss://stream.bybit.com/v5/public/") + (SG && SG.params.category === "inverse" ? "inverse" : "linear");
+SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m), fal: FAL_KEY ? fal : null, wsUrl });
 
 function state() {
-  const cat = SG.params.category === "inverse" ? "inverse" : "linear";
-  const ws = (process.env.TEST_WS_URL || "").trim() || (ENV === "testnet" ? "wss://stream-testnet.bybit.com/v5/public/" : "wss://stream.bybit.com/v5/public/") + cat;
+  const ws = wsUrl();
   return { env: ENV, ws, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, sg: SG.view() };
 }
 async function act(b) {

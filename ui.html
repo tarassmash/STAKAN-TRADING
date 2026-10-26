@@ -322,6 +322,16 @@
       <div class="row"><label>Доборов</label><input type="number" id="bandAdds" value="1" min="0" max="5" step="1" /></div>
       <div class="row"><label>Следом за средней N свечей</label><input type="number" id="bandRef" value="5" min="1" max="60" step="1" /></div>
       <div class="row"><label>Размер USDT (общий)</label><span class="val" id="bandUsdt">—</span></div>
+      <h2 style="margin-top:12px">⚡ Умная адаптация (лента в реальном времени)</h2>
+      <div class="info" style="font-size:.75rem">Сервер слушает ленту сделок Bybit и реагирует на каждую сделку. Старт движения = цена за 15 с прошла в K раз больше обычного для этой монеты + большая часть объёма бьёт в одну сторону + лента ускорилась. Тогда сразу: позиция против — закрыть, вход по движению IOC-лимиткой (мгновенно, но не хуже лучшей цены + cap), доборы пока движение идёт, трейлинг по волатильности монеты; лента развернулась при прибыли — фиксирует сразу.</div>
+      <div class="row"><label>Включено</label><input type="checkbox" id="smartOn" /></div>
+      <div class="row"><label>Движение × обычного (K)</label><input type="number" id="fastK" value="2.5" min="0.5" step="0.1" /></div>
+      <div class="row"><label>Но не меньше %</label><input type="number" id="fastMinPct" value="0.35" min="0.05" step="0.05" /></div>
+      <div class="row"><label>Доля объёма в одну сторону</label><input type="number" id="fastAggr" value="0.65" min="0.5" max="0.95" step="0.05" /></div>
+      <div class="row"><label>Ускорение ленты ×</label><input type="number" id="fastSpeed" value="2" min="0.5" step="0.1" /></div>
+      <div class="row"><label>Вход сразу (IOC-лимит)</label><input type="checkbox" id="momIoc" /></div>
+      <div class="row"><label>Не хуже лучшей цены на %</label><input type="number" id="momCap" value="0.15" min="0.01" step="0.01" /></div>
+      <div class="row"><label>Доборов по движению</label><input type="number" id="momAdds" value="2" min="0" max="5" step="1" /></div>
       <h2 style="margin-top:12px">⚡ Пульс: внезапный памп / дамп</h2>
       <div class="info" style="font-size:.75rem">Цена прошла N% за M секунд → бот сразу адаптируется: позицию против движения закрывает, встречные лимитки убирает и входит по движению лимиткой по лучшей цене (с трейлинг-тейком и коротким стопом). Движение утихло → снова лимитки ±%.</div>
       <div class="row"><label>Включено</label><input type="checkbox" id="pulseOn" /></div>
@@ -420,6 +430,7 @@
       <div class="row"><span>CVD тренд</span><span class="val" id="cvdTrendText">—</span></div>
       <div class="row"><span>Фильтр Щукина</span><span class="val" id="shukinFilterText">—</span></div>
       <div class="row"><span>Направление</span><span class="val" id="dirText">—</span></div>
+      <div class="row"><span>Лента 15 с</span><span class="val" id="tapeText">—</span></div>
       <div class="row"><span>Автопилот</span><span class="val" id="autoText">—</span></div>
       <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
@@ -482,8 +493,8 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
   const minis = {};
-  const NUMS = ['aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+  const NUMS = ['fastK', 'fastMinPct', 'fastAggr', 'fastSpeed', 'momCap', 'momAdds', 'aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['smartOn', 'momIoc', 'aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
   function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
@@ -662,6 +673,9 @@
       + (A.best ? `Лучшее: ${esc(A.best.p)}<br>на подборе ${rs(A.best.train)} · <b>на новых данных ${rs(A.best.valid)}</b><br>` : 'Подходящего варианта нет (мало сделок в истории)<br>')
       + `Было: ${esc(A.current.p)}<br>на новых данных ${rs(A.current.valid)}` + (A.reason ? `<br>🤖 ${esc(A.reason)}` : '') : 'Нажми кнопку — бот за секунды переберёт тысячи настроек на истории монеты и применит лучшие.')
       + `<br><span style="color:var(--muted)">${G.aiFal ? '🤖 AI fal.ai подключён: выбирает среди проверенных вариантов' : 'AI fal.ai не подключён (FAL_KEY в Railway) — выбирает оптимизатор'}</span>`;
+    const tp1 = cw && cw.tape;
+    $('tapeText').textContent = P.strategy === 'follow' && P.smartOn ? (tp1 ? `${tp1.mv15 >= 0 ? '+' : ''}${tp1.mv15}% · покупки ${Math.round(tp1.buy * 100)}% · ×${tp1.speedX} · порог ${tp1.thr}%` : 'жду сделки…') : 'выкл';
+    $('tapeText').style.color = tp1 && Math.abs(tp1.mv15) >= tp1.thr * 0.5 ? (tp1.mv15 > 0 ? 'var(--green)' : 'var(--red)') : 'var(--muted)';
     $('bandBox').style.display = P.strategy === 'follow' ? '' : 'none'; $('bandUsdt').textContent = P.orderUsdt;
     const stp = cw && cw.steps;
     $('feeInfo').innerHTML = stp ? `Комиссии ${esc(cw.symbol)}: maker ${stp.maker}% · taker ${stp.taker}%<br>Шаг сетки / доборов: <b>${stp.lim}%</b> (${P.feeX}× лимит+лимит)<br>${P.strategy === 'follow' ? `Трейлинг-тейк с <b>${cw.band ? cw.band.tp : stp.mkt}%</b>, отступ ${cw.band ? cw.band.gap : '—'}% (${P.feeX}× лимит+рынок)` : `Тейк: <b>${P.makerExit ? stp.lim : stp.mkt}%</b>`}${P.autoStep ? '' : '<br><span style="color:var(--yellow)">авто выкл — но не меньше ' + P.feeX + '× комиссии</span>'}` : 'Посчитаю после первого цикла';

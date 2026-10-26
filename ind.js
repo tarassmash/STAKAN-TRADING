@@ -44,3 +44,15 @@ function runSig(c, from, to, sig, o) {
 
 
 module.exports = { MAKER, TAKER, SLIP, ema, sma, std, atr, rsi, runSig };
+
+// ---------- «Пробій після стиснення (Боллінджер)»: один сигнал для лабораторії і для живої торгівлі ----------
+// Стиснення: ширина смуг Боллінджера (4σ / середня) на попередній свічці не більша за sq × мінімум ширини за останні look свічок.
+// Пробій: закриття вище верхньої смуги -> лонг, нижче нижньої -> шорт. Стоп і трейлінг: trail × ATR14.
+function sqzPrep(c, o = {}) {
+  const n = o.n || 20, k = o.k || 2, look = o.look || 120, sq = o.sq || 1.1;
+  const cl = c.map(x => x.c), M = sma(cl, n), D = std(cl, n, M), A = atr(c, 14), W = M.map((m, i) => (m ? 4 * D[i] / m : null));
+  const minW = (i) => { let mn = Infinity; for (let j = i - look; j < i; j++) if (W[j] != null) mn = Math.min(mn, W[j]); return mn; };
+  const sig = (i) => { if (i < look + n || !W[i] || !W[i - 1]) return 0; if (W[i - 1] > minW(i) * sq) return 0; return cl[i] > M[i] + k * D[i] ? 1 : cl[i] < M[i] - k * D[i] ? -1 : 0; };
+  return { M, D, A, W, minW, sig, look, sq };
+}
+module.exports.sqzPrep = sqzPrep;

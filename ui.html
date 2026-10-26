@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>АВТО-БОТ</title>
+<title>Пробій після стиснення</title>
 <style>
 :root{--bg:#0b0e11;--panel:#161a1e;--line:#2b3139;--ink:#eaecef;--mute:#848e9c;--up:#0ecb81;--down:#f6465d;--gold:#f7a600;--cyan:#22d3ee}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
@@ -29,438 +29,79 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
 </head>
 <body>
 <div class="wrap">
-  <h1>🤖 АВТО-БОТ</h1>
-  <div class="mute" style="font-size:13px">Пробій-бот: іде за ціною в будь-який бік, тейки по 0.3%, замість стопу — розворот. Торгує сервер 24/7, сторінку можна закрити.</div>
+  <h1>💥 Пробій після стиснення</h1>
+  <div class="mute" style="font-size:13px">Бот торгує одну стратегію: смуги Боллінджера стискаються до мінімуму → ціна закривається за смугою → вхід у бік пробою лімітом. Стоп стоїть на біржі з моменту входу й підтягується за ціною (трейлінг на ATR). Кілька монет одночасно, розмір угоди — від ризику. Торгує сервер 24/7.</div>
 
   <div class="card" id="connCard"><b>Підключення</b><div id="conn" style="font-size:13px;margin-top:6px"></div></div>
 
-  <div class="card" id="fullCard" style="border-color:#f7a600">
-    <div style="display:flex;gap:8px;margin-bottom:10px;align-items:flex-end">
-      <label class="f" style="flex:1">Монета (порожньо — бот вибирає сам)<input id="fSym" placeholder="напр. BTC, SOL, PEPE" autocapitalize="characters" autocomplete="off"></label>
-    </div>
-    <button class="big go" id="fMain">▶ ЗАПУСТИТИ</button>
-    <button class="btn" id="fInv" style="width:100%;margin-top:10px;min-height:48px;font-size:16px;font-weight:600">🔄 Дзеркало: торгувати навпаки</button>
-    <div id="fInvHint" style="font-size:12px;margin-top:6px"></div>
-    <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
+  <div class="card" style="border-color:#f7a600">
+    <button class="big go" id="main">▶ ЗАПУСТИТИ</button>
+    <div id="kpi" style="display:flex;gap:18px;flex-wrap:wrap;margin-top:12px"></div>
+    <div id="info" style="font-size:13px;margin-top:8px"></div>
   </div>
-  <div class="card" style="margin-top:14px"><b>🧪 Лабораторія стратегій</b> <a href="#" id="labRun" class="mute" style="font-size:12px">перевірити зараз</a> <span class="mute" id="labAt" style="font-size:12px"></span>
-    <div class="mute" style="font-size:12px;margin-top:4px">~30 найвідоміших стратегій світу на історії 12 найліквідніших монет з комісіями. Параметри підбираються на перших 70% історії, а вердикт — лише на останніх 30%, яких стратегія не бачила. «Маточікування» — середній результат однієї угоди після комісій, % від суми угоди.</div>
+
+  <div class="card"><b>Відкриті угоди</b> <a href="#" id="closeAll" class="mute" style="font-size:12px;display:none">закрити всі ринком</a>
+    <div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Стоп</th><th>Ціна</th><th>P&L</th><th>Хв</th></tr></thead><tbody id="pos"></tbody></table></div></div>
+
+  <div class="card"><b>Монети зараз</b> <span class="mute" id="boardAt" style="font-size:12px"></span>
+    <div class="scroll"><table><thead><tr><th>Монета</th><th>Стиснення</th><th>Ширина смуг</th><th>Сигнал</th></tr></thead><tbody id="board"></tbody></table></div>
+    <div class="mute" style="font-size:12px;margin-top:6px">«Стиснення» — ширина смуг відносно найвужчої за останні ~30 год (1.00 = найвужча). Нижче порогу — монета «заряджена»: чекаю закриття за смугою.</div></div>
+
+  <div class="card"><b>🧪 Перевірка стратегії на історії</b> <a href="#" id="labRun" class="mute" style="font-size:12px">перевірити зараз</a> <span class="mute" id="labAt" style="font-size:12px"></span>
+    <div class="mute" style="font-size:12px;margin-top:4px">Раз на добу: 15 найліквідніших монет, 15-хв свічки за 60 днів, з комісіями. Параметри підбираються на перших 70% історії, вердикт — на останніх 30%, яких стратегія не бачила. Бот торгує з параметрами, які вибрала ця перевірка.</div>
     <div id="lab" style="font-size:13px;margin-top:8px"></div></div>
-  <div class="card" id="dgCard" style="margin-top:14px"><b>🔍 Чому мінус — розбір</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
-  <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
-  <details id="manual" style="display:none"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
-  <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="bg">🚀 Пробійна сітка — налаштування</button></div>
-  <div id="tabGrid">
 
-  <div class="card">
-    <div style="font-size:19px;font-weight:700"><span class="dot" id="dot"></span><span id="status">Зупинено</span></div>
-    <div class="mute" id="status2" style="font-size:13px;margin-top:4px"></div>
-    <div style="margin-top:12px"><button class="big go" id="main">▶ Запустити</button></div>
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="newGrid">🔄 Нова сітка зараз</button><button class="btn" id="closeGrid">✖ Закрити сітку і позицію</button></div>
-    <div style="margin-top:12px;font-size:14px;font-weight:600">Режим сітки</div>
-    <div class="seg"><button data-mode="auto">🤖 Авто</button><button data-mode="long">🔺 Лонг</button><button data-mode="neutral">↕ Нейтр.</button><button data-mode="short">🔻 Шорт</button></div>
-    <div class="mute" id="modeHint" style="font-size:12px;margin-top:4px"></div>
-    <div id="warn"></div>
-  </div>
+  <div class="card"><b>🔍 Розбір результату</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
 
-  <div class="card grid">
-    <div class="k"><span>Капітал · вільно, USDT</span><b id="eq">—</b></div>
-    <div class="k"><span>Сітка заробила · кіл</span><b id="gp">—</b></div>
-    <div class="k"><span>Нереалізований PnL</span><b id="ur">—</b></div>
-    <div class="k"><span>За 24 год · кіл</span><b id="day">—</b></div>
-    <div class="k"><span>Кола · закриття сіток (стоп/пробій/тренд)</span><b id="tot">—</b></div>
-    <div class="k"><span>Пробої · PnL</span><b id="bks">—</b></div>
-    <div class="k"><span>Трейлінгів</span><b id="tr">—</b></div>
-  </div>
-
-  <div class="card" id="bkCard" style="display:none;border-color:#f7a600">
-    <b>🚀 Пробійна угода</b>
-    <div id="bkInfo" style="font-size:14px;margin-top:6px"></div>
-  </div>
-
-  <div class="card">
-    <b id="gTitle">Сітка</b>
-    <div class="mute" id="gInfo" style="font-size:13px;margin-top:4px"></div>
-    <svg id="ladder" viewBox="0 0 600 360" style="width:100%;height:auto;margin-top:8px;background:var(--bg);border-radius:10px"></svg>
-    <div id="gTrend" style="font-size:13px;margin-top:6px"></div>
-    <div class="mute" style="font-size:11px;margin-top:4px">● зелені — чекають купівлі, ● червоні — чекають продажу, ■ заповнені — комірка тримає позицію і чекає закриття на сусідньому рівні; жовта лінія — ціна</div>
-  </div>
-
-  <div class="card">
-    <details><summary>Налаштування (діють для нової сітки)</summary>
-      <div class="grid" style="margin-top:10px">
-        <label class="f">Монета<select id="sAuto"><option value="auto">Авто: бот вибирає</option><option value="manual">Своя</option></select></label>
-        <label class="f">Своя монета<input id="sSym" placeholder="SOLUSDT"></label>
-        <label class="f">Сума на сітку (маржа), USDT<input id="sInv" inputmode="decimal"></label>
-        <label class="f">Плече<input id="sLev" inputmode="decimal"></label>
-        <label class="f">Кількість сіток<input id="sN" inputmode="decimal"></label>
-        <label class="f">Діапазон<select id="sAR"><option value="auto">Авто: від руху монети за добу</option><option value="manual">Свій</option></select></label>
-        <label class="f">Ширина діапазону, %<input id="sW" inputmode="decimal"></label>
-        <label class="f">Низ (необов'язково)<input id="sLow" inputmode="decimal"></label>
-        <label class="f">Верх (необов'язково)<input id="sHigh" inputmode="decimal"></label>
-        <label class="f">Трейлінг сітки<select id="sTrail"><option value="on">Увімк</option><option value="off">Вимк</option></select></label>
-        <label class="f">Вихід ціни за сітку<select id="sBk"><option value="on">🚀 Пробій: угода за рухом з трейлінг-тейком</option><option value="off">🛑 Стоп сітки</option></select></label>
-        <label class="f">Пробій: ціна за краєм сітки на, %<input id="sBkT" inputmode="decimal"></label>
-        <label class="f">Пробій: обсяг × обсягу сітки<input id="sBkM" inputmode="decimal"></label>
-        <label class="f">Пробій: стоп (хибний пробій), %<input id="sBkS" inputmode="decimal"></label>
-        <label class="f">Трейлінг-тейк з прибутку, %<input id="sBkA" inputmode="decimal"></label>
-        <label class="f">Трейлінг-тейк: відстань від найкращої ціни, %<input id="sBkG" inputmode="decimal"></label>
-        <label class="f">Стоп сітки за краєм (якщо пробій вимкнено), %<input id="sSl" inputmode="decimal"></label>
-        <label class="f">Нова сітка після стопу<select id="sRe"><option value="on">Так</option><option value="off">Ні</option></select></label>
-        <label class="f">Пауза перед новою сіткою, хв<input id="sReM" inputmode="decimal"></label>
-        <label class="f">Крок ≥ N × комісії<input id="sFee" inputmode="decimal"></label>
-        <label class="f">Перевірка на історії<select id="sTune"><option value="on">Так: вибрати монету, діапазон і сітки</option><option value="off">Ні</option></select></label>
-        <label class="f">Днів історії (1–3)<input id="sDays" inputmode="decimal"></label>
-        <label class="f">Без плюсу на історії — не торгувати<select id="sNeed"><option value="on">Так</option><option value="off">Ні</option></select></label>
-        <label class="f">Тренд: нахил EMA20 за 6 год від, %<input id="sTrend" inputmode="decimal"></label>
-      </div>
-      <div style="margin-top:8px"><button class="btn" id="sSave">Зберегти</button> <span id="sOut" class="mute" style="font-size:13px"></span></div>
-    </details>
-    <div id="picks" class="mute" style="font-size:12px;margin-top:8px"></div>
-  </div>
-
-  <div class="card">
-    <b>🧪 Перевірка на історії перед сіткою</b> <span class="mute" id="btLine" style="font-size:12px"></span>
-    <div class="scroll"><table><thead><tr><th>Монета</th><th>Тренд</th><th>Режим</th><th>Діапазон</th><th>Сіток</th><th>Результат</th><th>Кіл</th><th>Стопів · пробоїв</th><th>Макс. просідання</th></tr></thead><tbody id="bt"></tbody></table></div>
-  </div>
-
-  <div class="card"><b>Закриті кола і сітки</b><div class="log" id="trades"></div></div>
-  </div>
-  <div id="tabBg" style="display:none">
-    <div class="card">
-      <div style="font-size:19px;font-weight:700"><span class="dot" id="bDot"></span><span id="bStatus">Зупинено</span></div>
-      <div class="mute" id="bStatus2" style="font-size:13px;margin-top:4px"></div>
-      <div style="margin-top:12px"><button class="big go" id="bMain">▶ Запустити пробійну сітку</button></div>
-      <div style="margin-top:12px;font-size:14px;font-weight:600">Увійти зараз</div>
-      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
-        <input id="bNowSym" placeholder="монета (порожньо = поточна / найкраща)" style="flex:1;min-width:160px">
-        <button class="btn" id="bLongNow" style="background:var(--up);color:#06281b;border:0;font-weight:700">▲ Лонг зараз</button>
-        <button class="btn" id="bShortNow" style="background:var(--down);color:#fff;border:0;font-weight:700">▼ Шорт зараз</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
-        <button class="btn" id="bBoth" style="background:#7c3aed;color:#fff;border:0;font-weight:700;flex:1;min-height:44px">↕ Пробій в обидва боки — куди рване</button>
-        <label class="mute" style="font-size:12px;display:flex;align-items:center;gap:4px">межі ±<input id="bBothPct" inputmode="decimal" style="width:64px;min-height:36px">%</label>
-      </div>
-      <div id="bBothInfo" style="font-size:13px;margin-top:4px"></div>
-      <div class="mute" style="font-size:12px;margin-top:4px">Відкриває пробійну сітку негайно в обраний бік (юніт з мікро-тейком + бігун ринком), без очікування сигналу. Далі сітка сама добирає на рухах і відкатах у цей бік, доки тренд явно не розвернеться.</div>
-      <button class="big" id="bScalp" style="margin-top:10px;min-height:56px;font-size:18px">⚡ Суперскальпінг</button>
-      <div id="bScalpHint" style="font-size:12px;margin-top:4px"></div>
-      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="bNew">🔄 Нова монета й крок</button><button class="btn" id="bClose">✖ Закрити все</button></div>
-      <div class="mute" style="font-size:12px;margin-top:8px">Рівні кожні N % без меж — сітка йде за ціною. Напрям задає пробій (EMA 3 год проти 8 год на 5-хв свічках). Кожен перетин рівня — і рухом, і відкатом — відкриває угоду в бік пробою з мікро-тейком на наступному рівні; «бігун» з трейлінг-стопом забирає весь тренд. Розворот напряму закриває все. Працює паралельно зі звичайною сіткою, на іншій монеті.</div>
-      <div id="bWarn"></div>
-    </div>
-    <div class="card grid">
-      <div class="k"><span>Напрям</span><b id="bDir">—</b></div>
-      <div class="k"><span>Прибуток · тейків/стопів</span><b id="bProfit">—</b></div>
-      <div class="k"><span>Нереалізований PnL</span><b id="bUnreal">—</b></div>
-      <div class="k"><span>За 24 год · угод</span><b id="bDay">—</b></div>
-      <div class="k"><span>Усього · win · бігун</span><b id="bTot">—</b></div>
-    </div>
-    <div class="card">
-      <b id="bTitle">Юніти</b>
-      <div class="mute" id="bInfo" style="font-size:13px;margin-top:4px"></div>
-      <div class="scroll"><table><thead><tr><th>Тип</th><th>Бік</th><th>Вхід</th><th>Тейк</th><th>Стоп</th><th>PnL</th></tr></thead><tbody id="bUnits"></tbody></table></div>
-    </div>
-    <div class="card">
-      <b>🧪 Перевірка на історії</b> <span class="mute" id="bBtLine" style="font-size:12px"></span>
-      <div class="scroll"><table><thead><tr><th>Монета</th><th>Напрям зараз</th><th>Крок</th><th>Юнітів</th><th>Результат</th><th>Тейків</th><th>Стопів</th><th>Розворотів</th></tr></thead><tbody id="bBt"></tbody></table></div>
-    </div>
-    <div class="card">
-      <details><summary>Налаштування пробійної сітки</summary>
-        <div class="grid" style="margin-top:10px">
-          <label class="f">Монета<select id="bAuto"><option value="auto">Авто: перевірка на історії</option><option value="manual">Своя</option></select></label>
-          <label class="f">Своя монета<input id="bSym" placeholder="SOLUSDT"></label>
-          <label class="f">Сума, USDT<input id="bInv" inputmode="decimal"></label>
-          <label class="f">Плече<input id="bLev" inputmode="decimal"></label>
-          <label class="f">Крок між рівнями, %<input id="bStep" inputmode="decimal"></label>
-          <label class="f">Суперскальпінг: тейк, %<input id="bScStep" inputmode="decimal"></label>
-          <label class="f">Юнітів одночасно<input id="bUnitsN" inputmode="decimal"></label>
-          <label class="f">Стоп юніта, рівнів назад<input id="bStop" inputmode="decimal"></label>
-          <label class="f">Бігун (трейлінг тренду)<select id="bRun"><option value="on">Так</option><option value="off">Ні</option></select></label>
-          <label class="f">Бігун: трейлінг, рівнів<input id="bTrail" inputmode="decimal"></label>
-          <label class="f">Напрям: різниця EMA від, %<input id="bBand" inputmode="decimal"></label>
-          <label class="f">Перевірка на історії<select id="bTune"><option value="on">Так</option><option value="off">Ні</option></select></label>
-          <label class="f">Без плюсу на історії — не торгувати<select id="bNeed"><option value="on">Так</option><option value="off">Ні</option></select></label>
-        </div>
-        <div style="margin-top:8px"><button class="btn" id="bSave">Зберегти</button> <span id="bOut" class="mute" style="font-size:13px"></span></div>
-      </details>
-    </div>
-    <div class="card"><b>Угоди пробійної сітки</b><div class="log" id="bTrades"></div></div>
-  </div>
-
-  <div id="tabBrain" style="display:none">
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-        <div><span class="dot" id="rDot"></span><b id="rStatus">Автоперемикач</b><div class="mute" style="font-size:13px" id="rStatus2"></div></div>
-      </div>
-      <button class="big go" id="rMain" style="margin-top:12px">▶ Увімкнути автоперемикач</button>
-      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn" id="rCheck">🔍 Перевірити ринок зараз</button><span id="rOut" class="mute" style="font-size:13px;align-self:center"></span></div>
-      <div class="mute" style="font-size:13px;margin-top:10px">Сам визначає, який зараз ринок на кожній монеті, і вмикає потрібний бот:
-        <b>флет</b> → 🧱 звичайна сітка · <b>тренд</b> → 🚀 пробійна сітка в бік тренду · <b>стиснення</b> → ↕ «обидва боки» · <b>хаос / пилка</b> → нічого не відкриває, чекає.
-        Монета береться, лише якщо стратегія дала плюс на 3 днях історії. Сітка міняється тільки після 2 перевірок поспіль не-флету; відкриті угоди пробійної сітки не перериваються.</div>
-    </div>
-    <div class="card"><b>Що вирішено</b> <span class="mute" id="rWhen" style="font-size:12px"></span><div id="rActs" style="font-size:13px;margin-top:6px"></div></div>
-    <div class="card"><b>Ринок по монетах</b> <span class="mute" id="rCounts" style="font-size:12px"></span>
-      <div class="scroll"><table><thead><tr><th>Монета</th><th>Режим</th><th>Ефект.</th><th>Нахил 6г</th><th>Волат.</th><th>Діап. 6г</th><th>Історія</th></tr></thead><tbody id="rCoins"></tbody></table></div>
-      <div class="mute" style="font-size:12px;margin-top:6px">Ефект. — наскільки рух прямий (1 = рівна лінія, 0 = туди-сюди). Волат. — коливання останніх 2 год відносно доби (менше 0.6 = стиснення). Історія — результат потрібної стратегії на 3 днях.</div>
-    </div>
-    <div class="card"><details><summary>Налаштування автоперемикача</summary>
-      <div class="grid" style="margin-top:10px">
-        <label class="f">Перевіряти кожні, хв<input id="rEvery" inputmode="decimal"></label>
-        <label class="f">Монет у скані<input id="rCoinsN" inputmode="decimal"></label>
-        <label class="f">Мін. обіг за добу, млн $<input id="rTurn" inputmode="decimal"></label>
-      </div>
-      <div style="margin-top:8px"><button class="btn" id="rSave">Зберегти</button> <span id="rSOut" class="mute" style="font-size:13px"></span></div>
-      <div class="mute" style="font-size:12px;margin-top:8px">Розмір угод, плече, стопи — беруться з налаштувань вкладок «Сітка» і «Пробійна сітка».</div>
-    </details></div>
-    <div class="card"><b>Журнал рішень</b><div class="log" id="rLog"></div></div>
-  </div>
-
-  </details>
+  <div class="card"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
+  <div class="card"><b>Закриті угоди</b><div class="log" id="trades"></div></div>
 </div>
 <script>
-"use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toFixed(d);
 const sgn = (v, d = 2) => v == null ? "—" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(d)}</span>`;
-const pr = (v) => v == null ? "—" : Number(v).toPrecision(6);
-let S = null, BUSY = false, FILLED = false;
-async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); paint(); } catch (e) { $("status").textContent = "немає зв'язку з сервером"; } }
+let S = null, BUSY = false;
+async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); paint(); } catch (e) { $("info").textContent = "немає зв'язку з сервером"; } }
 async function act(o, q) {
   if (q && !confirm(q)) return "";
   BUSY = true; paint();
   const r = await fetch("/api/act", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }).then(r => r.json()).catch(() => ({ error: "немає зв'язку з сервером" }));
   BUSY = false; if (r.error) alert(r.error); await load(); return r.text || "";
 }
-$("main").onclick = () => S.gr.params.on ? act({ what: "stop" }, "Зупинити? Ордери сітки знімуться. Позиція сітки (якщо є) лишиться — закрити її можна кнопкою «Закрити сітку».") : act({ what: "start" }, S.env === "mainnet" ? "Запустити грід-бота на реальному рахунку?" : "Запустити на testnet?");
-$("newGrid").onclick = () => act({ what: "new" }, "Закрити поточну сітку (позицію — ринком) і поставити нову навколо поточної ціни?");
-$("closeGrid").onclick = () => act({ what: "close" }, "Закрити сітку: зняти ордери і закрити позицію ринком?");
-document.querySelectorAll("[data-mode]").forEach(b => b.onclick = async () => { const t = await act({ what: "settings", o: { mode: b.dataset.mode } }); if (t.startsWith("Збережено") && S.gr.grid && confirm("Режим зміниться для нової сітки. Поставити нову сітку зараз?")) act({ what: "new" }); });
-const FIELDS = [["sInv", "investment"], ["sLev", "leverage"], ["sN", "grids"], ["sW", "rangePct"], ["sLow", "low"], ["sHigh", "high"], ["sSl", "slPct"], ["sReM", "restartMin"], ["sFee", "feeX"], ["sDays", "btDays"], ["sTrend", "trendPct"], ["sBkT", "bkTrigger"], ["sBkM", "bkMult"], ["sBkS", "bkStopPct"], ["sBkA", "bkTrailStart"], ["sBkG", "bkTrailGap"]];
-$("sSave").onclick = async () => {
-  const o = {};
-  for (const [id, k] of FIELDS) { const v = Number(String($(id).value).replace(",", ".")); if (Number.isFinite(v) && $(id).value !== "") o[k] = v; }
-  o.autoCoin = $("sAuto").value === "auto"; o.symbol = $("sSym").value; o.autoRange = $("sAR").value === "auto"; o.trailing = $("sTrail").value === "on"; o.autoRestart = $("sRe").value === "on"; o.autoTune = $("sTune").value === "on"; o.btNeedPlus = $("sNeed").value === "on"; o.breakout = $("sBk").value === "on";
-  $("sOut").textContent = await act({ what: "settings", o }); FILLED = false;
-};
-function fill(P) {
-  for (const [id, k] of FIELDS) $(id).value = P[k] || (k === "low" || k === "high" ? "" : P[k]);
-  $("sAuto").value = P.autoCoin ? "auto" : "manual"; $("sSym").value = P.symbol || ""; $("sAR").value = P.autoRange ? "auto" : "manual";
-  $("sTrail").value = P.trailing ? "on" : "off"; $("sRe").value = P.autoRestart ? "on" : "off"; $("sTune").value = P.autoTune ? "on" : "off"; $("sNeed").value = P.btNeedPlus ? "on" : "off"; $("sBk").value = P.breakout ? "on" : "off";
-}
-function ladder(g, price) {
-  if (!g) { $("ladder").innerHTML = '<text x="20" y="180" fill="#848e9c" font-size="14">Сітки ще немає</text>'; return; }
-  const lo = Math.min(g.low, price || g.low), hi = Math.max(g.high, price || g.high), pad = (hi - lo) * 0.06 || 1;
-  const Y = (v) => 345 - (v - (lo - pad)) / ((hi + pad) - (lo - pad)) * 330;
-  let s = "";
-  for (const c of g.cells) {
-    const y1 = Y(c.lo), y2 = Y(c.hi), hold = c.state === "close";
-    const col = c.dir > 0 ? "#0ecb81" : "#f6465d";
-    if (hold) s += `<rect x="70" y="${Math.min(y1, y2)}" width="440" height="${Math.max(1, Math.abs(y1 - y2) - 1)}" fill="${col}" fill-opacity=".14"/>`;
-    s += `<line x1="70" x2="510" y1="${y1}" y2="${y1}" stroke="#2b3139"/>`;
-    const at = c.state === "open" ? (c.dir > 0 ? c.lo : c.hi) : (c.dir > 0 ? c.hi : c.lo), wait = (c.state === "open") === (c.dir > 0) ? "Buy" : "Sell";
-    s += `<circle cx="${c.dir > 0 ? 470 : 110}" cy="${Y(at)}" r="${c.live ? 5 : 3}" fill="${wait === "Buy" ? "#0ecb81" : "#f6465d"}" fill-opacity="${c.live ? 1 : 0.35}"><title>${wait === "Buy" ? "купівля" : "продаж"} ${pr(at)}${c.live ? "" : " (ставиться)"}</title></circle>`;
-  }
-  s += `<line x1="70" x2="510" y1="${Y(g.high)}" y2="${Y(g.high)}" stroke="#2b3139"/>`;
-  s += `<text x="515" y="${Y(g.high) + 4}" fill="#848e9c" font-size="11">${pr(g.high)}</text><text x="515" y="${Y(g.low) + 4}" fill="#848e9c" font-size="11">${pr(g.low)}</text>`;
-  if (price) s += `<line x1="60" x2="520" y1="${Y(price)}" y2="${Y(price)}" stroke="#f7a600" stroke-width="2"/><text x="4" y="${Y(price) + 4}" fill="#f7a600" font-size="11">${pr(price)}</text>`;
-  $("ladder").innerHTML = s;
-}
-function paint() {
-  if (!S) return;
-  const X = S.gr, P = X.params, g = X.grid, ACC = S.acc, on = !!P.on;
-  if (!FILLED) { fill(P); FILLED = true; }
-  const c = [];
-  c.push(S.keys ? `<span class="up">Bybit ${S.env}: ключі є</span>` : '<span class="down">Немає BYBIT_API_KEY / BYBIT_API_SECRET у Railway → Variables</span>');
-  if (!S.password) c.push('<span class="down">Немає UI_PASSWORD — кнопки заблоковані, додайте змінну в Railway</span>');
-  if (ACC.err) c.push(`<span class="down">Bybit: ${esc(ACC.err)}</span>`);
-  $("conn").innerHTML = c.join("<br>");
-  $("connCard").style.display = S.keys && S.password && !ACC.err ? "none" : "";
-  $("dot").className = "dot" + (on ? " on" : "");
-  const K = X.bk;
-  $("bkCard").style.display = K ? "" : "none";
-  if (K) $("bkInfo").innerHTML = `<b class="${K.dir > 0 ? "up" : "down"}">${esc(K.sym)} ${K.dir > 0 ? "лонг на пробій вгору" : "шорт на пробій вниз"}</b> ${K.qty} @ ${pr(K.entry)} · зараз ${pr(K.price)} (${sgn(K.pct)}%) · PnL ${sgn(K.pnl, 4)} · найкраще ${sgn(K.peakPct)}% · ${K.min} хв`
-    + `<br><span class="mute">Стоп (хибний пробій): ${pr(K.stopPx)} · трейлінг-тейк ${K.trailing ? '<b class="up">іде за ціною</b>' : `вмикається з ${pr(K.activePx)} (+${P.bkTrailStart}%)`}, відстань ${P.bkTrailGap}% · стоп і трейлінг стоять на біржі${K.stopSet ? " ✓" : " (ставлю…)"} · після закриття — нова сітка</span>`;
-  $("status").textContent = !on ? "Зупинено" : K ? `🚀 Пробій ${K.sym}: ${K.dir > 0 ? "лонг" : "шорт"}` : g ? `Сітка ${g.sym} працює` : X.restartIn != null ? `Нова сітка через ${X.restartIn} с` : "Ставлю сітку…";
-  $("status2").textContent = (g ? `ціна ${pr(X.price)} · ` : "") + `${P.mode === "long" ? "лонг" : P.mode === "short" ? "шорт" : "нейтральна"} · ${P.investment} USDT × x${P.leverage} · ${g ? g.n + " сіток" + (g.n < P.grids ? ` (з ${P.grids}: більше не дозволяє сума або крок ≥ комісій)` : "") : P.grids + " сіток"} · трейлінг ${P.trailing ? "так" : "ні"} · стоп ${P.slPct}% за краєм · сервер 24/7`;
-  const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
-  document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === P.mode));
-  $("modeHint").textContent = P.mode === "auto" ? "Режим за трендом монети (годинні свічки, EMA20/50): росте → лонг-сітка, падає → шорт-сітка, флет → нейтральна. Тренд перевіряється кожні 15 хв; якщо він розвернувся проти сітки (2 перевірки поспіль), сітка замінюється новою — за трендом."
-    : P.mode === "long" ? "Купує на рівнях нижче ціни, продає на рівень вище; на старті купує частку для рівнів над ціною. Заробляє на коливаннях і на рості."
-    : P.mode === "short" ? "Продає на рівнях вище ціни, відкуповує на рівень нижче; на старті продає частку для рівнів під ціною. Заробляє на коливаннях і на падінні."
-    : "Без стартової позиції: нижче ціни купує → продає на рівень вище, вище ціни продає → відкуповує на рівень нижче. Заробляє на коливаннях у діапазоні.";
-  $("warn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
-  $("eq").textContent = f(ACC.equity) + " · " + f(ACC.available);
-  $("gp").innerHTML = g ? `${sgn(g.profit, 4)} · ${g.cycles}` : "—";
-  $("ur").innerHTML = g ? sgn(g.unreal, 4) : "—";
-  $("day").innerHTML = `${sgn(X.stats.day, 4)} · ${X.stats.dayCycles}`;
-  $("tot").innerHTML = `${sgn(X.stats.profit, 4)} · ${X.stats.stops} (${sgn(X.stats.stopPnl, 3)})`;
-  $("tr").textContent = g ? g.trails : "—";
-  $("bks").innerHTML = `${X.stats.breakouts || 0} · ${sgn(X.stats.bkPnl || 0, 4)}`;
-  $("gTitle").textContent = g ? `Сітка ${g.sym}` : "Сітка";
-  $("gInfo").innerHTML = g ? `${pr(g.low)} – ${pr(g.high)} · ${g.n} сіток по ${g.stepPct}% · ${g.qty} на сітку · x${g.lev} · позиція сітки ${g.pos} · стоп ${g.pos > 0 ? "≤ " + pr(g.stopLow) : g.pos < 0 ? "≥ " + pr(g.stopHigh) : `≤ ${pr(g.stopLow)} / ≥ ${pr(g.stopHigh)}`} · з ${new Date(g.startedAt).toLocaleString()}` : (X.restartIn != null ? `нова сітка через ${X.restartIn} с` : "");
-  ladder(g, X.price);
-  const MODE = { long: "🔺 лонг", short: "🔻 шорт", neutral: "↕ нейтр." };
-  $("gTrend").innerHTML = g ? (g.trend ? `Тренд ${esc(g.sym)}: <b class="${g.trend.mode === "long" ? "up" : g.trend.mode === "short" ? "down" : ""}">${esc(g.trend.why)}</b>${P.mode === "auto" ? (g.trend.mode !== g.mode ? ` · <span style="color:var(--gold)">сітка ${MODE[g.mode]}, тренд інший — перевіряю (заміна після 2 перевірок поспіль)</span>` : " · сітка за трендом ✓") : ""}` : "")
-    + (g.btr && g.btr.tested ? `<br><span class="mute">На історії за ${g.btr.days} дні ця сітка дала б ${g.btr.roi >= 0 ? "+" : ""}${g.btr.roi}% від суми, ${g.btr.cycles} кіл, стопів ${g.btr.stops}</span>` : "") : "";
-  const B = X.bt;
-  $("btLine").textContent = B ? `· ${new Date(B.at).toLocaleTimeString()}, свічки 5 хв за ${B.days} дні, з комісіями, трейлінгом і стопами` : "· ще не було";
-  $("bt").innerHTML = B ? B.results.map((r, i) => r.err ? `<tr><td><b>${esc(r.sym)}</b></td><td colspan="8" class="mute">${esc(r.err)}</td></tr>`
-    : `<tr${g && g.sym === r.sym && i === 0 ? ' style="background:rgba(14,203,129,.08)"' : ""}><td><b>${esc(r.sym)}</b>${i === 0 ? " ✓" : ""}</td><td class="${r.trend.mode === "long" ? "up" : r.trend.mode === "short" ? "down" : "mute"}">${r.trend.slope > 0 ? "+" : ""}${r.trend.slope}%</td><td>${MODE[r.mode]}</td><td>${r.w}%</td><td>${r.n}</td><td>${sgn(r.roi, 2)}%</td><td>${r.cycles}</td><td>${r.stops} · ${r.breakouts || 0}</td><td>${r.maxDD != null ? "−" + r.maxDD + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="9" class="mute">Перевірка запуститься перед наступною сіткою</td></tr>';
-  $("picks").textContent = X.picks.length ? "Найкращі монети для сітки зараз (рух за добу / зміна за добу): " + X.picks.map(p => `${p.sym} ${p.range}%/${p.chg}%`).join(", ") : "";
-  $("trades").innerHTML = (X.trades || []).map(t => t.kind === "breakout"
-    ? `<div><b>${new Date(t.at).toLocaleString()} · 🚀 ${esc(t.sym)} пробій ${t.dir > 0 ? "вгору (лонг)" : "вниз (шорт)"}</b> ${pr(t.entry)} → ${pr(t.exit)} · ${sgn(t.pnl, 4)} · найкраще ${sgn(t.peakPct)}% · ${t.min} хв</div>`
-    : t.kind === "cell"
-    ? `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.dir > 0 ? "купив" : "продав"} ${pr(t.open)} → ${t.dir > 0 ? "продав" : "купив"} ${pr(t.close)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`
-    : `<div><b>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} сітку закрито: ${esc(t.why)}</b> · сітка ${sgn(t.gridProfit, 4)} за ${t.cycles} кіл · закриття ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
-  $("log").innerHTML = (S.events || []).slice(0, 80).map(e => `<div class="${e[2] === "down" ? "down" : e[2] === "up" ? "up" : ""}">${new Date(e[0]).toLocaleTimeString()} · ${esc(e[1])}</div>`).join("");
-}
-// ---- tabs ----
-let TAB = "bg";
-function showTab() { $("tabGrid").style.display = TAB === "grid" ? "" : "none"; $("tabBg").style.display = TAB === "bg" ? "" : "none"; $("tabBrain").style.display = TAB === "brain" ? "" : "none"; document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === TAB)); }
-document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { TAB = b.dataset.tab; try { localStorage.setItem("tab", TAB); } catch (e) { /* private mode */ } showTab(); });
-showTab();
-// ---- breakout grid ----
-let BFILLED = false;
-const BF = [["bScStep", "scalpStep"], ["bInv", "investment"], ["bLev", "leverage"], ["bStep", "stepPct"], ["bUnitsN", "maxUnits"], ["bStop", "stopSteps"], ["bTrail", "trailSteps"], ["bBand", "band"]];
-$("bMain").onclick = () => S.bg.params.on ? act({ what: "bg-stop" }, "Зупинити пробійну сітку? Нові юніти не відкриватимуться, відкриті дійдуть до тейку/стопу.") : act({ what: "bg-start" }, S.env === "mainnet" ? "Запустити пробійну сітку на реальному рахунку?" : "Запустити на testnet?");
-$("bScalp").onclick = () => act({ what: "bg-scalp", on: !S.bg.params.scalp }, S.bg.params.scalp ? "Вимкнути суперскальпінг (крок знову підбиратиметься на історії)?" : `Увімкнути суперскальпінг: тейки ${S.bg.params.scalpStep}% на кожному мікро-русі, завжди більші за комісії?`);
-const enterNow = (dir) => { const sym = $("bNowSym").value.trim(); act({ what: "bg-enter", dir, sym }, `${dir > 0 ? "ЛОНГ" : "ШОРТ"} зараз${sym ? " на " + sym.toUpperCase() : S.bg.b ? " на " + S.bg.b.sym : ""}: відкрити пробійну сітку ринком${S.env === "mainnet" ? " на реальному рахунку" : ""}?`).then(t => { if (t) $("bOut").textContent = t; }); };
-$("bLongNow").onclick = () => enterNow(1);
-$("bBoth").onclick = () => { const sym = $("bNowSym").value.trim(), pct = Number(String($("bBothPct").value).replace(",", ".")) || S.bg.params.straddlePct;
-  act({ what: "bg-both", pct, sym }, `Поставити межі ±${pct}% навколо ціни${sym ? " " + sym.toUpperCase() : S.bg.b ? " " + S.bg.b.sym : ""}? Куди ціна проб'є першою — туди й вхід (лонг або шорт), друга межа знімається.`).then(t => { if (t) $("bOut").textContent = t; }); };
-$("bShortNow").onclick = () => enterNow(-1);
-$("bNew").onclick = () => act({ what: "bg-restart" }, "Підібрати нову монету й крок (перевірка на історії)?");
-$("bClose").onclick = () => act({ what: "bg-close" }, "Закрити всі юніти ринком?");
-$("bSave").onclick = async () => {
-  const o = {}; for (const [id, k] of BF) { const v = Number(String($(id).value).replace(",", ".")); if (Number.isFinite(v) && $(id).value !== "") o[k] = v; }
-  o.autoCoin = $("bAuto").value === "auto"; o.symbol = $("bSym").value; o.runner = $("bRun").value === "on"; o.autoTune = $("bTune").value === "on"; o.btNeedPlus = $("bNeed").value === "on";
-  $("bOut").textContent = await act({ what: "bg-settings", o }); BFILLED = false;
-};
-function paintBg() {
-  const X = S.bg; if (!X) return; const P = X.params, b = X.b;
-  if (!BFILLED) { for (const [id, k] of BF) $(id).value = P[k]; $("bAuto").value = P.autoCoin ? "auto" : "manual"; $("bSym").value = P.symbol || ""; $("bRun").value = P.runner ? "on" : "off"; $("bTune").value = P.autoTune ? "on" : "off"; $("bNeed").value = P.btNeedPlus ? "on" : "off"; BFILLED = true; }
-  $("bDot").className = "dot" + (P.on ? " on" : "");
-  $("bStatus").textContent = !P.on ? "Зупинено" : b ? `Пробійна сітка ${b.sym}` : X.waitIn != null ? `Пошук через ${X.waitIn} с` : "Підбираю монету…";
-  $("bStatus2").textContent = b ? `${b.scalp ? "⚡ суперскальпінг · " : ""}ціна ${pr(X.price)} · крок ${b.stepPct}% · до ${b.maxUnits} юнітів по ${b.qty} + бігун · x${b.lev}` : `${P.investment} USDT × x${P.leverage}`;
-  const m = $("bMain"); m.textContent = BUSY ? "…" : P.on ? "■ Зупинити пробійну сітку" : "▶ Запустити пробійну сітку"; m.className = "big " + (P.on ? "stop" : "go"); m.disabled = BUSY;
-  const sb = $("bScalp"); sb.textContent = P.scalp ? `⚡ Суперскальпінг увімкнено — тейки ${P.scalpStep}% (вимкнути)` : `⚡ Суперскальпінг: тейки ${P.scalpStep}%`;
-  sb.style.background = P.scalp ? "#f7a600" : "var(--bg)"; sb.style.color = P.scalp ? "#111" : "var(--ink)"; sb.style.border = "1px solid " + (P.scalp ? "#f7a600" : "var(--line)"); sb.disabled = BUSY;
-  const fee = b && b.fee != null ? b.fee : 0.075;
-  $("bScalpHint").innerHTML = P.scalp ? `Кожен мікро-рух на ${b ? b.stepPct : P.scalpStep}% — тейк. Комісії за коло (вхід ринком + тейк лімітом) ≈ ${fee}% → <b class="up">чистими ≈ +${((b ? b.stepPct : P.scalpStep) - fee).toFixed(3)}% з кожного тейка</b>; тейк рахується від реальної ціни входу, тож у мінус на комісіях не йде.${b && b.pending ? ' <span style="color:var(--gold)">Увімкнеться, щойно закриються поточні юніти.</span>' : ""}`
-    : '<span class="mute">Тейки на кожному мікро-русі ціни (0.3%), у бік пробою. Тейк завжди більший за комісії.</span>';
-  $("bWarn").innerHTML = X.err ? `<div class="note">${esc(X.err)}</div>` : "";
-  if (!$("bBothPct").value) $("bBothPct").value = P.straddlePct;
-  $("bBothInfo").innerHTML = b && b.straddle ? `<b style="color:#c4b5fd">↕ Чекаю пробою:</b> вище <b class="up">${pr(b.straddle.up)}</b> → лонг · нижче <b class="down">${pr(b.straddle.dn)}</b> → шорт · ціна ${pr(X.price)}` + (b.rearm ? ' <span class="mute">(після угод межі ставляться знову)</span>' : "")
-    : b && b.box ? `↕ Межі: ▲ ${pr(b.box.up)} / ▼ ${pr(b.box.dn)} · зараз ${b.d > 0 ? '<b class="up">лонг</b>' : '<b class="down">шорт</b>'}; якщо ціна проб'є протилежну межу — розворот (хибний пробій)`
-    : b && b.rearm ? '<span class="mute">↕ Режим «обидва боки»: після закриття пробійних угод межі поставляться знову навколо нової ціни</span>' : "";
-  $("bDir").innerHTML = b && b.straddle ? '<span style="color:#c4b5fd">↕ чекаю пробою</span>' : b ? (b.d > 0 ? '<span class="up">▲ вгору (лонги)</span>' : b.d < 0 ? '<span class="down">▼ вниз (шорти)</span>' : '<span class="mute">— немає</span>') + (b.manual ? ' <span class="mute">(ручний)</span>' : "") : "—";
-  $("bProfit").innerHTML = b ? `${sgn(b.profit, 4)} · ${b.wins}/${b.losses}` : "—";
-  $("bUnreal").innerHTML = b ? sgn(b.unreal, 4) : "—";
-  $("bDay").innerHTML = `${sgn(X.stats.day, 4)} · ${X.stats.dayN}`;
-  $("bTot").innerHTML = `${sgn(X.stats.pnl, 4)} · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} · ${sgn(X.stats.runner, 4)}`;
-  $("bTitle").textContent = b ? `Юніти ${b.sym}` : "Юніти";
-  $("bInfo").innerHTML = b ? `${b.dir ? esc(b.dir.why) : ""}${b.bt && b.bt.tested ? ` · на історії за ${b.bt.days} дні: ${b.bt.roi >= 0 ? "+" : ""}${b.bt.roi}%, тейків ${b.bt.wins}, стопів ${b.bt.losses}, розворотів ${b.bt.flips}` : ""}` : "";
-  $("bUnits").innerHTML = b && b.units.length ? b.units.map(u => `<tr><td>${u.runner ? "🏃 бігун" : u.way === b.d ? "⚡ рух" : "↩ відкат"}</td><td class="${u.d > 0 ? "up" : "down"}">${u.d > 0 ? "лонг" : "шорт"}${u.state === "opening" ? " (вхід…)" : ""}</td><td>${u.e ? pr(u.e) : "—"}</td><td>${u.tp ? pr(u.tp) : "трейлінг"}</td><td>${u.sl ? pr(u.sl) : "—"}</td><td>${sgn(u.pnl, 4)}</td></tr>`).join("") : '<tr><td colspan="6" class="mute">Юнітів немає — чекаю перетину рівня в напрямку пробою</td></tr>';
-  const B2 = X.bt;
-  $("bBtLine").textContent = B2 ? `· ${new Date(B2.at).toLocaleTimeString()}, 5-хв свічки за ${B2.days} дні, з комісіями` : "";
-  $("bBt").innerHTML = B2 ? B2.results.map((r, i) => r.err ? `<tr><td><b>${esc(r.sym)}</b></td><td colspan="7" class="mute">${esc(r.err)}</td></tr>`
-    : `<tr><td><b>${esc(r.sym)}</b>${i === 0 ? " ✓" : ""}</td><td class="${r.dir.d > 0 ? "up" : r.dir.d < 0 ? "down" : "mute"}">${r.dir.d > 0 ? "▲" : r.dir.d < 0 ? "▼" : "—"} ${r.dir.diff ?? ""}%</td><td>${r.step}%</td><td>${r.units}</td><td>${sgn(r.roi, 2)}%</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.flips}</td></tr>`).join("") : '<tr><td colspan="8" class="mute">Запуститься при старті</td></tr>';
-  $("bTrades").innerHTML = X.trades.map(t => `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.runner ? "🏃 бігун" : "⚡ юніт"} ${t.d > 0 ? "лонг" : "шорт"} ${pr(t.e)} → ${pr(t.x)} · ${esc(t.how)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
-}
-// ---- regime switcher ----
-let RFILLED = false;
-const RNAME = { trend: "📈 тренд", flat: "↔ флет", squeeze: "🗜 стиснення", chaos: "🌪 хаос" };
-$("rMain").onclick = () => S.brain.params.on ? act({ what: "brain-off" }, "Вимкнути автоперемикач? Боти лишаться з поточними монетами й угодами.") : act({ what: "brain-on" }, `Увімкнути автоперемикач${S.env === "mainnet" ? " на реальному рахунку" : ""}? Він сам запускатиме й закриватиме сітку та пробійну сітку залежно від ринку.`);
-$("rCheck").onclick = async () => { $("rOut").textContent = "аналізую ~30 монет…"; $("rOut").textContent = await act({ what: "brain-check" }); };
-$("rSave").onclick = async () => { $("rSOut").textContent = await act({ what: "brain-settings", o: { everyMin: Number($("rEvery").value), coins: Number($("rCoinsN").value), minTurnoverM: Number($("rTurn").value) } }); RFILLED = false; };
-function paintBrain() {
-  const R = S.brain; if (!R) return; const P = R.params, L = R.last;
-  if (!RFILLED) { $("rEvery").value = P.everyMin; $("rCoinsN").value = P.coins; $("rTurn").value = P.minTurnoverM; RFILLED = true; }
-  $("rDot").className = "dot" + (P.on ? " on" : "");
-  $("rStatus").textContent = R.busy ? "Аналізую ринок…" : P.on ? "Автоперемикач працює" : "Автоперемикач вимкнено";
-  $("rStatus2").textContent = P.on ? `перевірка кожні ${P.everyMin} хв${R.next != null ? ` · наступна через ${R.next} хв` : ""}` : "боти працюють із налаштуваннями своїх вкладок";
-  const m = $("rMain"); m.textContent = BUSY ? "…" : P.on ? "■ Вимкнути автоперемикач" : "▶ Увімкнути автоперемикач"; m.className = "big " + (P.on ? "stop" : "go"); m.disabled = BUSY;
-  $("rCheck").disabled = BUSY || R.busy;
-  $("rWhen").textContent = L ? `· ${new Date(L.at).toLocaleString()} (${esc(L.why)})` : "";
-  $("rActs").innerHTML = L ? (L.acts.length ? L.acts.map(a => `<div style="padding:4px 0;border-bottom:1px solid var(--line)">${esc(a)}</div>`).join("") : '<span class="mute">без змін</span>') : '<span class="mute">Ще не було аналізу — натисніть «Перевірити ринок зараз»</span>';
-  $("rCounts").textContent = L ? `· тренд ${L.counts.trend} · флет ${L.counts.flat} · стиснення ${L.counts.squeeze} · хаос ${L.counts.chaos}` : "";
-  $("rCoins").innerHTML = L ? L.coins.map(c => `<tr title="${esc(c.why)}"><td><b>${esc(c.sym)}</b></td><td class="${c.regime === "trend" ? (c.dir > 0 ? "up" : "down") : c.regime === "chaos" ? "mute" : ""}">${RNAME[c.regime] || c.regime}${c.regime === "trend" ? (c.dir > 0 ? " ▲" : " ▼") : ""}</td><td>${f(c.er, 2)}</td><td>${sgn(c.slope, 2)}%</td><td>${f(c.atrRatio, 2)}×</td><td>${f(c.range6, 1)}%</td><td>${c.test ? sgn(c.test.roi, 2) + "%" : "—"}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">—</td></tr>';
-  $("rLog").innerHTML = R.log.map(l => `<div>${new Date(l.at).toLocaleString()} · ${esc(l.t)}</div>`).join("") || "<div>Ще немає</div>";
-}
-const FULL_ON = () => !!(S.bg.params.on && S.bg.params.flip);
-let FSYM = false;
-$("fSym").oninput = () => { FSYM = true; };
-// while running: a new coin in the field is applied on Enter (or when leaving the field)
-const goCoin = () => { if (!FULL_ON() || !FSYM) return; const sym = $("fSym").value.trim(), cur = S.bg.params.autoCoin ? "" : (S.bg.params.symbol || "").replace(/USDT$/, ""); if (sym.toUpperCase().replace(/USDT$/, "") === cur) { FSYM = false; return; } act({ what: "full-coin", sym }, sym ? `Перейти на ${sym.toUpperCase()}? Відкриті угоди на поточній монеті закриються ринком.` : "Нехай бот сам вибирає монету?").then(t => { if (t) $("fInfo").innerHTML = esc(t); FSYM = false; }); };
-$("fSym").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("fSym").blur(); } };
-$("fSym").onchange = goCoin;
-$("fMain").onclick = () => FULL_ON() ? act({ what: "full-off" }, "Зупинити бота? Нових угод не буде; відкриті закриються на тейку або в точці розвороту.")
-  : act({ what: "full-on", sym: $("fSym").value.trim() }, `Запустити бота${$("fSym").value.trim() ? " на " + $("fSym").value.trim().toUpperCase() : ""}${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nВін сам вибирає монету, іде за ціною в будь-який бік, бере тейки по 0.3%, а замість стопу розвертається. Плече до x50, розмір — від балансу.\nРизик: у «пилці» (дрібні смикання туди-сюди) розвороти дають збитки.`).then(t => { if (t) $("fInfo").innerHTML = esc(t); });
-$("fInv").onclick = () => { const on = !(S.bg.params.invert); act({ what: "invert", on }, on ? "Увімкнути ДЗЕРКАЛО?\n\nУсе лишається як є, але замість купівель — продажі, замість продажів — купівлі. Відкриті угоди закриються ринком.\nПрацює, коли звичайний режим стабільно в мінус. Комісії платяться в обидва боки, тому дзеркало прибуткове лише якщо звичайний мінус більший за комісії." : "Вимкнути дзеркало й повернутися до звичайної торгівлі? Відкриті угоди закриються ринком.").then(t => { if (t) $("fInfo").innerHTML = esc(t); }); };
-function paintInv() {
-  const X = S.bg, b = X.b, on = !!X.params.invert, btn = $("fInv");
-  btn.textContent = on ? "🔄 ДЗЕРКАЛО УВІМКНЕНЕ — повернути звичайну торгівлю" : "🔄 Дзеркало: торгувати навпаки"; btn.disabled = BUSY;
-  btn.style.background = on ? "#7c3aed" : "var(--bg)"; btn.style.color = on ? "#fff" : "var(--ink)"; btn.style.borderColor = on ? "#7c3aed" : "var(--line)";
-  const m = b && b.mirror6, m24 = b && b.mirror24;
-  if (!m24 || !m24.n) { $("fInvHint").innerHTML = '<span class="mute">Покажу тут, скільки дало б дзеркало на ваших реальних угодах, щойно вони з\'являться.</span>'; return; }
-  const better = m.n >= 10 && m.mirror > m.normal && m.mirror > 0;
-  $("fInvHint").innerHTML = `На ваших угодах (з комісіями): за 6 год звичайно ${sgn(m.normal, 4)} / дзеркало ${sgn(m.mirror, 4)} (${m.n} угод) · за добу ${sgn(m24.normal, 4)} / ${sgn(m24.mirror, 4)}`
-    + (!on && better ? ' <b style="color:#a78bfa">— схоже, дзеркало зараз краще</b>' : on && m.n >= 10 && m.normal > m.mirror && m.normal > 0 ? ' <b class="up">— звичайний режим зараз кращий</b>' : "");
-}
-$("dgRun").onclick = (e) => { e.preventDefault(); $("dgAt").textContent = "рахую…"; act({ what: "diag" }); };
+$("main").onclick = () => S.sq.params.on ? act({ what: "off" }, "Зупинити? Нових входів не буде. Відкриті угоди лишаються зі стопом на біржі.")
+  : act({ what: "on" }, `Запустити «Пробій після стиснення»${S.env === "mainnet" ? " на РЕАЛЬНОМУ рахунку" : ""}?\n\nРизик на угоду ${S.sq.params.riskPct}% балансу, до ${S.sq.params.maxPos} угод одночасно, плече до x${S.sq.params.maxLev}.`);
+$("closeAll").onclick = (e) => { e.preventDefault(); act({ what: "close" }, "Закрити всі відкриті угоди ринком?"); };
 $("labRun").onclick = (e) => { e.preventDefault(); act({ what: "lab" }); };
-function paintLab() {
-  const L = S.lab; if (!L) return; const R = L.res;
-  $("labAt").textContent = L.busy ? "· працює: " + L.progress : R ? "· " + new Date(R.at).toLocaleString() + " (сама — раз на добу)" : "";
-  if (!R) { $("lab").innerHTML = L.err ? `<div class="note">${esc(L.err)}</div>` : '<span class="mute">Перша перевірка запуститься сама за хвилину-дві.</span>'; return; }
-  const row = (x) => x.err ? `<tr><td>${esc(x.name)}</td><td colspan="7" class="mute">${esc(x.err)}</td></tr>`
-    : `<tr${x.ok ? ' style="background:rgba(14,203,129,.12)"' : ""}><td>${x.ok ? "✅ " : ""}${esc(x.name)}<div class="mute" style="font-size:11px">${x.tf} хв · ${esc(JSON.stringify(x.params))}</div></td><td>${sgn(x.oos.exp, 3)}%</td><td>${x.oos.n}</td><td>${x.oos.win}%</td><td>${x.oos.pf ?? "—"}</td><td>${x.coinsPos}/${x.coinsTot}</td><td>${x.oos.t ?? "—"}</td><td>${sgn(x.is.exp, 3)}%</td></tr>`;
-  $("lab").innerHTML = `<div style="border-left:3px solid ${R.out.some(x => x.ok) ? "var(--up)" : "var(--gold)"};padding-left:10px">${esc(R.verdict)}</div>`
-    + `<div class="scroll" style="margin-top:8px"><table><thead><tr><th>Стратегія</th><th>маточік. (нові дані)</th><th>угод</th><th>в плюс</th><th>PF</th><th>монет у плюсі</th><th>t (≥2 = не випадковість)</th><th>на підборі</th></tr></thead><tbody>${R.out.map(row).join("")}</tbody></table></div>`
-    + `<div class="mute" style="font-size:11px;margin-top:4px">Монети: ${R.coins.map(esc).join(", ")} · ${R.n || R.out.length} стратегій · 15-хв свічки за ${R.days15} днів, 5-хв — за ${R.days5}, годинні — за ${R.days60 || 90}. PF — скільки заробили прибуткові угоди на кожен 1 втрачений.</div>`;
-}
-function paintDiag() {
-  const D = S.diag; if (!D) return; const R = D.res;
-  $("dgAt").textContent = D.busy ? "рахую…" : R ? "· " + new Date(R.at).toLocaleTimeString() + " (саме оновлюється кожні 5 хв)" : "";
-  if (!R) { $("dg").innerHTML = D.err ? `<div class="note">Bybit: ${esc(D.err)}</div>` : '<span class="mute">Збираю дані з біржі…</span>'; return; }
-  const ex = (x, t) => x && x.fills ? `<tr><td>${t}</td><td>${sgn(x.gross, 4)}</td><td class="down">−${f(x.fees, 4)}</td><td>${sgn(x.net, 4)}</td><td>${x.fills}</td><td>${x.takerShare ?? "—"}%</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
-  const bt = (b, t) => b && b.n ? `<tr><td>${t}</td><td>${b.takes.n} · ${sgn(b.takes.sum, 4)}</td><td>${b.turns.n} · ${sgn(b.turns.sum, 4)}</td><td>${b.takesPerTurn ?? "—"}</td><td>${b.other.n} · ${sgn(b.other.sum, 4)}</td><td>${sgn(b.net, 4)}</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
-  const b = R.b1.n ? R.b1 : R.b7;
-  $("dg").innerHTML = `<div style="border-left:3px solid var(--gold);padding-left:10px">${R.why.map(w => `<div style="margin-bottom:4px">${esc(w)}</div>`).join("")}</div>`
-    + `<div style="margin-top:10px"><b style="font-size:12px">За даними Bybit</b><div class="scroll"><table><thead><tr><th></th><th>до комісій</th><th>комісії</th><th>результат</th><th>виконань</th><th>ринкових</th></tr></thead><tbody>${ex(R.d1, "доба")}${ex(R.d7, "7 днів")}</tbody></table></div></div>`
-    + `<div style="margin-top:10px"><b style="font-size:12px">За угодами бота</b><div class="scroll"><table><thead><tr><th></th><th>тейки</th><th>розвороти</th><th>тейків на 1 розворот</th><th>інші виходи</th><th>разом</th></tr></thead><tbody>${bt(R.b1, "доба")}${bt(R.b7, "7 днів")}</tbody></table></div></div>`
-    + (b && b.n ? `<div style="margin-top:8px;font-size:12px">Монети: ${b.byCoin.map(c => `${esc(c.sym)} ${sgn(c.sum, 4)} (${c.n})`).join(" · ")}<br>Плече: ${b.byLev.map(c => `${esc(c.lev)} ${sgn(c.sum, 4)} (${c.n})`).join(" · ")}${b.otherWhy.length ? `<br>Інші виходи: ${b.otherWhy.map(o => `${esc(o.how)} ${sgn(o.sum, 4)}`).join(" · ")}` : ""}</div>` : "")
-    + (R.d7 && R.d7.coins && R.d7.coins.length ? `<div style="margin-top:6px;font-size:12px">Bybit за 7 днів по монетах: ${R.d7.coins.map(c => `${esc(c.sym)} ${sgn(c.net, 4)}`).join(" · ")}</div>` : "")
-    + (D.err ? `<div class="note">Bybit: ${esc(D.err)}</div>` : "");
-}
-function paintFull() {
-  const on = FULL_ON(), m = $("fMain"), X = S.bg, b = X.b, eq = S.acc.equity;
-  m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.disabled = BUSY;
-  m.style.background = on ? "var(--down)" : "var(--up)"; m.style.color = on ? "#fff" : "#06281b";
-  const cur = X.params.autoCoin ? "" : (X.params.symbol || "").replace(/USDT$/, "");
-  if (!FSYM && document.activeElement !== $("fSym")) $("fSym").value = cur;
-  const typed = $("fSym").value.trim().toUpperCase().replace(/USDT$/, "");
-  $("fSym").parentElement.firstChild.textContent = on ? (typed !== cur ? "Монета — натисніть Enter, щоб перейти" : "Монета (впишіть іншу й Enter — бот перейде; порожньо — вибирає сам)") : "Монета (порожньо — бот вибирає сам)";
-  const kpi = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px"><div class="k"><b>${f(eq, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div></div>`;
-  if (!on) { $("fInfo").innerHTML = kpi + '<span class="mute">Натисніть — і бот усе робить сам: вибирає монету, що рухається, іде за ціною куди б вона не пішла, кожен рух на 0.3% забирає тейком (чистими після комісій), а замість стопу — розворот: якщо ціна відкотилась на кілька рівнів від найкращої точки, закриває все і йде в інший бік. Плече до x50, розмір від балансу — працює навіть з 1 USDT.</span>' + (b && b.units.length ? `<div style="margin-top:6px">Відкриті угоди: ${b.units.length} на ${esc(b.sym)} (закриються на тейку або розвороті)</div>` : ""); return; }
-  $("fInfo").innerHTML = kpi + (b ? `<span class="dot on"></span><b>${esc(b.sym)}</b> · ${(b.inv ? -b.d : b.d) > 0 ? '<b class="up">▲ ЛОНГ</b>' : '<b class="down">▼ ШОРТ</b>'}${b.inv ? ' <b style="color:#a78bfa">(🔄 дзеркало)</b>' : ""} · ціна ${pr(X.price)}<br>`
-      + `тейк <b>${b.stepPct}%</b> (сам змінює) · розворот при відкаті ${b.flipSteps} рівні (${(b.flipSteps * b.stepPct).toFixed(2)}%)${b.turnPx ? ` → у ${b.d > 0 ? (b.inv ? "лонг нижче" : "шорт нижче") : (b.inv ? "шорт вище" : "лонг вище")} <b>${pr(b.turnPx)}</b>` : ""}<br>`
-      + `угод відкрито: ${b.units.length} · тейків ${b.wins} · розворотів ${b.flips} · на цій монеті ${sgn(b.profit, 4)}${b.leaving ? ' · <span style="color:var(--gold)">переходжу на іншу монету</span>' : ""}<br>`
-      + `плече <b>x${b.lev}</b>${b.levCap && b.levCap !== b.lev ? ` (макс. x${b.levCap})` : ""} — підбирає сам: на історії просадка ≤ ${X.params.ddCap}%, у мінус → менше, у плюс → повертає`
-      + (b.tunes && b.tunes.length ? `<div style="margin-top:6px;font-size:12px">${b.tunes.slice(0, 3).map(t => `${t.who === "ai" ? "🤖" : t.who === "learn" ? "⚡" : "🧪"} ${new Date(t.at).toLocaleTimeString()} · ${esc(t.ch)} — <span class="mute">${esc(t.why)}</span>`).join("<br>")}</div>` : "")
-      + (b.flow ? (() => { const fl = b.flow, g = b.gate || {}, i = fl.ind || {}, col = (v) => v > 0.15 ? "up" : v < -0.15 ? "down" : "mute";
-          return `<div style="margin-top:6px;font-size:12px">📊 Потік: <b class="${col(fl.score)}">${fl.score > 0 ? "+" : ""}${fl.score}</b> ${fl.score > 0.15 ? "(тиснуть покупці)" : fl.score < -0.15 ? "(тиснуть продавці)" : "(рівновага)"} · стрічка <span class="${col(fl.cvd1)}">${fl.cvd1}</span> · стакан <span class="${col(fl.imb)}">${fl.imb}</span> · швидкість ×${fl.speedX}${fl.bigBuys || fl.bigSells ? ` · великі ${fl.bigBuys}↑/${fl.bigSells}↓` : ""}${i.rsi != null ? ` · RSI ${i.rsi}` : ""}${fl.oi ? ` · OI ${fl.oi.ch30 > 0 ? "+" : ""}${fl.oi.ch30}%` : ""}`
-            + `${b.hold ? ' · <b style="color:var(--gold)">чекаю підтвердження розвороту</b>' : ""}${b.paused ? ` · <b style="color:var(--gold)">пауза входів ${b.paused} хв</b>` : ""}`
-            + `${g.skipped || g.saved || g.early ? `<br><span class="mute">фільтр потоку: пропущено входів ${g.skipped || 0} · уникнуто хибних розворотів ${g.saved || 0} · ранніх розворотів ${g.early || 0}</span>` : ""}</div>`; })() : "")
-      + (b.learned ? `<div style="margin-top:6px;font-size:12px">⚡ Навчання кожні ${X.params.learnMin} хв на останніх ${b.learned.hours} год: із поточними ${sgn(b.learned.cur, 1)}%${b.learned.best ? `, найкраще — тейк ${b.learned.best.take}%, розворот ${b.learned.best.flipSteps}, x${b.learned.best.lev}: ${sgn(b.learned.best.roi, 1)}%` : " · плюсових налаштувань не знайдено"} <span class="mute">(${new Date(b.learned.at).toLocaleTimeString()})</span></div>` : "")
-      + `<div style="margin-top:6px;font-size:12px">${S.ai && S.ai.on ? `🤖 AI (fal.ai) керує: огляд кожні ${S.ai.every || 15} хв (бачить угоди, стрічку, стакан, швидкість, індикатори, OI)${S.ai.next != null ? `, наступний через ${S.ai.next} хв` : ""}${S.ai.err ? ` · <span class="down">${esc(S.ai.err)}</span>` : ""}` : '<span class="mute">🤖 AI вимкнений: додайте FAL_KEY у Railway → Variables (самонастройка працює й без нього)</span>'}</div>`
-    : `<span class="dot on"></span>${X.waitIn != null ? `Монет із плюсом на історії зараз немає — нова перевірка через ${Math.ceil(X.waitIn / 60)} хв` : "Підбираю монету…"}`)
+$("dgRun").onclick = (e) => { e.preventDefault(); act({ what: "diag" }); };
+function paint() {
+  if (!S) return; const X = S.sq, P = X.params, on = !!P.on, A = X.active;
+  const conn = []; if (!S.keys) conn.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY і BYBIT_API_SECRET"); if (!S.password) conn.push("Задайте UI_PASSWORD у Railway → Variables, щоб кнопка працювала"); if (S.acc.err) conn.push("Bybit: " + S.acc.err);
+  $("connCard").style.display = conn.length ? "" : "none"; $("conn").innerHTML = conn.map(esc).join("<br>");
+  const m = $("main"); m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.className = "big " + (on ? "stop" : "go"); m.disabled = BUSY;
+  $("kpi").innerHTML = `<div class="k"><b>${f(S.acc.equity, 2)}</b><span>баланс, USDT</span></div><div class="k"><b>${sgn(X.stats.day, 4)}</b><span>за добу · ${X.stats.dayN} угод</span></div><div class="k"><b>${sgn(X.stats.pnl, 4)}</b><span>усього · ${X.stats.win ?? "—"}${X.stats.win != null ? "%" : ""} в плюс</span></div>`;
+  $("info").innerHTML = (on ? `<span class="dot on"></span><b>Працює.</b> Наступна перевірка монет через ${X.next} хв (на закритті 15-хв свічки). ` : '<span class="mute">Зупинено. </span>')
+    + `Стоп ${A.trail}×ATR, поріг стиснення ${A.sq} (${esc(A.from)}${A.ok === false ? ', <b style="color:var(--gold)">на нових даних перевірку не пройшла</b>' : A.ok ? ', <b class="up">перевірку пройшла ✅</b>' : ""}) · ризик ${P.riskPct}% на угоду · до ${P.maxPos} угод · плече до x${P.maxLev}`
     + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
+  $("closeAll").style.display = X.pos.length ? "" : "none";
+  $("pos").innerHTML = X.pos.length ? X.pos.map(p => `<tr><td><b>${esc(p.sym)}</b></td><td class="${p.d > 0 ? "up" : "down"}">${p.d > 0 ? "лонг" : "шорт"}${p.state === "pending" ? " (ліміт чекає)" : ""}</td><td>${p.e}</td><td>${p.sl}</td><td>${p.mark ?? "—"}</td><td>${sgn(p.upnl, 4)}</td><td>${p.min}</td></tr>`).join("") : '<tr><td colspan="7" class="mute">Немає — чекаю пробою після стиснення</td></tr>';
+  $("boardAt").textContent = X.scanAt ? "· перевірено " + new Date(X.scanAt).toLocaleTimeString() : "";
+  $("board").innerHTML = X.board.length ? X.board.map(b => `<tr><td><b>${esc(b.sym)}</b></td><td>${b.ratio != null ? (b.squeeze ? `<b style="color:var(--gold)">${b.ratio} заряджена</b>` : b.ratio) : "—"}</td><td>${b.width ?? "—"}%</td><td>${b.sig > 0 ? '<b class="up">▲ пробій вгору</b>' : b.sig < 0 ? '<b class="down">▼ пробій вниз</b>' : '<span class="mute">—</span>'}</td></tr>`).join("") : '<tr><td colspan="4" class="mute">Перша перевірка — на закритті найближчої 15-хв свічки</td></tr>';
+  // lab
+  const L = S.lab, R = L && L.res;
+  $("labAt").textContent = L && L.busy ? "· працює: " + L.progress : R ? "· " + new Date(R.at).toLocaleString() : "";
+  if (R && R.out[0] && !R.out[0].err) { const x = R.out[0];
+    $("lab").innerHTML = `<div style="border-left:3px solid ${x.ok ? "var(--up)" : "var(--gold)"};padding-left:10px">${x.ok ? "✅ Пройшла" : "⚠ Не пройшла"} перевірку на даних, яких не бачила: маточікування ${sgn(x.oos.exp, 3)}% на угоду після комісій, ${x.oos.n} угод, в плюс ${x.oos.win}%, PF ${x.oos.pf}, у плюсі ${x.coinsPos} з ${x.coinsTot} монет, достовірність t=${x.oos.t}${x.ok ? "" : " (потрібно t ≥ 2, плюс і ≥ 60% монет)"}.<br><span class="mute">Найкращі параметри на підборі: стоп ${x.params[0]}×ATR, поріг стиснення ${x.params[1]} · на підборі ${sgn(x.is.exp, 3)}% на угоду (${x.is.n} угод)</span></div>`; }
+  else $("lab").innerHTML = L && L.err ? `<div class="note">${esc(L.err)}</div>` : R && R.out[0] ? esc(R.out[0].err) : '<span class="mute">Перша перевірка запуститься сама за хвилину.</span>';
+  // diag (exchange part)
+  const D = S.diag, DR = D && D.res;
+  $("dgAt").textContent = D && D.busy ? "рахую…" : DR ? "· " + new Date(DR.at).toLocaleTimeString() : "";
+  const ex = (x, t) => x && x.fills ? `<tr><td>${t}</td><td>${sgn(x.gross, 4)}</td><td class="down">−${f(x.fees, 4)}</td><td>${sgn(x.net, 4)}</td><td>${x.fills}</td><td>${x.takerShare ?? "—"}%</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
+  $("dg").innerHTML = DR ? `<div style="border-left:3px solid var(--gold);padding-left:10px">${DR.why.map(w => `<div style="margin-bottom:4px">${esc(w)}</div>`).join("")}</div><div class="scroll" style="margin-top:8px"><table><thead><tr><th>За даними Bybit</th><th>до комісій</th><th>комісії</th><th>результат</th><th>виконань</th><th>ринкових</th></tr></thead><tbody>${ex(DR.d1, "доба")}${ex(DR.d7, "7 днів")}</tbody></table></div>` : (D && D.err ? `<div class="note">${esc(D.err)}</div>` : '<span class="mute">Збираю дані з біржі…</span>');
+  $("log").innerHTML = S.events.map(e => `<div class="${e[2] || ""}">${new Date(e[0]).toLocaleTimeString()} · ${esc(e[1])}</div>`).join("") || "<div>Ще немає</div>";
+  $("trades").innerHTML = X.trades.map(t => `<div>${new Date(t.at).toLocaleString()} · ${esc(t.sym)} ${t.d > 0 ? "лонг" : "шорт"} ${t.e} → ${t.x} · ${esc(t.how)} · ${sgn(t.pnl, 4)} · ${t.min} хв</div>`).join("") || "<div>Ще немає</div>";
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } try { paintDiag(); } catch (e) { console.error(e); } try { paintLab(); } catch (e) { console.error(e); } };
-load(); setInterval(load, 2000);
+load(); setInterval(load, 3000);
 </script>
 </body>
 </html>

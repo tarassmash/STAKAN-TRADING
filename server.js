@@ -1,4 +1,4 @@
-// GRID BOT 24/7: простий ф'ючерсний грід-бот Bybit з трейлінгом сітки й автопідстановкою нових сіток.
+// SQUEEZE BOT 24/7: «Пробій після стиснення (Боллінджер)» на ф'ючерсах Bybit.
 // Сторінка лише показує стан і надсилає команди; торгує сервер, навіть коли браузер закритий.
 "use strict";
 const http = require("http");
@@ -100,101 +100,52 @@ async function refreshAccount() {
   } catch (e) { ACC.err = e.message; }
 }
 
-// ---------------- the grid engine ----------------
-const GR = require("./grid").create({
-  bx, spec, align, log: (...a) => log("grid", ...a), engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, env: ENV,
-  keys: HAS_KEYS ? { key: KEY } : null, sign: (s) => crypto.createHmac("sha256", SECRET).update(s).digest("hex"),
-  testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
-  makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined,
-  flush: () => { dirty = true; dump(); },
-  trendEveryMs: Number(process.env.TEST_TREND_MS) || undefined,
-  busySyms: () => [BG && BG.sym()].filter(Boolean),            // the breakout grid's coin is not used by the grid
-});
-// ---------------- the breakout grid (second tab) ----------------
-const BG = require("./bgrid").create({
-  bx, spec, align, log: (...a) => log("bgrid", ...a), engineLog: (t, cls) => addLog("🚀 " + t, cls), lsGet, lsSet, env: ENV,
-  keys: HAS_KEYS ? { key: KEY } : null, sign: (s) => crypto.createHmac("sha256", SECRET).update(s).digest("hex"),
-  testWs: TEST_WS, testPrivWs: (process.env.TEST_PRIV_WS_URL || "").trim(),
-  flush: () => { dirty = true; dump(); },
-  busySyms: () => { const g = GR.view().grid; return g ? [g.sym] : []; },
-  equity: () => ACC.equity || 0,
-  onLoss: () => { if (AI) AI.onLoss(); },
-});
+// ---------------- why the minus / strategy lab ----------------
+let SQ = null;
+const DG = require("./diag").create({ bx, BG: { tradesSince: (t) => (SQ ? SQ.tradesSince(t) : []) }, keys: () => HAS_KEYS });
+const LAB = require("./lab").create({ bx, lsGet, lsSet, engineLog: (t, cls) => addLog(t, cls), coins: 15 });
 
-// ---------------- AI autopilot (fal.ai) over the breakout bot ----------------
-const AI = require("./ai").create({ BG, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, equity: () => ACC.equity || 0 });
+// ---------------- the only strategy: breakout after a Bollinger squeeze ----------------
+SQ = require("./sqz").create({ bx, spec, align, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, keys: () => HAS_KEYS,
+  equity: () => ACC.equity || 0, lab: () => LAB.view(), flush: () => { dirty = true; dump(); } });
 
-// ---------------- why the minus: exchange records + the bot's trades ----------------
-const DG = require("./diag").create({ bx, BG, keys: () => HAS_KEYS });
-
-// ---------------- strategy lab: every strategy on history, verdict on unseen data ----------------
-const LAB = require("./lab").create({ bx, lsGet, lsSet, engineLog: (t, cls) => addLog(t, cls) });
-
-// ---------------- the regime switcher ("brain" over both bots) ----------------
-const BR = require("./brain").create({ bx, spec, acc: () => ACC, engineLog: (t, cls) => addLog(t, cls), lsGet, lsSet, GR, BG,
-  makerFee: process.env.MAKER_FEE_PCT != null ? Number(process.env.MAKER_FEE_PCT) : undefined });
+// ---------------- one-time cleanup: the old bots (grid / breakout grid) are gone -> their orders and positions are closed ----------------
+async function retireOldBots() {
+  if (!HAS_KEYS || lsGet("retired.v1", false)) return;
+  const syms = new Set(), b = lsGet("bg.b", null), g = lsGet("grid.g", null), bk = lsGet("grid.bk", null);
+  if (b && b.sym && (b.units || []).length) syms.add(b.sym);
+  if (g && g.sym) syms.add(g.sym);
+  if (bk && bk.sym) syms.add(bk.sym);
+  for (const sym of syms) {
+    try {
+      await bx("/v5/order/cancel-all", { method: "POST", auth: true, body: { category: "linear", symbol: sym } });
+      const r = await bx("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true });
+      for (const x of r.list || []) if (Number(x.size) > 0)
+        await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: x.side === "Buy" ? "Sell" : "Buy", orderType: "Market", qty: String(x.size), reduceOnly: true, positionIdx: Number(x.positionIdx || 0), timeInForce: "IOC" } });
+      addLog(`🧹 Старий бот прибраний: ${sym} — ордери скасовано, позицію закрито ринком`, "mute");
+    } catch (e) { addLog(`🧹 ${sym}: не вдалося прибрати старого бота — ${e.message} (закрийте позицію вручну на Bybit)`, "down"); }
+  }
+  for (const k of ["bg.b", "grid.g", "grid.bk"]) lsSet(k, null);
+  for (const k of ["bg.p", "grid.p", "brain.p"]) { const v = lsGet(k, null); if (v) lsSet(k, Object.assign(v, { on: false })); }
+  lsSet("retired.v1", true);
+}
 
 function state() {
-  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, gr: GR.view(), bg: BG.view(), brain: BR.view(), ai: AI.view(), diag: DG.view(), lab: LAB.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
-}
-// "btc", "BTC", "btcusdt" -> "BTCUSDT"; checks that Bybit has such a futures coin
-async function coinOf(v) {
-  const s = String(v || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, ""); if (!s) return "";
-  const sym = s.endsWith("USDT") ? s : s + "USDT";
-  try { await spec(sym); return sym; } catch (e) { return { err: `На Bybit немає ф'ючерса ${sym}` }; }
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, sq: SQ.view(), diag: DG.view(), lab: LAB.view(), eq: lsGet("eq", []).slice(-400), events: EVENTS.slice(0, 100) };
 }
 async function act(b) {
-  const b0 = b;
   const what = String(b.what || "");
-  if (what === "start") {
+  if (what === "on") {
     if (!HAS_KEYS) return "Додайте BYBIT_API_KEY і BYBIT_API_SECRET у Railway → Variables";
-    await syncTime(); await refreshAccount();
-    if (ACC.err) return "Bybit: " + ACC.err;
-    GR.setOn(true); return "Запущено";
-  }
-  if (what === "stop") { GR.setOn(false); return "Зупинено: ордери сітки знято"; }
-  if (what === "new") return await GR.newGrid();
-  if (what === "close") return await GR.closeNow();
-  if (what === "settings" && b.o && typeof b.o === "object") { const ch = GR.setParams(b.o); if (ch.length) addLog("⚙ Налаштування: " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") + " (діє для нової сітки — «Нова сітка зараз»)" : "Без змін"; }
-  if (what === "bg-start") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BG.setOn(true); return "Пробійну сітку запущено"; }
-  if (what === "bg-stop") { BG.setOn(false); return "Пробійну сітку зупинено (відкриті юніти доходять до тейку/стопу)"; }
-  if (what === "bg-close") return await BG.closeAll();
-  if (what === "bg-restart") return await BG.restart();
-  if (what === "bg-scalp") return BG.setScalp(!!b.on);
-  if (what === "bg-both") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.straddleNow(Number(b.pct) || 0, String(b.sym || "").trim()); }
-  if (what === "bg-enter" && (b.dir === 1 || b.dir === -1)) { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BG.enterNow(b.dir, String(b.sym || "").trim()); }
-  if (what === "bg-settings" && b.o && typeof b.o === "object") { const ch = BG.setParams(b.o); if (ch.length) addLog("🚀 ⚙ " + ch.join(", "), "mute"); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
-  if (what === "brain-on") { if (!HAS_KEYS) return "Додайте ключі Bybit"; BR.setOn(true); return "Автоперемикач увімкнено — перший аналіз іде"; }
-  // ONE BUTTON: only the breakout bot in the flip mode (follows the price, a pullback turns it around instead of a stop, takes 0.3%), size from the balance, x50
-  if (what === "full-on") {
-    if (!HAS_KEYS) return "Додайте ключі Bybit";
-    await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err;
+    await syncTime(); await refreshAccount(); if (ACC.err) return "Bybit: " + ACC.err;
     if (!(ACC.equity > 0)) return "На рахунку 0 USDT — поповніть ф'ючерсний (Unified) рахунок";
-    if (BR.params.on) BR.setOn(false);
-    if (GR.params.on || GR.view().grid) { GR.setOn(false); if (GR.view().grid) await GR.closeNow(); }
-    const sym = await coinOf(b0.sym); if (sym && sym.err) return sym.err;
-    BG.setParams({ flip: true, flipSteps: 0, scalp: true, scalpStep: 0.3, leverage: 50, autoCoin: !sym, symbol: sym || "", autoTune: true, btNeedPlus: true, runner: true, autoInv: true });
-    const b = BG.view().b;
-    if (b && (!b.flip || !b.levCap || (sym && b.sym !== sym))) {   /* !levCap = started by the old version: re-pick the leverage on history */ if (b.units.length) await BG.closeAll(); else await BG.restart(); }
-    BG.setOn(true);
-    return `Запущено${sym ? " на " + sym : ""}: баланс ${ACC.equity.toFixed(2)} USDT, x50, тейки 0.3%, розворот замість стопу${sym ? "" : " — підбираю монету"}`;
+    SQ.setOn(true); return "Запущено: наступна перевірка монет — на закритті 15-хв свічки";
   }
-  // change the coin while running (empty = the bot picks)
-  if (what === "full-coin") {
-    const sym = await coinOf(b0.sym); if (sym && sym.err) return sym.err;
-    BG.setParams({ autoCoin: !sym, symbol: sym || "" });
-    const b = BG.view().b;
-    if (b && b.sym === sym) return "Уже торгую " + sym;
-    if (b) { if (b.units.length) await BG.closeAll(); else await BG.restart(); }
-    return sym ? `Переходжу на ${sym}${b && b.units.length ? " (спершу закриваю угоди на " + b.sym + ")" : ""}` : "Монету вибиратиму сам";
-  }
-  if (what === "lab") { LAB.run(); return "Лабораторія запущена — перевіряю всі стратегії на історії (кілька хвилин)"; }
+  if (what === "off") { SQ.setOn(false); return "Зупинено: нових входів немає, відкриті угоди лишаються зі стопом на біржі"; }
+  if (what === "close") return await SQ.closeAll();
+  if (what === "lab") { LAB.run(); return "Перевірка стратегії на історії запущена (кілька хвилин)"; }
   if (what === "diag") { await DG.run(); return DG.view().err ? "Bybit: " + DG.view().err : "Розбір оновлено"; }
-  if (what === "invert") return await BG.setInvert(!!b.on);
-  if (what === "full-off") { BG.setOn(false); if (BR.params.on) BR.setOn(false); return "Зупинено: нових угод немає; відкриті закриються на тейку або в точці розвороту"; }
-  if (what === "brain-off") { BR.setOn(false); return "Автоперемикач вимкнено"; }
-  if (what === "brain-check") { if (!HAS_KEYS) return "Додайте ключі Bybit"; return await BR.run("за кнопкою"); }
-  if (what === "brain-settings" && b.o && typeof b.o === "object") { const ch = BR.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
+  if (what === "settings" && b.o && typeof b.o === "object") { const ch = SQ.setParams(b.o); return ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; }
   return "невідома дія";
 }
 
@@ -227,7 +178,7 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(UI);
   } catch (e) { return json(500, { error: String(e && e.message || e) }); }
-}).listen(PORT, "0.0.0.0", () => log(`GRID BOT :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
+}).listen(PORT, "0.0.0.0", () => log(`SQUEEZE BOT :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
 
 // ---------------- start ----------------
 (async () => {
@@ -236,10 +187,8 @@ http.createServer(async (req, res) => {
   if (ACC.err) addLog("Bybit: " + ACC.err, "down");
   setInterval(refreshAccount, 15000);
   setInterval(syncTime, 30 * 60000);
-  if (AUTOSTART && HAS_KEYS && !lsGet("autostarted", false)) {
-    lsSet("autostarted", true);
-    addLog("AUTOSTART: перший запуск сервера — вмикаю грід-бота", "up");
-    GR.setOn(true);
-  } else if (GR.params.on || BG.params.on || BR.params.on) addLog("Сервер перезапущено — боти продовжують роботу", "up");
-  else addLog("Сервер запущено. Натисніть «▶ Запустити» на сторінці.", "mute");
+  await retireOldBots();
+  if (AUTOSTART && HAS_KEYS && !lsGet("autostarted", false)) { lsSet("autostarted", true); addLog("AUTOSTART: вмикаю бота", "up"); SQ.setOn(true); }
+  else if (SQ.params.on) addLog("Сервер перезапущено — бот продовжує роботу", "up");
+  else addLog("Сервер запущено. Натисніть «▶ ЗАПУСТИТИ».", "mute");
 })();

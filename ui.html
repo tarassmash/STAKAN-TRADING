@@ -116,7 +116,7 @@
   .log div { margin-bottom: 3px; }
 
   #chart {
-    flex: 1; min-height: 320px;
+    flex: none; height: 460px; min-height: 320px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   }
   .sub-charts {
@@ -441,7 +441,7 @@
       <div><div class="k">Entry</div><div class="v" id="posEntry">—</div></div>
       <div><div class="k">uPnL</div><div class="v" id="posUpnl">—</div></div>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Красные пунктиры — уровни SELL-сетки (едут за ценой каждый цикл), жёлтая — Mid</span><span id="chartLive" style="color:var(--green)"></span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Пунктиры: красные — SELL, зелёные — BUY (едут за ценой), жёлтая — Mid</span><span id="chartLive" style="color:var(--green)"></span></div>
     <div id="chart"></div>
     <div class="sub-charts">
       <div class="sub-chart-wrap">
@@ -548,7 +548,14 @@
       $('chartLive').textContent = '● LIVE ' + new Date().toLocaleTimeString('ru-RU');
     } catch (e) { /* next tick */ } finally { liveBusy = false; }
   }
-  async function loadChart(force) {
+  // price precision for the coin: 60000 -> 2 decimals, 0.05 -> 6, 0.00001 -> 8 (otherwise a cheap coin looks flat)
+  let PF = { type: 'price', precision: 2, minMove: 0.01 };
+  function priceFormatFor(px) {
+    const a = Math.abs(px || 0), d = a >= 1000 ? 2 : a >= 10 ? 3 : a >= 1 ? 4 : a >= 0.1 ? 5 : a >= 0.01 ? 6 : a >= 0.001 ? 7 : 8;
+    return { type: 'price', precision: d, minMove: +Math.pow(10, -d).toFixed(d) };
+  }
+  function clearLevels() { gridLines.forEach(s => { try { chart.removeSeries(s); } catch (e) {} }); gridLines = []; try { midSeries.setData([]); } catch (e) {} }
+    async function loadChart(force) {
     const sym = ($('symbol').value || '').toUpperCase().trim(), iv = $('interval').value;
     if (!sym || !chart) return;
     if (!force && sym === chartSym && iv === chartIv) return;
@@ -556,8 +563,12 @@
     const r = await fetch(`/api/chart?symbol=${encodeURIComponent(sym)}&interval=${iv}`).then(r => r.json()).catch(e => ({ error: e.message }));
     if (my !== loadId) return;
     if (r.error) { setConn(false, 'ошибка'); toast('График', r.error, false); return; }
-    chartSym = sym; chartIv = iv;
     const c = uniq(r.candles || []);
+    if (sym !== chartSym) { clearLevels(); try { candleSeries.setData([]); } catch (e) {} }   // the old coin's lines and prices must not stretch the scale
+    chartSym = sym; chartIv = iv;
+    PF = priceFormatFor(c.length ? c[c.length - 1].close : 0);
+    candleSeries.applyOptions({ priceFormat: PF }); midSeries.applyOptions({ priceFormat: PF });
+    chart.priceScale('right').applyOptions({ autoScale: true });
     candleSeries.setData(c);
     volSeries.setData(c.map(x => ({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' })));
     let cum = 0; cvdSeries.setData(c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }));
@@ -568,12 +579,13 @@
   }
   function drawLevels(w) {
     if (!chart || !candleSeries) return;
-    gridLines.forEach(s => { try { chart.removeSeries(s); } catch (e) {} }); gridLines = [];
-    const d = candleSeries.data ? candleSeries.data() : null; if (!d || !d.length || !w || !w.mid) return;
+    clearLevels();
+    if (!w || w.symbol !== chartSym) return;   // levels only on the chart of their own coin
+    const d = candleSeries.data ? candleSeries.data() : null; if (!d || !d.length || !w.mid) return;
     const t0 = d[0].time, t1 = d[d.length - 1].time + 120;
     midSeries.setData([{ time: t0, value: w.mid }, { time: t1, value: w.mid }]);
     const lv = w.levels || (w.targets || []).map(px => ({ px, side: w.side > 0 ? 1 : -1 }));
-    lv.forEach(({ px, side }) => { const buy = side > 0; const s = chart.addLineSeries({ color: buy ? '#0ecb81' : '#f6465d', lineWidth: 1, lineStyle: 2, title: (buy ? 'Buy ' : 'Sell ') + px }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
+    lv.forEach(({ px, side }) => { const buy = side > 0; const s = chart.addLineSeries({ color: buy ? '#0ecb81' : '#f6465d', lineWidth: 1, lineStyle: 2, title: (buy ? 'Buy ' : 'Sell ') + px, priceFormat: PF, lastValueVisible: true, priceLineVisible: false }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
   }
   function showSig(sig) {
     $('oiTrendText').textContent = sig.oiTrend + (sig.oiChangePct ? ' (' + Number(sig.oiChangePct).toFixed(1) + '%)' : '');
@@ -622,10 +634,10 @@
       $('rsiText').textContent = w.rsi != null ? w.rsi.toFixed(1) : '—';
       const p = w.pos || {}; $('posSide').textContent = p.size ? p.side : 'FLAT'; $('posSize').textContent = p.size ? fmt(p.size) : '—'; $('posEntry').textContent = p.size ? fmt(p.avgPrice) : '—';
       const up = p.unrealisedPnl || 0; $('posUpnl').textContent = p.size ? (up >= 0 ? '+' : '') + up.toFixed(3) : '—'; $('posUpnl').className = 'v ' + (up > 0 ? 'pos' : up < 0 ? 'neg' : '');
-      drawLevels(w);
       if (w.sig) showSig(w.sig);
     }
     if (G.shukin) showSig(G.shukin);
+    drawLevels(G.watches.find(x => x.symbol === chartSym));   // the levels of the coin that is on the chart (none -> no lines)
     // log
     $('log').innerHTML = G.log.map(l => `<div style="color:${l[2] === 'ok' ? 'var(--green)' : l[2] === 'err' ? 'var(--red)' : 'var(--muted)'}">[${new Date(l[0]).toLocaleTimeString('ru-RU')}] ${esc(l[1])}</div>`).join('') || 'Лог пуст';
     renderTargets(G.targets, cur);

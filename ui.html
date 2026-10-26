@@ -298,7 +298,7 @@
     </div>
 
     <h2>Плечо и комиссии</h2>
-    <div class="row"><label>Плечо</label><input type="number" id="leverage" value="10" min="1" max="100" step="1" /></div>
+    <div class="row"><label>Плечо</label><input type="number" id="leverage" value="3" min="1" max="100" step="1" /></div>
     <div class="row"><label>Шаг/тейк от комиссии (авто)</label><input type="checkbox" id="autoStep" /></div>
     <div class="row"><label>Покрывать комиссию в N раз</label><input type="number" id="feeX" value="10" min="2" max="50" step="1" /></div>
     <div class="info" id="feeInfo" style="font-size:.75rem">—</div>
@@ -318,6 +318,13 @@
       <div class="row"><label>Доборов</label><input type="number" id="bandAdds" value="1" min="0" max="5" step="1" /></div>
       <div class="row"><label>Следом за средней N свечей</label><input type="number" id="bandRef" value="5" min="1" max="60" step="1" /></div>
       <div class="row"><label>Размер USDT (общий)</label><span class="val" id="bandUsdt">—</span></div>
+      <h2 style="margin-top:12px">⚡ Пульс: внезапный памп / дамп</h2>
+      <div class="info" style="font-size:.75rem">Цена прошла N% за M секунд → бот сразу адаптируется: позицию против движения закрывает, встречные лимитки убирает и входит по движению лимиткой по лучшей цене (с трейлинг-тейком и коротким стопом). Движение утихло → снова лимитки ±%.</div>
+      <div class="row"><label>Включено</label><input type="checkbox" id="pulseOn" /></div>
+      <div class="row"><label>Движение %</label><input type="number" id="pulsePct" value="1.5" min="0.3" step="0.1" /></div>
+      <div class="row"><label>За секунд</label><input type="number" id="pulseSec" value="60" min="10" max="600" step="5" /></div>
+      <div class="row"><label>Стоп входа по движению %</label><input type="number" id="momSl" value="1.5" min="0.3" step="0.1" /></div>
+      <div class="row"><label>Вернуться к ±% через (мин)</label><input type="number" id="momHoldMin" value="10" min="1" max="120" step="1" /></div>
     </div>
     <h2>Sell Grid</h2>
     <div class="info">
@@ -471,8 +478,8 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
   const minis = {};
-  const NUMS = ['leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+  const NUMS = ['pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const BOOLS = ['pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
   function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
@@ -649,7 +656,7 @@
     const stp = cw && cw.steps;
     $('feeInfo').innerHTML = stp ? `Комиссии ${esc(cw.symbol)}: maker ${stp.maker}% · taker ${stp.taker}%<br>Шаг сетки / доборов: <b>${stp.lim}%</b> (${P.feeX}× лимит+лимит)<br>${P.strategy === 'follow' ? `Трейлинг-тейк с <b>${cw.band ? cw.band.tp : stp.mkt}%</b>, отступ ${cw.band ? cw.band.gap : '—'}% (${P.feeX}× лимит+рынок)` : `Тейк: <b>${P.makerExit ? stp.lim : stp.mkt}%</b>`}${P.autoStep ? '' : '<br><span style="color:var(--yellow)">авто выкл — но не меньше ' + P.feeX + '× комиссии</span>'}` : 'Посчитаю после первого цикла';
     ['gridStepPct', 'tpPct', 'bandTp', 'bandTrailGap'].forEach(id => { if ($(id)) $(id).disabled = !!P.autoStep; });
-    $('dirText').textContent = P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : cw.dir.d < 0 ? '▼ ШОРТ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : `± ${P.bandPct}% лимитки`) : '—';
+    $('dirText').textContent = P.strategy === 'follow' && cw && cw.mom ? `⚡ ${cw.mom.d > 0 ? 'ПАМП ▲' : 'ДАМП ▼'} ${cw.mom.mv}% — по движению` : P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : cw.dir.d < 0 ? '▼ ШОРТ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : `± ${P.bandPct}% лимитки`) : '—';
     $('dirText').style.color = P.strategy !== 'follow' ? 'var(--red)' : cw && cw.dir && cw.dir.d > 0 ? 'var(--green)' : cw && cw.dir && cw.dir.d < 0 ? 'var(--red)' : 'var(--muted)';
     $('dirText').title = cw && cw.dir ? cw.dir.why : '';
     $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' || P.strategy === 'follow' ? '1m движение' : 'пампы'})` : 'ждёт Старт';

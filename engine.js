@@ -12,7 +12,12 @@ const DEFAULTS = {
   autopilot: true, autoScanMin: 5, autoScanMode: "pump",
   strategy: "sell",        // "sell" = Sell Grid (short from a pump) | "follow" = autopilot after the price (long or short where it goes)
   followBand: 0.08,
-  leverage: 10,            // set on every coin the bot trades
+  leverage: 3,
+  pulseOn: true,           // sudden pump / dump: adapt at once (cut the position against it, go with the move)
+  pulsePct: 1.5,           // a move of this % ...
+  pulseSec: 60,            // ... within this many seconds is a pump / dump
+  momHoldMin: 10,          // after the move calms down for this long -> back to the +-limits
+  momSl: 1.5,              // the stop of a position taken with the move, %            // set on every coin the bot trades
   autoStep: true,          // the step and the take from the account's real fees: at least feeX × the round trip
   feeX: 10,
   bandLevels: 3,           // limits per side while flat: the first at bandPct, the next every step
@@ -25,14 +30,15 @@ const DEFAULTS = {
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
-const BOOLS = ["autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
+const NUMS = ["pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const BOOLS = ["pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
   const P = Object.assign({}, DEFAULTS, lsGet("sg.p", {}));
   const save = () => lsSet("sg.p", P);
   if (!lsGet("sg.v2", false)) { Object.assign(P, { leverage: 10, autoStep: true, feeX: 10, slPct: 10, bandSl: 10, bandPct: 3, bandLevels: 3, bandAdds: 5, gridLevels: 8 }); save(); lsSet("sg.v2", true); }
+  if (!lsGet("sg.v3", false)) { P.leverage = 3; Object.assign(P, { pulseOn: true, pulsePct: 1.5, pulseSec: 60, momHoldMin: 10, momSl: 1.5 }); save(); lsSet("sg.v3", true); }
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
   const saveS = () => lsSet("sg.s", { lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
@@ -288,19 +294,40 @@ function create(host) {
         const pnl = cp.reduce((a, x) => a + Number(x.closedPnl || 0), 0); recordTrade(pnl, symbol, pnl >= 0 ? (P.bandTrail ? "трейлинг-тейк" : "тейк лимитом") : "стоп"); } catch (e) { /* skip */ }
       await cancelOurOrders(symbol, category);
     }
-    if (pos.size && !(w.pos && w.pos.size)) w.posSince = now();
+    // ⚡ pulse: the price moved pulsePct % within pulseSec -> a pump / dump: adapt at once
+    w.ph = (w.ph || []).filter(x => now() - x.t <= (P.pulseSec || 60) * 1000); w.ph.push({ t: now(), p: mid });
+    { const o0 = w.ph[0], span = (now() - o0.t) / 1000, mv = (mid / o0.p - 1) * 100;
+      if (P.pulseOn && span >= Math.min(20, (P.pulseSec || 60) / 3) && Math.abs(mv) >= P.pulsePct) {
+        const d0 = Math.sign(mv);
+        if (!w.mom || w.mom.d !== d0) log(`⚡ ${symbol}: ${d0 > 0 ? "ПАМП" : "ДАМП"} ${mv >= 0 ? "+" : ""}${mv.toFixed(2)}% за ${Math.round(span)} с — адаптируюсь: встречные лимитки убираю, вхожу по движению`, "ok");
+        w.mom = { d: d0, at: now(), mv: +mv.toFixed(2) };
+      } }
+    if (pos.size && !(w.pos && w.pos.size)) { w.posSince = now(); w.posMom = !!(w.mom && (pos.side === "Buy" ? 1 : -1) === w.mom.d); }
     w.pos = pos;
     const pd = pos.size ? (pos.side === "Buy" ? 1 : -1) : 0;
+    if (!pd) w.posMom = false;
+    if (w.mom && !pd && now() - w.mom.at > (P.momHoldMin || 10) * 60000) { w.mom = null; log(`${symbol}: движение утихло — снова лимитки ±${P.bandPct}%`, "info"); }
+    const md = w.mom && P.pulseOn ? w.mom.d : 0;
+    let pre = 0; { const o0 = w.ph[0], mv = (mid / o0.p - 1) * 100; if (P.pulseOn && Math.abs(mv) >= P.pulsePct / 2) pre = Math.sign(mv); }   // a pump / dump is starting
+    // a position against a pump / dump is cut at once (not left to the 10 % stop)
+    if (live && pd && md && pd === -md) {
+      const pnl = pos.unrealisedPnl || 0;
+      log(`${symbol}: ⚡ ${md > 0 ? "памп" : "дамп"} против ${pd > 0 ? "лонга" : "шорта"} — закрываю сразу (${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)}), дальше по движению`, pnl >= 0 ? "ok" : "err");
+      w.closingByBot = true; await cancelOurOrders(symbol, category); await closeMarket(symbol, category); recordTrade(pnl, symbol, "адаптация к " + (md > 0 ? "пампу" : "дампу")); w.pos = { size: 0 }; w.slSet = 0; w.trailSet = null; return;
+    }
     await shortIdx(symbol, category);
     const idxOf = (d) => (HEDGE[symbol] ? (d > 0 ? 1 : 2) : 0);
     // the wanted orders
     let want = [];
     const nL = Math.max(1, Math.round(P.bandLevels) || 3);
-    if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
+    if (md && !pd) want.push({ side: md > 0 ? "Buy" : "Sell", d: md, px: roundToStep(md > 0 ? (w.bid || mid) : (w.ask || mid), inst.tickSize), mom: true });   // with the move: a limit at the best price, chased every cycle
+    else if (md && pd === md) { /* riding the move: no adds, the trailing take leads it */ }
+    else if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
+    else if (pre && pre === -pd) { /* the price is starting to run against the position: no adds against it */ }
     else for (let k = 1; k <= Math.max(0, Math.round(P.bandAdds)); k++) want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pos.avgPrice * (1 - pd * step * k), inst.tickSize), add: true });   // dense adds beyond the average
     w.levels = want.map(x => ({ px: x.px, side: x.d })); w.targets = want.map(x => x.px); w.side = pd || 0;
-    w.dir = { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (средняя ${n} свечей ${fmt(ref)})` };
-    if (!live) { log(`[SIM АВТОПИЛОТ] ${symbol}: ${want.map(x => `${x.side} @ ${x.px}`).join(" · ")}${pd ? "" : ` (цена ${fmt(mid)})`}`, "info"); return; }
+    w.dir = md ? { d: pd || md, why: `⚡ ${md > 0 ? "памп" : "дамп"} ${w.mom.mv}% — ${pd ? `еду по движению, трейлинг-тейк, стоп ${P.momSl}%` : "вход по движению лимиткой по лучшей цене"}` } : { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (средняя ${n} свечей ${fmt(ref)})` };
+    if (!live) { log(`[SIM АВТОПИЛОТ] ${symbol}: ${md ? `⚡ ${md > 0 ? "памп" : "дамп"} → ` : ""}${want.map(x => `${x.side} @ ${x.px}`).join(" · ")}${pd ? "" : ` (цена ${fmt(mid)})`}`, "info"); return; }
     if (symbol !== (P.symbol || "").toUpperCase() && !pd) { if (w.ourOrders > 0) { await cancelOurOrders(symbol, category); w.ourOrders = 0; } w.status = "свободна"; return; }
     const open = await getOpenOrders(symbol, category), ours = open.filter(o => (o.orderLinkId || "").startsWith("sg_b_")), tps = open.filter(o => (o.orderLinkId || "").startsWith("sg_tp_"));
     if (pd) {
@@ -320,23 +347,24 @@ function create(host) {
         if (!okTp) { for (const o of tps) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } } await placeMakerExit(symbol, category, pos, tpPx, inst); }
       }
       // the stop of the whole position on the exchange (from the average)
-      const slPx = roundToStep(pos.avgPrice * (1 - pd * sl), inst.tickSize);
+      const slUse = w.posMom ? (P.momSl || 1.5) / 100 : sl;
+      const slPx = roundToStep(pos.avgPrice * (1 - pd * slUse), inst.tickSize);
       if (Math.abs((w.slSet || 0) - slPx) > parseFloat(inst.tickSize) / 2) {
-        try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: String(slPx), slTriggerBy: "LastPrice", positionIdx: pos.positionIdx }); w.slSet = slPx; log(`${symbol}: стоп позиции ${slPx} (−${P.bandSl}% от средней, плечо x${P.leverage})`, "info"); }
+        try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: String(slPx), slTriggerBy: "LastPrice", positionIdx: pos.positionIdx }); w.slSet = slPx; log(`${symbol}: стоп позиции ${slPx} (−${w.posMom ? P.momSl : P.bandSl}% от средней${w.posMom ? ", вход по движению" : ""}, плечо x${P.leverage})`, "info"); }
         catch (e) { if (String(e.code) === "34040") w.slSet = slPx; else log(`${symbol}: стоп: ${e.message}`, "err"); }
       }
     } else { w.slSet = 0; w.trailSet = null; }
     if (isSpike && !pd) { w.status = "SPIKE — лимиты держу"; }
     // sync the entry limits: the opposite side goes, the others follow the price behind it
-    const tol = ref * Math.min(off * 0.15, step * 0.4), keep = new Set();
+    const tol = md && !pd ? mid * 0.0005 : ref * Math.min(off * 0.15, step * 0.4), keep = new Set(), freeze = isSpike && !md;
     for (const o of ours) {
       const m = want.find((x, i2) => !keep.has(i2) && x.side === o.side && Math.abs(parseFloat(o.price) - x.px) <= tol);
       if (m) { keep.add(want.indexOf(m)); continue; }
       const same = want.findIndex((x, i2) => !keep.has(i2) && x.side === o.side);
-      if (same >= 0 && !isSpike) {   // move it after the price (amend keeps the order)
+      if (same >= 0 && !freeze) {   // move it after the price (amend keeps the order)
         try { await priv("POST", "/v5/order/amend", { category, symbol, orderId: o.orderId, price: String(want[same].px) }); keep.add(same); log(`${symbol}: ↕ ${o.side} ${o.price} → ${want[same].px}`, "info"); continue; } catch (e) { /* re-place below */ }
       }
-      if (same >= 0 && isSpike) { keep.add(same); continue; }   // during a spike the limits stay where they are (that is when they fill)
+      if (same >= 0 && freeze) { keep.add(same); continue; }   // during a spike the limits stay where they are (that is when they fill)
       try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ }
     }
     for (let k = 0; k < want.length; k++) {
@@ -347,7 +375,7 @@ function create(host) {
       try { await priv("POST", "/v5/order/create", body); log(`${symbol}: ${x.add ? "добор " : ""}${x.side} limit ${qty} @ ${x.px}`, "info"); }
       catch (e) { log(`${symbol}: ❌ ${x.side} limit: ${e.message}`, "err"); }
     }
-    w.status = pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
+    w.status = md ? `⚡ ${md > 0 ? "ПАМП" : "ДАМП"} · ${pd ? "по движению" : "вход лимиткой"}` : pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
   }
 
   function ensureWatch(symbol) { symbol = symbol.toUpperCase().trim(); if (!W[symbol]) W[symbol] = { symbol, mid: 0, candles: [], priceHistory: [], pos: { side: null, size: 0, avgPrice: 0, unrealisedPnl: 0 }, orders: 0, ourOrders: 0, isSpike: false, volOk: true, status: "—", atrPct: null, rsi: null }; return W[symbol]; }
@@ -356,7 +384,7 @@ function create(host) {
     const category = P.category, w = ensureWatch(symbol);
     const book = await getOrderBook(symbol, category);
     if (!book.bids.length || !book.asks.length) throw new Error(symbol + ": пустой стакан");
-    const mid = (book.bids[0] + book.asks[0]) / 2; w.mid = mid;
+    const mid = (book.bids[0] + book.asks[0]) / 2; w.mid = mid; w.bid = book.bids[0]; w.ask = book.asks[0];
     const inst = await getInstrument(symbol, category);
     const maxSpike = (P.maxSpikePct || 0.4) / 100;
     w.priceHistory.push(mid); if (w.priceHistory.length > 5) w.priceHistory.shift();
@@ -525,7 +553,7 @@ function create(host) {
     ensureDayKey();
     return { autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
   return { start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };

@@ -43,6 +43,7 @@ details summary{cursor:pointer;color:var(--mute);font-size:13px}
     <div id="fInvHint" style="font-size:12px;margin-top:6px"></div>
     <div id="fInfo" style="font-size:13px;margin-top:10px"></div>
   </div>
+  <div class="card" id="dgCard" style="margin-top:14px"><b>🔍 Чому мінус — розбір</b> <a href="#" id="dgRun" class="mute" style="font-size:12px">оновити</a> <span class="mute" id="dgAt" style="font-size:12px"></span><div id="dg" style="font-size:13px;margin-top:8px"></div></div>
   <div class="card" style="margin-top:14px"><b>Що робить бот</b><div class="log" id="log" style="max-height:420px;overflow-y:auto"></div></div>
   <details id="manual" style="display:none"><summary style="font-size:14px;padding:10px 0">⚙ Ручне керування (не обов'язково — повний автомат усе робить сам)</summary>
   <div class="seg" id="tabs" style="margin-top:14px"><button data-tab="bg">🚀 Пробійна сітка — налаштування</button></div>
@@ -405,6 +406,21 @@ function paintInv() {
   $("fInvHint").innerHTML = `На ваших угодах (з комісіями): за 6 год звичайно ${sgn(m.normal, 4)} / дзеркало ${sgn(m.mirror, 4)} (${m.n} угод) · за добу ${sgn(m24.normal, 4)} / ${sgn(m24.mirror, 4)}`
     + (!on && better ? ' <b style="color:#a78bfa">— схоже, дзеркало зараз краще</b>' : on && m.n >= 10 && m.normal > m.mirror && m.normal > 0 ? ' <b class="up">— звичайний режим зараз кращий</b>' : "");
 }
+$("dgRun").onclick = (e) => { e.preventDefault(); $("dgAt").textContent = "рахую…"; act({ what: "diag" }); };
+function paintDiag() {
+  const D = S.diag; if (!D) return; const R = D.res;
+  $("dgAt").textContent = D.busy ? "рахую…" : R ? "· " + new Date(R.at).toLocaleTimeString() + " (саме оновлюється кожні 5 хв)" : "";
+  if (!R) { $("dg").innerHTML = D.err ? `<div class="note">Bybit: ${esc(D.err)}</div>` : '<span class="mute">Збираю дані з біржі…</span>'; return; }
+  const ex = (x, t) => x && x.fills ? `<tr><td>${t}</td><td>${sgn(x.gross, 4)}</td><td class="down">−${f(x.fees, 4)}</td><td>${sgn(x.net, 4)}</td><td>${x.fills}</td><td>${x.takerShare ?? "—"}%</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
+  const bt = (b, t) => b && b.n ? `<tr><td>${t}</td><td>${b.takes.n} · ${sgn(b.takes.sum, 4)}</td><td>${b.turns.n} · ${sgn(b.turns.sum, 4)}</td><td>${b.takesPerTurn ?? "—"}</td><td>${b.other.n} · ${sgn(b.other.sum, 4)}</td><td>${sgn(b.net, 4)}</td></tr>` : `<tr><td>${t}</td><td colspan="5" class="mute">угод немає</td></tr>`;
+  const b = R.b1.n ? R.b1 : R.b7;
+  $("dg").innerHTML = `<div style="border-left:3px solid var(--gold);padding-left:10px">${R.why.map(w => `<div style="margin-bottom:4px">${esc(w)}</div>`).join("")}</div>`
+    + `<div style="margin-top:10px"><b style="font-size:12px">За даними Bybit</b><div class="scroll"><table><thead><tr><th></th><th>до комісій</th><th>комісії</th><th>результат</th><th>виконань</th><th>ринкових</th></tr></thead><tbody>${ex(R.d1, "доба")}${ex(R.d7, "7 днів")}</tbody></table></div></div>`
+    + `<div style="margin-top:10px"><b style="font-size:12px">За угодами бота</b><div class="scroll"><table><thead><tr><th></th><th>тейки</th><th>розвороти</th><th>тейків на 1 розворот</th><th>інші виходи</th><th>разом</th></tr></thead><tbody>${bt(R.b1, "доба")}${bt(R.b7, "7 днів")}</tbody></table></div></div>`
+    + (b && b.n ? `<div style="margin-top:8px;font-size:12px">Монети: ${b.byCoin.map(c => `${esc(c.sym)} ${sgn(c.sum, 4)} (${c.n})`).join(" · ")}<br>Плече: ${b.byLev.map(c => `${esc(c.lev)} ${sgn(c.sum, 4)} (${c.n})`).join(" · ")}${b.otherWhy.length ? `<br>Інші виходи: ${b.otherWhy.map(o => `${esc(o.how)} ${sgn(o.sum, 4)}`).join(" · ")}` : ""}</div>` : "")
+    + (R.d7 && R.d7.coins && R.d7.coins.length ? `<div style="margin-top:6px;font-size:12px">Bybit за 7 днів по монетах: ${R.d7.coins.map(c => `${esc(c.sym)} ${sgn(c.net, 4)}`).join(" · ")}</div>` : "")
+    + (D.err ? `<div class="note">Bybit: ${esc(D.err)}</div>` : "");
+}
 function paintFull() {
   const on = FULL_ON(), m = $("fMain"), X = S.bg, b = X.b, eq = S.acc.equity;
   m.textContent = BUSY ? "…" : on ? "■ ЗУПИНИТИ" : "▶ ЗАПУСТИТИ"; m.disabled = BUSY;
@@ -429,7 +445,7 @@ function paintFull() {
     : `<span class="dot on"></span>${X.waitIn != null ? `Монет із плюсом на історії зараз немає — нова перевірка через ${Math.ceil(X.waitIn / 60)} хв` : "Підбираю монету…"}`)
     + (X.err ? `<div class="note">${esc(X.err)}</div>` : "");
 }
-const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } };
+const paint0 = paint; paint = function () { paint0(); try { paintBg(); } catch (e) { console.error(e); } try { paintBrain(); } catch (e) { console.error(e); } try { paintFull(); } catch (e) { console.error(e); } try { paintInv(); } catch (e) { console.error(e); } try { paintDiag(); } catch (e) { console.error(e); } };
 load(); setInterval(load, 2000);
 </script>
 </body>

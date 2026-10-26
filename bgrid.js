@@ -667,6 +667,6 @@ function create(host) {
     if (B) { B.pendingRestart = true; saveB(); return "Увімкнеться, щойно закриються поточні юніти"; }
     ST.waitUntil = 0; return on ? "Суперскальпінг увімкнено" : "Вимкнено";
   }
-  return { setInvert, flow: () => FLOW.snapshot(), forceDir, pause, learn, tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
+  return { tradesSince: (t) => TR.filter(x => x.at >= t), setInvert, flow: () => FLOW.snapshot(), forceDir, pause, learn, tune, brief, changeCoin, straddleNow, enterNow, params: P, setOn, setParams, setScalp, view, closeAll, restart, sym: () => (B ? B.sym : null) };
 }
 module.exports = { create, DEFAULTS };

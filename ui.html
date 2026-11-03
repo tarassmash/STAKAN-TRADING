@@ -77,6 +77,9 @@
     width: 100%; border: none; border-radius: 8px; padding: 10px;
     font-size: 0.9rem; font-weight: 600; cursor: pointer; margin-top: 8px;
   }
+  .btn-full { background: linear-gradient(135deg, #0ecb81, #f0b90b); color: #000; font-size: 15px; font-weight: 800; padding: 14px 10px; box-shadow: 0 0 14px rgba(14,203,129,.35); }
+  .btn-full.on { background: linear-gradient(135deg, #f6465d, #a855f7); color: #fff; }
+  .fa-note { font-size: 11px; color: var(--muted); margin: -4px 0 12px; text-align: center; }
   .btn-start { background: var(--green); color: #000; }
   .btn-stop { background: #2b3139; color: var(--text); }
   .btn-once { background: var(--blue); color: #fff; }
@@ -258,6 +261,8 @@
 
 <div class="layout">
   <aside class="sidebar">
+    <button class="btn btn-full" id="fullAutoBtn" title="Только лимитки на самой волатильной за последнюю 1 минуту монете. 30 мин без исполнения → лимитки снимаются и ставятся на следующую">🚀 ЗАПУСК · 100% АВТОПИЛОТ</button>
+    <div class="fa-note" id="faText">лимитки на самой волатильной монете за 1 мин · 30 мин без исполнения → другая монета</div>
     <h2>Bybit API</h2>
     <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
     <div class="row">
@@ -661,6 +666,8 @@
     const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
+    const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🚀 ЗАПУСК · 100% АВТОПИЛОТ'; fb.disabled = BUSY;
+    $('faText').innerHTML = fon && G.fa ? `🚀 работает · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'смена монеты через ' + G.fa.left + ' мин, если не исполнится' : 'выбираю монету…'}` : 'лимитки на самой волатильной монете за 1 мин · ' + (P.faIdleMin || 30) + ' мин без исполнения → другая монета';
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
     const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
@@ -757,6 +764,7 @@
   $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
   $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
   $('stopBtn').onclick = () => act('stop');
+  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить 100% автопилот с РЕАЛЬНЫМИ ордерами? Бот сам выберет самую волатильную за последнюю минуту монету, поставит лимитки и каждые 30 мин без исполнения будет переставлять их на новую. Торгует сервер 24/7.').then(() => loadChart(true));
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');

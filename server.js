@@ -125,6 +125,7 @@ async function act(b) {
   if (b.o && typeof b.o === "object") SG.setParams(b.o);   // the page always sends its current settings with a command
   if (what === "save") return "Сохранено";
   if (what === "ai") return await SG.aiLearn("по кнопке");
+  if (what === "fullauto") return await SG.fullAuto();
   if (what === "start") return await SG.start();
   if (what === "stop") return await SG.stop(true);
   if (what === "once") { await SG.runCycle(); return "1 цикл выполнен"; }

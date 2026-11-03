@@ -38,11 +38,13 @@ const DEFAULTS = {
   bandTrail: true,         // trailing take: reaching the take activates a trailing exit on the exchange instead of closing at once
   bandTrailGap: 0.5,       // the trailing exit follows the best price at this %
   bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
+  fullAuto: false,         // 🚀 one button: limits only on the most volatile coin of the last 1 minute, no fill in faIdleMin -> next coin
+  faIdleMin: 30,
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
-const BOOLS = ["smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
+const NUMS = ["faIdleMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -51,7 +53,7 @@ function create(host) {
   if (!lsGet("sg.v2", false)) { Object.assign(P, { leverage: 10, autoStep: true, feeX: 10, slPct: 10, bandSl: 10, bandPct: 3, bandLevels: 3, bandAdds: 5, gridLevels: 8 }); save(); lsSet("sg.v2", true); }
   if (!lsGet("sg.v3", false)) { P.leverage = 3; Object.assign(P, { pulseOn: true, pulsePct: 1.5, pulseSec: 60, momHoldMin: 10, momSl: 1.5 }); save(); lsSet("sg.v3", true); }
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
-  const saveS = () => lsSet("sg.s", { ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
+  const saveS = () => lsSet("sg.s", { fa: S.fa, ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
   const LOG = lsGet("sg.log", []);
   let busy = false, timer = null, status = "ВЫКЛ", conn = { ok: null, text: "—" }, shukinSig = null, lastSave = 0;
@@ -473,7 +475,7 @@ function create(host) {
       results.forEach((r, i) => { if (r.status === "rejected") log(list[i] + ": " + (r.reason && r.reason.message || r.reason), "err"); });
       S.cycles++;
       if (P.running) { const posN = list.filter(s => W[s] && W[s].pos && W[s].pos.size > 0).length, spikes = list.filter(s => W[s] && W[s].isSpike).length;
-        status = (P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
+        status = (P.fullAuto ? "🚀 ПОЛНЫЙ АВТОПИЛОТ" : P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
       else status = "ВЫКЛ";
       conn = { ok: true, text: "OK" };
       if (S.cycles % 20 === 0) saveS();
@@ -527,10 +529,73 @@ function create(host) {
     return found.length + " горячих пар";
   }
 
+  // ---------- 🚀 full autopilot: the most volatile coin of the LAST 1 MINUTE ----------
+  // score = the range of the last closed 1m candle + of the current one + |the 1-minute move| (all %), the volume spike as a tie-break
+  async function scanLast1m(exclude) {
+    const category = P.category, ex = new Set((exclude || []).map(s => s.toUpperCase()));
+    const r = await pub("/v5/market/tickers", { category });
+    const liq = (r.list || []).filter(t => t.symbol.endsWith("USDT") && parseFloat(t.turnover24h || 0) > 3e6 && !ex.has(t.symbol));
+    const byMove = liq.slice().sort((a, b) => Math.abs(parseFloat(b.price24hPcnt || 0)) - Math.abs(parseFloat(a.price24hPcnt || 0))).slice(0, 50);
+    const byTurn = liq.slice().sort((a, b) => parseFloat(b.turnover24h || 0) - parseFloat(a.turnover24h || 0)).slice(0, 30);
+    const pool = [...new Map([...byMove, ...byTurn].map(t => [t.symbol, t])).values()];
+    const out = [];
+    for (let i = 0; i < pool.length; i += 10) {
+      const part = await Promise.all(pool.slice(i, i + 10).map(async (coin) => {
+        try { const k = await getKlines(coin.symbol, category, "1", 20); if (!k || k.length < 5) return null;
+          const cur = k[k.length - 1], prev = k[k.length - 2];
+          const rPrev = (prev.high - prev.low) / prev.close * 100, rCur = (cur.high - cur.low) / cur.close * 100;
+          const mv1 = prev.open ? (cur.close - prev.open) / prev.open * 100 : 0, sp = volSpike(k.slice(0, -1), 12);
+          const score = Math.max(rPrev, rCur) * 2 + Math.abs(mv1) * 1.5 + Math.min(sp, 6) * 0.1;
+          return { symbol: coin.symbol, chg: mv1, chg24: parseFloat(coin.price24hPcnt || 0) * 100, rsi: calculateRSI(k, 14), turnover: parseFloat(coin.turnover24h || 0), scannedAt: now(), range1m: Math.max(rPrev, rCur), range1: rCur, range5: rangePct(k, 5), atrPct: 0, volSpike: sp, score, tf: "1" };
+        } catch (e) { return null; } }));
+      out.push(...part.filter(Boolean));
+    }
+    const found = out.sort((a, b) => b.score - a.score).slice(0, 12);
+    S.targets = found; saveS();
+    return found;
+  }
+  function faState() { if (!S.fa) S.fa = { sym: "", since: 0, lastPos: 0 }; return S.fa; }
+  async function faPick(why, exclude) {
+    const found = await scanLast1m(exclude);
+    if (!found.length) { log("🚀 Автопилот: нет ликвидных пар с движением за 1 мин — повторю через минуту", "err"); return null; }
+    const old = (P.symbol || "").toUpperCase(), neu = found[0].symbol, wo = W[old], hasPos = wo && wo.pos && wo.pos.size > 0;
+    if (old && old !== neu && !hasPos && P.liveEnabled && keys()) { try { await cancelOurOrders(old, P.category); } catch (e) { log(`${old}: снять лимитки: ${e.message}`, "err"); } }
+    P.symbol = neu; P.interval = "1"; save();
+    const fa = faState(); fa.sym = neu; fa.since = now(); saveS();
+    log(`🚀 Автопилот (${why}): лимитки → ${neu} · за 1 мин диапазон ${found[0].range1m.toFixed(2)}%, ход ${found[0].chg >= 0 ? "+" : ""}${found[0].chg.toFixed(2)}%${old && old !== neu ? (hasPos ? ` · по ${old} позиция — веду её до выхода` : ` · с ${old} лимитки сняты`) : ""}`, "ok");
+    ensureWatch(neu); react(neu);
+    return neu;
+  }
+  let faBusy = false;
+  async function faTick() {
+    if (!P.running || !P.fullAuto || faBusy) return;
+    faBusy = true;
+    try {
+      const fa = faState(), sym = (P.symbol || "").toUpperCase();
+      if (!fa.sym || fa.sym !== sym || !fa.since) { await faPick("старт"); return; }
+      const w = W[sym], pos = w && ((w.pos && w.pos.size > 0) || (w.posEx && w.posEx.size > 0));
+      if (pos) { fa.since = now(); fa.lastPos = now(); return; }   // the limits worked: a position is open - the 30 min count again after it closes
+      const idle = (now() - fa.since) / 60000;
+      if (idle >= Math.max(1, P.faIdleMin || 30)) await faPick(`${Math.round(idle)} мин без исполнения на ${sym}`, [sym]);
+    } catch (e) { log("🚀 Автопилот: " + e.message, "err"); }
+    finally { faBusy = false; }
+  }
+  setInterval(() => { faTick().catch(() => {}); }, 20000);
+  async function fullAuto() {
+    if (!keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
+    Object.assign(P, { fullAuto: true, strategy: "follow", autopilot: false, liveEnabled: true, interval: "1", shukinMode: false });
+    save(); faState().since = 0;
+    log(`🚀 ПОЛНЫЙ АВТОПИЛОТ: только лимитки на самой волатильной за последнюю 1 мин монете; ${P.faIdleMin || 30} мин без исполнения → лимитки снимаю и ставлю на следующую`, "ok");
+    const sym = await faPick("старт");
+    if (P.running) { runCycle(); return "Полный автопилот включён" + (sym ? " · " + sym : ""); }
+    const r = await start();
+    return "🚀 Полный автопилот" + (sym ? " · " + sym : "") + " — " + r;
+  }
+
   // ---------- autopilot: every autoScanMin minutes - scan, move the grid to the best target ----------
   let autoBusy = false;
   async function autopilot() {
-    if (!P.running || !P.autopilot || autoBusy || now() - (S.lastAuto || 0) < Math.max(1, P.autoScanMin) * 60000) return;
+    if (!P.running || !P.autopilot || P.fullAuto || autoBusy || now() - (S.lastAuto || 0) < Math.max(1, P.autoScanMin) * 60000) return;
     autoBusy = true; S.lastAuto = now();
     const old = (P.symbol || "").toUpperCase();
     try {
@@ -653,7 +718,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     return "Бот запущен — все позиции под контролем";
   }
   async function stop(cancel) {
-    P.running = false; save(); schedule(); status = "ВЫКЛ";
+    P.running = false; P.fullAuto = false; save(); schedule(); status = "ВЫКЛ";
     if (cancel && P.liveEnabled && keys()) await cancelOurOrders((P.symbol || "").toUpperCase().trim(), P.category);
     log("STOP", "info"); return "Остановлен";
   }
@@ -683,11 +748,12 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
 
   function view() {
     ensureDayKey();
-    return { ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    const fa = S.fa || {};
+    return { fa: P.fullAuto && P.running ? { sym: fa.sym, left: fa.since ? Math.max(0, Math.round(((P.faIdleMin || 30) * 60000 - (now() - fa.since)) / 60000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
-  return { aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  return { fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

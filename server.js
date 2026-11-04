@@ -144,7 +144,8 @@ async function chart(q) {
   const sym = String(q.get("symbol") || SG.params.symbol).toUpperCase(), iv = String(q.get("interval") || SG.params.interval), cat = SG.params.category;
   const candles = await SG.getKlines(sym, cat, iv, 200);
   let oi = []; try { oi = await SG.getOpenInterest(sym, cat, iv, 200); } catch (e) { /* no OI */ }
-  return { symbol: sym, candles, oi, sig: SG.analyzeShukinContext(candles, oi) };
+  let fills = []; try { fills = await SG.fills(sym); } catch (e) { /* no keys / no fills */ }
+  return { symbol: sym, candles, oi, fills, sig: SG.analyzeShukinContext(candles, oi) };
 }
 
 // ---------------- web ----------------

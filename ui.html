@@ -459,7 +459,7 @@
     <div style="display:flex;gap:8px;align-items:center;">
       <span style="color:var(--muted);font-size:0.85rem;">Позиция (выбранная)</span>
       <button class="btn btn-sec" id="refreshPosBtn" style="width:auto;margin:0;padding:6px 12px;">Обновить</button>
-      <button class="btn btn-sec" id="closePosBtn" style="width:auto;margin:0;padding:6px 12px;color:var(--red);">Закрыть market</button>
+      <button class="btn btn-sec" id="closePosBtn" style="width:auto;margin:0;padding:6px 12px;color:var(--red);">Закрыть (лимит)</button>
     </div>
     <div class="pos-card" id="posCard">
       <div><div class="k">Side</div><div class="v" id="posSide">FLAT</div></div>
@@ -467,7 +467,7 @@
       <div><div class="k">Entry</div><div class="v" id="posEntry">—</div></div>
       <div><div class="k">uPnL</div><div class="v" id="posUpnl">—</div></div>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Пунктиры: красные — SELL, зелёные — BUY (едут за ценой), жёлтая — Mid</span><span id="chartLive" style="color:var(--green)"></span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Линии — реальные ордера на бирже: <b style="color:#0ecb81">BUY</b> · <b style="color:#f6465d">SELL</b> · <b style="color:#2ea6ff">тейк</b> · <b style="color:#a855f7">выход ⏩</b> · <b style="color:#ff9800">стоп</b> · <b style="color:#f0b90b">средняя</b>; ▲▼ — сделки</span><span id="chartLive" style="color:var(--green)"></span></div>
     <div id="chart"></div>
     <div class="sub-charts">
       <div class="sub-chart-wrap">
@@ -496,7 +496,7 @@
   'use strict';
   const $ = id => document.getElementById(id);
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
-  let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries, gridLines = [];
+  let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries;
   const minis = {};
   const NUMS = ['fastK', 'fastMinPct', 'fastAggr', 'fastSpeed', 'momCap', 'momAdds', 'aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
   const BOOLS = ['smartOn', 'momIoc', 'aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
@@ -541,7 +541,12 @@
     if (!window.LightweightCharts) return;
     const el = $('chart');
     chart = LightweightCharts.createChart(el, { layout: { background: { color: '#12161c' }, textColor: '#eaecef' }, grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } }, rightPriceScale: { borderColor: '#1e2329' }, timeScale: { borderColor: '#1e2329', timeVisible: true }, width: el.clientWidth, height: el.clientHeight || 320 });
-    candleSeries = chart.addCandlestickSeries({ upColor: '#0ecb81', downColor: '#f6465d', borderUpColor: '#0ecb81', borderDownColor: '#f6465d', wickUpColor: '#0ecb81', wickDownColor: '#f6465d' });
+    candleSeries = chart.addCandlestickSeries({ upColor: '#0ecb81', downColor: '#f6465d', borderUpColor: '#0ecb81', borderDownColor: '#f6465d', wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+      // the scale takes in the order lines too (limits at ±3% would be off the screen otherwise); a far stop does not squash the candles
+      autoscaleInfoProvider: (orig) => { const r = orig(); if (!r || !r.priceRange || !scaleLv.length) return r;
+        let lo = r.priceRange.minValue, hi = r.priceRange.maxValue; const mid = (lo + hi) / 2;
+        for (const v of scaleLv) if (Math.abs(v / mid - 1) <= 0.06) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+        return { priceRange: { minValue: lo, maxValue: hi }, margins: r.margins }; } });
     midSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 1, title: 'Mid' });
     volChart = LightweightCharts.createChart($('volChart'), subOpts($('volChart'))); volSeries = volChart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '' }); volChart.priceScale('').applyOptions({ scaleMargins: { top: 0.15, bottom: 0 } });
     oiChart = LightweightCharts.createChart($('oiChart'), subOpts($('oiChart'))); oiSeries = oiChart.addLineSeries({ color: '#a855f7', lineWidth: 2, title: 'OI' });
@@ -599,6 +604,7 @@
       if (Date.now() - lastWs > 10000) for (let i = 0; i < c.length; i++) { const x = c[i]; if (x.time < lastT - 120) continue;
         candleSeries.update(x); volSeries.update({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update(cvd[i]); }
       const oi = uniq(r.oi || []); if (oi.length) oiSeries.setData(oi);
+      drawFills(r.fills);
       if (r.sig) showSig(r.sig);
       if (Date.now() - lastWs > 10000) $('chartLive').textContent = '● обновлено ' + new Date().toLocaleTimeString('ru-RU');
     } catch (e) { /* next tick */ } finally { liveBusy = false; }
@@ -609,7 +615,18 @@
     const a = Math.abs(px || 0), d = a >= 1000 ? 2 : a >= 10 ? 3 : a >= 1 ? 4 : a >= 0.1 ? 5 : a >= 0.01 ? 6 : a >= 0.001 ? 7 : 8;
     return { type: 'price', precision: d, minMove: +Math.pow(10, -d).toFixed(d) };
   }
-  function clearLevels() { gridLines.forEach(s => { try { chart.removeSeries(s); } catch (e) {} }); gridLines = []; try { midSeries.setData([]); } catch (e) {} }
+  // the levels are price lines of the candle series: only re-drawn when something changed (no flicker, the scale stays)
+  let pLines = [], pKey = '', scaleLv = [];
+  function clearLevels() { pLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch (e) {} }); pLines = []; pKey = ''; scaleLv = []; try { midSeries.setData([]); } catch (e) {} try { candleSeries.setMarkers([]); } catch (e) {} }
+  // points: the account's fills on the candles (▲ buy / ▼ sell)
+  function drawFills(fl) {
+    if (!candleSeries) return;
+    const d = candleSeries.data(); if (!d.length) return;
+    const iv = (Number(chartIv) || 1) * 60, t0 = d[0].time, tl = d[d.length - 1].time;
+    const m = (fl || []).map(f => ({ t: Math.floor(f.t / 1000 / iv) * iv, f })).filter(x => x.t >= t0 && x.t <= tl).sort((a, b) => a.t - b.t)
+      .map(({ t, f }) => ({ time: t, position: f.side > 0 ? 'belowBar' : 'aboveBar', color: f.side > 0 ? '#0ecb81' : '#f6465d', shape: f.side > 0 ? 'arrowUp' : 'arrowDown', text: (f.side > 0 ? 'B ' : 'S ') + f.px }));
+    try { candleSeries.setMarkers(m); } catch (e) {}
+  }
     async function loadChart(force) {
     const sym = ($('symbol').value || '').toUpperCase().trim(), iv = $('interval').value;
     if (!sym || !chart) return;
@@ -632,17 +649,26 @@
     wsConnect(); wsSub();
     resizeAll(); [chart, volChart, oiChart, cvdChart].forEach(x => { try { x.timeScale().fitContent(); } catch (e) {} });
     if (r.sig) showSig(r.sig);
+    drawFills(r.fills); pKey = ''; if (S && S.sg) drawLevels(S.sg.watches.find(x => x.symbol === chartSym));
     setConn(true, 'OK');
   }
+  const KIND = { entry: '', tp: 'Тейк ', close: '⏩ Выход ', sl: 'Стоп ', other: '', plan: '' };
   function drawLevels(w) {
     if (!chart || !candleSeries) return;
-    clearLevels();
-    if (!w || w.symbol !== chartSym) return;   // levels only on the chart of their own coin
-    const d = candleSeries.data ? candleSeries.data() : null; if (!d || !d.length || !w.mid) return;
-    const t0 = d[0].time, t1 = d[d.length - 1].time + 120;
-    midSeries.setData([{ time: t0, value: w.mid }, { time: t1, value: w.mid }]);
-    const lv = w.levels || (w.targets || []).map(px => ({ px, side: w.side > 0 ? 1 : -1 }));
-    lv.forEach(({ px, side }) => { const buy = side > 0; const s = chart.addLineSeries({ color: buy ? '#0ecb81' : '#f6465d', lineWidth: 1, lineStyle: 2, title: (buy ? 'Buy ' : 'Sell ') + px, priceFormat: PF, lastValueVisible: true, priceLineVisible: false }); s.setData([{ time: t0, value: px }, { time: t1, value: px }]); gridLines.push(s); });
+    const L = [];
+    if (w && w.symbol === chartSym) {
+      const src = w.open ? w.open : (w.levels || (w.targets || []).map(px => ({ px, side: w.side > 0 ? 1 : -1 }))).map(x => ({ px: x.px, side: x.side, kind: 'plan' }));
+      src.forEach(o => { if (!(o.px > 0)) return; const buy = o.side > 0;
+        L.push({ px: o.px, color: o.kind === 'sl' ? '#ff9800' : o.kind === 'close' ? '#a855f7' : o.kind === 'tp' ? '#2ea6ff' : buy ? '#0ecb81' : '#f6465d', style: o.kind === 'plan' ? 3 : 2, title: (KIND[o.kind] || '') + (buy ? 'Buy' : 'Sell') + (o.kind === 'plan' ? ' (план)' : '') }); });
+      if (w.sl && !src.some(o => o.kind === 'sl')) L.push({ px: w.sl, color: '#ff9800', style: 2, title: 'Стоп (лимит)' });
+      if (w.pos && w.pos.size > 0 && w.pos.avgPrice) L.push({ px: w.pos.avgPrice, color: '#f0b90b', style: 0, title: 'Средняя ' + (w.pos.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ') });
+    }
+    const key = JSON.stringify(L);
+    if (key === pKey) return;
+    pLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch (e) {} });
+    pKey = key; scaleLv = L.map(x => x.px);
+    pLines = L.map(x => candleSeries.createPriceLine({ price: x.px, color: x.color, lineWidth: x.style === 0 ? 2 : 1, lineStyle: x.style, axisLabelVisible: true, title: x.title }));
+    try { chart.priceScale('right').applyOptions({ autoScale: true }); } catch (e) {}
   }
   function showSig(sig) {
     $('oiTrendText').textContent = sig.oiTrend + (sig.oiChangePct ? ' (' + Number(sig.oiChangePct).toFixed(1) + '%)' : '');
@@ -770,7 +796,7 @@
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
   load().then(() => loadChart(true));
   setInterval(load, 2000);
-  setInterval(liveChart, 15000);
+  setInterval(liveChart, 5000);
   setInterval(() => { if (S) { wsConnect(); wsSub(); } }, 3000);
   setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { const s2 = (S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
 })();

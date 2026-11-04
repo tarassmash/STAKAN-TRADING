@@ -489,6 +489,20 @@ function create(host) {
     w.status = md ? `⚡ ${md > 0 ? "ПАМП" : "ДАМП"} · ${pd ? "по движению" : "вход лимиткой"}` : pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
   }
 
+  // the exchange's real orders for the chart: price, side, what it is
+  function openForChart(open) {
+    return open.filter(o => parseFloat(o.price) > 0 || parseFloat(o.triggerPrice) > 0).slice(0, 40).map(o => {
+      const id = o.orderLinkId || "", stop = /StopLoss/i.test(o.stopOrderType || "");
+      const kind = stop ? "sl" : id.startsWith("sg_cl_") ? "close" : id.startsWith("sg_tp_") ? "tp" : id.startsWith("sg_") ? "entry" : "other";
+      return { px: parseFloat(stop ? (o.triggerPrice || o.price) : o.price), side: o.side === "Buy" ? 1 : -1, kind, qty: o.qty };
+    });
+  }
+  // the account's fills of a coin (points on the chart)
+  async function fills(symbol) {
+    if (!keys()) return [];
+    const r = await priv("GET", "/v5/execution/list", { category: P.category, symbol: symbol.toUpperCase(), limit: 100 });
+    return (r.list || []).filter(x => x.execType === "Trade" || !x.execType).map(x => ({ t: Number(x.execTime), side: x.side === "Buy" ? 1 : -1, px: parseFloat(x.execPrice), qty: x.execQty, maker: x.isMaker === true || x.isMaker === "true" }));
+  }
   function ensureWatch(symbol) { symbol = symbol.toUpperCase().trim(); if (!W[symbol]) W[symbol] = { symbol, mid: 0, candles: [], priceHistory: [], pos: { side: null, size: 0, avgPrice: 0, unrealisedPnl: 0 }, orders: 0, ourOrders: 0, isSpike: false, volOk: true, status: "—", atrPct: null, rsi: null }; return W[symbol]; }
 
   async function processSymbol(symbol) {
@@ -497,7 +511,6 @@ function create(host) {
   }
   async function processSymbol0(symbol) {
     const category = P.category, w = ensureWatch(symbol);
-    if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
     const book = await getOrderBook(symbol, category);
     if (!book.bids.length || !book.asks.length) throw new Error(symbol + ": пустой стакан");
     const mid = (book.bids[0] + book.asks[0]) / 2; w.mid = mid; w.bid = book.bids[0]; w.ask = book.asks[0];
@@ -511,7 +524,9 @@ function create(host) {
     w.atrPct = estimateAtrPct(candles, 14); w.rsi = calculateRSI(candles, 14);
     let volOk = true; if (P.volFilter && w.atrPct != null) { const mn = (P.minAtrPct || 0.15) / 100, mx = (P.maxAtrPct || 4) / 100; if (w.atrPct < mn || w.atrPct > mx) volOk = false; }
     w.volOk = volOk; w.status = isSpike ? "SPIKE" : !volOk ? "VOL" : "OK";
-    if (P.liveEnabled) { try { const open = await getOpenOrders(symbol, category); w.orders = open.length; w.ourOrders = open.filter(o => (o.orderLinkId || "").startsWith("sg_")).length; } catch (e) { /* keep */ } }
+    if (P.liveEnabled) { try { const open = await getOpenOrders(symbol, category); w.orders = open.length; w.ourOrders = open.filter(o => (o.orderLinkId || "").startsWith("sg_")).length; w.open = openForChart(open); w.openAt = now(); } catch (e) { /* keep */ } }
+    else w.open = null;
+    if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
     if (P.strategy === "follow") await runFollowCycle(symbol, mid, inst, volOk, isSpike, candles, w);
     else await runSellGridCycle(symbol, mid, inst, volOk, isSpike, candles, w);
   }
@@ -832,9 +847,9 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     const fa = S.fa || {};
     return { fa: P.fullAuto && P.running ? { sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
-  return { fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  return { fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

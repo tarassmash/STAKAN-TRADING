@@ -233,7 +233,7 @@ function create(host) {
   async function availUsdt(force) {
     if (!force && AV.v != null && now() - AV.at < 2000) return AV.v;
     try { const r = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (r.list || [])[0] || {};
-      AV = { v: Number(a.totalAvailableBalance || 0), at: now() }; } catch (e) { /* keep the last */ }
+      AV = { v: Number(a.totalAvailableBalance || 0), eq: Number(a.totalEquity || 0), at: now() }; } catch (e) { /* keep the last */ }
     return AV.v;
   }
   const isNoMoney = (e) => /^(110004|110007|110012|110044|110045|110052|110014)$/.test(String(e && e.code)) || /not enough|insufficient|ab not enough/i.test(String(e && e.message));
@@ -576,6 +576,7 @@ function create(host) {
     if (P.liveEnabled) { try { const open = await getOpenOrders(symbol, category); w.orders = open.length; w.ourOrders = open.filter(o => (o.orderLinkId || "").startsWith("sg_")).length; w.open = openForChart(open); w.openAt = now(); } catch (e) { /* keep */ } }
     else w.open = null;
     if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
+    if (HUNT.has(symbol)) { w.status = "🎯 импульс"; return; }
     if (P.strategy === "impulse") { w.status = HUNT.has(symbol) ? "🎯 импульс" : "🎯 охота"; return; }
     if (P.strategy === "follow") await runFollowCycle(symbol, mid, inst, volOk, isSpike, candles, w);
     else await runSellGridCycle(symbol, mid, inst, volOk, isSpike, candles, w);
@@ -676,7 +677,12 @@ function create(host) {
     closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
     posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },
     dayStopped: () => (P.maxDailyLoss || 0) > 0 && S.dayPnl <= -Math.abs(P.maxDailyLoss),
+    skip: (s2) => s2 === (P.symbol || "").toUpperCase(),
     hasPosition: (s2) => { const w = W[s2]; return !!(w && ((w.pos && w.pos.size > 0) || (w.posEx && w.posEx.size > 0))); } });
+  function syncHunt() {
+    const want = !!(P.hunt && P.running && P.fullAuto);
+    if (want && !HUNT.isOn()) HUNT.start(); else if (!want && HUNT.isOn()) HUNT.stop();
+  }
   async function hunt() {
     if (P.hunt && HUNT.isOn()) { P.hunt = false; HUNT.stop(); P.strategy = "follow"; save(); return await stop(false); }
     if (P.liveEnabled && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
@@ -730,7 +736,9 @@ function create(host) {
     bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandSl: [1.5, 15], bandTp: [0.3, 3], bandTrailGap: [0.1, 2], bandRef: [1, 20],
     momSl: [0.5, 5], pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
     fastK: [1.5, 5], fastAggr: [0.55, 0.85], fastSpeed: [1.2, 4], chaseAggrSec: [5, 60], faEveryMin: [1, 10],
-    pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool",
+    leverage: [1, 10], orderUsdt: [5, 5000],
+    hScore: [4, 8], hAct: [0.15, 1.5], hGap: [0.1, 1], hStop: [0.3, 2], hTimeSec: [10, 120], hMax: [1, 4],
+    pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool", hunt: "bool",
   };
   function aiApply(params) {
     const ch = [];
@@ -739,10 +747,11 @@ function create(host) {
       if (rg === "bool") { if (typeof v === "boolean" && P[k] !== v) { ch.push(`${k} ${P[k]}→${v}`); P[k] = v; } continue; }
       let n = Number(v); if (!Number.isFinite(n)) continue;
       n = Math.min(rg[1], Math.max(rg[0], n));
-      if (["bandLevels", "bandAdds", "bandRef", "momAdds", "faEveryMin", "pulseSec", "momHoldMin", "chaseAggrSec"].includes(k)) n = Math.round(n); else n = +n.toFixed(3);
+      if (["bandLevels", "bandAdds", "bandRef", "momAdds", "faEveryMin", "pulseSec", "momHoldMin", "chaseAggrSec", "leverage", "orderUsdt", "hScore", "hTimeSec", "hMax"].includes(k)) n = Math.round(n); else n = +n.toFixed(3);
       if (P[k] !== n) { ch.push(`${k} ${P[k]}→${n}`); P[k] = n; }
     }
     if (ch.length) save();
+    syncHunt();
     return ch;
   }
   async function aiPilot(found, cur) {
@@ -752,8 +761,13 @@ function create(host) {
     const trades = S.history.slice(-20).map(h => ({ minAgo: Math.round((now() - h.at) / 60000), sym: h.sym, pnl: h.pnl, how: h.how }));
     const params = {}; for (const k of Object.keys(AI_KEYS)) params[k] = P[k];
     const steps = cw && cw.steps ? { maker: cw.steps.maker, taker: cw.steps.taker, minStepPct: cw.steps.lim } : null;
-    const d = await host.fal(`You fully run a crypto futures bot on Bybit (USDT perpetuals, leverage x${P.leverage}, ${P.orderUsdt} USDT per order). Goal: the maximum profit with controlled risk.
+    await availUsdt(true);
+    const hv = HUNT.view();
+    const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
+Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
+ONLY limit orders are used (never market).
 How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; the stop bandSl% from the average. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move (stop momSl%), back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
+Parallel impulse hunter (hunt=true/false): watches the order books + tape of ~25 liquid coins, 4x a second scores an explosion seconds ahead (book imbalance up to 2, pulled liquidity up to 2, tape speed + aggression up to 3, an early move 1; out of 8), score >= hScore -> enters by a limit at the opposite best price, a trailing exit by a limit from +hAct% with a pull-back hGap%, stop hStop%, out after hTimeSec s without the impulse, up to hMax at once. Its stats: ${JSON.stringify(hv.stats)}, active: ${JSON.stringify(hv.hunts.map(x => ({ sym: x.sym, d: x.d, prof: x.prof, sec: x.sec })))}.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
 Now trading: ${cur} for ${fa.since ? Math.round((now() - fa.since) / 60000) : 0} min, its status "${cw ? cw.status : "—"}", our open orders ${cw ? cw.ourOrders : 0}.
 Open positions: ${JSON.stringify(positions)}
@@ -810,14 +824,13 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
   setInterval(() => { faTick().catch(() => {}); }, 5000);
   async function fullAuto() {
     if (!keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
-    if (HUNT.isOn()) { HUNT.stop(); P.hunt = false; }
-    Object.assign(P, { fullAuto: true, strategy: "follow", autopilot: false, liveEnabled: true, interval: "1", shukinMode: false, aiAuto: !!host.fal });
+    Object.assign(P, { fullAuto: true, strategy: "follow", momIoc: false, autopilot: false, liveEnabled: true, interval: "1", shukinMode: false, aiAuto: !!host.fal });
     save(); faState().since = 0;
     log(host.fal ? "🧠 Управление отдано AI (fal.ai): монета и все настройки стратегии — каждые " + Math.max(1, P.faEveryMin || 3) + " мин; размер ордера, плечо и дневной лимит убытка — ваши" : "⚠ Нет FAL_KEY в Railway → Variables — автопилот работает без AI (алгоритм: топ-1 по волатильности)", host.fal ? "ok" : "err");
     log(`🚀 ПОЛНЫЙ АВТОПИЛОТ: сетка лимиток только на самой волатильной за последнюю 1 мин монете; каждые ${Math.max(1, P.faEveryMin || 3)} мин — новый скан и перенос сетки на новый топ`, "ok");
     await faDecide("старт"); const sym = faState().sym;
     if (P.running) { runCycle(); return "Полный автопилот включён" + (sym ? " · " + sym : ""); }
-    const r = await start();
+    const r = await start(); syncHunt();
     return "🚀 Полный автопилот" + (host.fal ? " под управлением AI" : " (без AI: нет FAL_KEY)") + (sym ? " · " + sym : "") + " — " + r;
   }
 
@@ -982,7 +995,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
       shukin: shukinSig, log: LOG.slice(0, 150),
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, hl: HUNT.levels(w.symbol), open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
-  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (P.hunt && P.strategy === "impulse") HUNT.start(); }, 3000);
+  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } else syncHunt(); }, 3000);
   return { hunt, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

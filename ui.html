@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sell Grid — Short 24/7</title>
+<title>AI Автопилот 24/7</title>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
@@ -114,7 +114,8 @@
     background: #0d1117; border: 1px solid var(--border);
     border-radius: 8px; padding: 10px; margin-top: 10px;
   }
-  .stats .row { margin-bottom: 4px; }
+  .stats .row { margin-bottom: 4px; font-size: .85rem; }
+  .stats #statusText { font-size: .8rem; text-align: right; }
   .stats .val { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 
   .log {
@@ -258,7 +259,7 @@
 </head>
 <body>
 <header>
-  <h1>Sell <span>Grid</span> — Short <small style="font-size:.7rem;color:var(--muted);font-weight:400">· сервер 24/7</small></h1>
+  <h1>AI <span>Автопилот</span> <small style="font-size:.7rem;color:var(--muted);font-weight:400">· fal.ai · только лимитки · сервер 24/7</small></h1>
   <div style="display:flex;gap:8px;align-items:center;">
     <span class="badge" id="connBadge">● Связь</span>
     <span class="badge" id="runBadge">Стоп</span>
@@ -267,12 +268,28 @@
 
 <div class="layout">
   <aside class="sidebar">
-    <button class="btn btn-full" id="fullAutoBtn" title="AI (fal.ai) управляет всем: каждые 3 мин выбирает монету среди самых волатильных за последнюю минуту и настраивает стратегию. Сетка лимиток за последнюю 1 минуту монете. Каждые 3 минуты — новый скан: цели, график и сетка переходят на новый топ">🚀 ЗАПУСК · 100% АВТОПИЛОТ</button>
-    <div class="fa-note" id="faText">сетка на самой волатильной монете за 1 мин · каждые 3 мин — новый скан и переход</div>
-    <button class="btn btn-hunt" id="huntBtn" title="Стаканы и лента ~25 монет в реальном времени: ищет признаки пампа/дампа за секунды до взрыва, входит лимиткой и сразу ведёт трейлинг-выход лимиткой. Без перерыва.">🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА</button>
+    <button class="btn btn-full" id="fullAutoBtn" title="AI (fal.ai) полностью управляет ботом 24/7: анализирует рынок, выбирает монету и стратегию, оптимизирует настройки, плечо и лот, включает охоту за импульсами. Только лимитные ордера.">🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ</button>
+    <div class="fa-note" id="faText">AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7</div>
     <div class="hunt-box" id="huntBox"><span class="hwhy">поиск в стаканах наступающего пампа / дампа → вход лимиткой → трейлинг-выход лимиткой</span></div>
-    <h2>Bybit API</h2>
+    <h2>Счёт</h2>
     <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
+    <div class="row"><label>Баланс USDT</label><span class="val" id="equityText" style="font-weight:600">—</span></div>
+    <h2>Защита</h2>
+    <div class="row">
+      <label title="Единственное, что AI менять не может: при таком убытке за день бот снимает ордера и ждёт следующего дня">Стоп-лимит убытка за день, USDT</label>
+      <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
+    </div>
+    <div class="info" style="font-size:.75rem">Всем остальным управляет AI (fal.ai): монета, стратегия, все настройки, плечо (до x10), размер лота, охота за импульсами. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
+    <div class="stats">
+      <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
+      <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
+      <div class="row"><span>Win / Loss</span><span class="val" id="wlText">0 / 0</span></div>
+      <div class="row"><span>День PnL</span><span class="val" id="dayPnlText">0</span></div>
+    </div>
+    <div class="log" id="log">Лог пуст</div>
+    <div id="legacy" hidden>
+    <button class="btn btn-hunt" id="huntBtn" title="Стаканы и лента ~25 монет в реальном времени: ищет признаки пампа/дампа за секунды до взрыва, входит лимиткой и сразу ведёт трейлинг-выход лимиткой. Без перерыва.">🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА</button>
+    <h2>Bybit API</h2>
     <div class="row">
       <label>Category</label>
       <select id="category">
@@ -280,7 +297,6 @@
         <option value="inverse">inverse</option>
       </select>
     </div>
-    <div class="row"><label>Баланс USDT</label><span class="val" id="equityText" style="font-weight:600">—</span></div>
     <button class="btn btn-sec" id="saveKeysBtn">Сохранить настройки</button>
     <button class="btn btn-sec" id="testConnBtn">Проверить связь</button>
 
@@ -378,10 +394,6 @@
       <input type="number" id="orderUsdt" value="20" min="5" step="1" />
     </div>
     <div class="row">
-      <label>Макс. лосс / день</label>
-      <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
-    </div>
-    <div class="row">
       <label>Интервал цикла (с)</label>
       <input type="number" id="intervalSec" value="3" min="2" step="1" />
     </div>
@@ -442,7 +454,6 @@
     <button class="btn btn-once" id="onceBtn">1 цикл</button>
 
     <div class="stats">
-      <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
       <div class="row"><span>Режим</span><span class="val" id="modeStatusText" style="color:var(--muted)">Обычный</span></div>
       <div class="row"><span>Mid</span><span class="val" id="midText">—</span></div>
       <div class="row"><span>ATR %</span><span class="val" id="atrText">—</span></div>
@@ -455,11 +466,8 @@
       <div class="row"><span>Лента 15 с</span><span class="val" id="tapeText">—</span></div>
       <div class="row"><span>Автопилот</span><span class="val" id="autoText">—</span></div>
       <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
-      <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
-      <div class="row"><span>Win / Loss</span><span class="val" id="wlText">0 / 0</span></div>
-      <div class="row"><span>День PnL</span><span class="val" id="dayPnlText">0</span></div>
     </div>
-    <div class="log" id="log">Лог пуст</div>
+    </div>
   </aside>
 
   <main class="main">
@@ -525,10 +533,7 @@
 
   // ---------- settings: page <-> server ----------
   function readForm() {
-    const o = { symbol: ($('symbol').value || '').toUpperCase().trim(), interval: $('interval').value, category: $('category').value, autoScanMode: $('autoScanMode').value, strategy: $('strategy').value };
-    for (const k of NUMS) o[k] = parseFloat($(k).value);
-    for (const k of BOOLS) o[k] = $(k).checked;
-    return o;
+    return { maxDailyLoss: parseFloat($('maxDailyLoss').value) };   // everything else is run by the AI
   }
   function fillForm(P) {
     if (DIRTY) return;
@@ -710,18 +715,18 @@
     const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
-    { const Hn = G.hunt || {}, hon = !!(P.hunt && Hn.on), hb = $('huntBtn'); hb.classList.toggle('on', hon); hb.textContent = hon ? '■ СТОП ОХОТНИК' : '🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА'; hb.disabled = BUSY;
+    { const Hn = G.hunt || {}, hon = !!(Hn.on), hb = $('huntBtn'); $('huntBox').style.display = hon ? '' : 'none'; hb.classList.toggle('on', hon); hb.textContent = hon ? '■ СТОП ОХОТНИК' : '🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА'; hb.disabled = BUSY;
       const st = Hn.stats || {};
       $('huntBox').innerHTML = !hon ? '<span class="hwhy">поиск в стаканах наступающего пампа / дампа → вход лимиткой → трейлинг-выход лимиткой</span>'
         : `<div class="hwhy">${Hn.up ? '🟢' : '🟡 подключаюсь…'} стаканы ${Hn.coins} монет · сделок ${st.n || 0} (${st.wins || 0}/${st.losses || 0}) · PnL ${(st.pnl || 0) >= 0 ? '+' : ''}${Number(st.pnl || 0).toFixed(3)}${P.liveEnabled ? '' : ' · СИМУЛЯЦИЯ'}</div>`
         + (Hn.hunts || []).map(x => `<div class="hrow" data-sym="${esc(x.sym)}"><span><b style="color:${x.d > 0 ? 'var(--green)' : 'var(--red)'}">${x.d > 0 ? '▲' : '▼'} ${esc(x.sym.replace(/USDT$/, ''))}</b> ${x.state === 'entering' ? 'вход…' : x.state === 'exiting' ? 'выход ⏩' : x.act ? 'трейлинг' : 'жду импульс'}</span><span style="color:${x.prof >= 0 ? 'var(--green)' : 'var(--red)'}">${x.prof >= 0 ? '+' : ''}${Number(x.prof).toFixed(2)}% · ${x.sec}с</span></div>`).join('')
         + (Hn.top || []).slice(0, 6).map(a => `<div class="hrow" data-sym="${esc(a.sym)}" title="${esc(a.why)}"><span>${a.d > 0 ? '▲' : '▼'} ${esc(a.sym.replace(/USDT$/, ''))} <span class="hwhy">${esc(a.why || 'тихо')}</span></span><span style="color:${a.score >= (P.hScore || 5) && a.ok ? 'var(--green)' : a.score >= 3 ? 'var(--yellow)' : 'var(--muted)'}"><b>${a.score}</b>/8</span></div>`).join(''); }
-    const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🚀 ЗАПУСК · 100% АВТОПИЛОТ'; fb.disabled = BUSY;
+    const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ'; fb.disabled = BUSY;
     $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🚀 работает (без AI: нет FAL_KEY)'} · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'решение через ' + G.fa.left + ' с' : 'выбираю монету…'}`
-      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'сетка на самой волатильной монете за 1 мин · каждые ' + (P.faEveryMin || 3) + ' мин — новый скан и переход';
+      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
-    const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
+    const info = document.querySelector('#legacy .info:not(#keysInfo)');
     if (info) info.innerHTML = P.strategy === 'follow' ? 'Для «Автопилота за ценой» используются только «Размер USDT» и фильтр спайка ниже; отступ, тейк, стоп и доборы — в блоке выше.' : P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
     $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
     const cw = G.watches.find(x => x.symbol === (P.symbol || '').toUpperCase());
@@ -816,8 +821,7 @@
   $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
   $('stopBtn').onclick = () => act('stop');
   $('huntBtn').onclick = () => (S && S.sg && S.sg.params.hunt && S.sg.hunt && S.sg.hunt.on) ? act('hunt', null, 'Остановить охотника? Открытые позиции бот доведёт до выхода.') : act('hunt', null, $('liveEnabled').checked ? 'Запустить ОХОТНИКА с РЕАЛЬНЫМИ ордерами? Бот сам ищет в стаканах ~25 монет наступающий памп/дамп, входит лимиткой и ведёт трейлинг-выход лимиткой, без перерыва. Сетки/автопилот выключаются.' : 'Live выключен — охотник запустится в СИМУЛЯЦИИ (без ордеров, только лог и статистика). Запустить?');
-  $('huntBox').addEventListener('click', e => { const r = e.target.closest('[data-sym]'); if (r) pick(r.getAttribute('data-sym'), '1'); });
-  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить 100% автопилот с РЕАЛЬНЫМИ ордерами? Управление отдаётся AI (fal.ai): он сам выбирает монету и настройки стратегии; размер ордера, плечо и дневной лимит убытка остаются вашими. Бот сам выберет самую волатильную за последнюю минуту монету, поставит сетку лимиток и каждые 3 минуты будет пересканировать и переносить сетку на новую самую волатильную. Торгует сервер 24/7.').then(() => loadChart(true));
+  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить автопилот с РЕАЛЬНЫМИ ордерами? Управление полностью у AI (fal.ai): монета, стратегия, все настройки, плечо до x10, размер лота, охота за импульсами — только лимитками, 24/7. Ваш единственный лимит — стоп-лимит убытка за день.').then(() => loadChart(true));
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');

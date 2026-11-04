@@ -122,18 +122,11 @@ function state() {
 }
 async function act(b) {
   const what = String(b.what || "");
-  if (b.o && typeof b.o === "object") SG.setParams(b.o);   // the page always sends its current settings with a command
+  // everything is run by the AI: the page may only set the day loss limit (the one hard limit of the user)
+  if (b.o && typeof b.o === "object" && b.o.maxDailyLoss != null) SG.setParams({ maxDailyLoss: b.o.maxDailyLoss });
   if (what === "save") return "Сохранено";
-  if (what === "ai") return await SG.aiLearn("по кнопке");
   if (what === "fullauto") return await SG.fullAuto();
-  if (what === "hunt") return await SG.hunt();
-  if (what === "start") return await SG.start();
   if (what === "stop") return await SG.stop(true);
-  if (what === "once") { await SG.runCycle(); return "1 цикл выполнен"; }
-  if (what === "shukin") return SG.toggleShukin();
-  if (what === "scan") return await SG.scanPump();
-  if (what === "ultra") return await SG.scanUltraVol1m();
-  if (what === "clearTargets") return SG.clearTargets();
   if (what === "sync") { if (!HAS_KEYS) return "Нет API ключей в Railway → Variables"; return await SG.sync(); }
   if (what === "close") { if (!HAS_KEYS) return "Нет API ключей"; return await SG.closePos(b.symbol); }
   if (what === "position") { if (!HAS_KEYS) return "Нет API ключей"; return JSON.stringify(await SG.position(b.symbol)); }

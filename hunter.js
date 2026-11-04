@@ -19,6 +19,8 @@ function create(h) {
   let ws = null, up = false, ping = null, subs = new Set(), universeAt = 0, timer = null, on = false;
   const STATS = Object.assign({ n: 0, wins: 0, losses: 0, pnl: 0, sim: 0 }, h.lsGet("hunt.stats", {}));
   const saveStats = () => h.lsSet("hunt.stats", STATS);
+  const MINE = new Set(h.lsGet("hunt.mine", []));   // the hunter's own positions (taken over again after a restart)
+  const saveMine = () => h.lsSet("hunt.mine", [...MINE]);
   let top = [];            // the best candidates right now (for the page)
 
   // ---------- WebSocket: order books + trades ----------
@@ -129,7 +131,7 @@ function create(h) {
       const active = Object.keys(H).length, maxN = Math.max(1, Math.round(P.hMax) || 2);
       for (const a of res) {
         if (Object.keys(H).length >= maxN || active >= maxN) break;
-        if (a.score < (P.hScore || 5) || !a.ok || H[a.sym] || (COOL[a.sym] || 0) > now() || h.hasPosition(a.sym)) continue;
+        if (a.score < (P.hScore || 5) || !a.ok || H[a.sym] || (COOL[a.sym] || 0) > now() || h.hasPosition(a.sym) || (h.skip && h.skip(a.sym))) continue;
         enter(a).catch(e => { log(`🎯 ${a.sym}: вход: ${e.message}`, "err"); delete H[a.sym]; COOL[a.sym] = now() + 60000; });
         break;   // one entry per tick
       }
@@ -154,7 +156,7 @@ function create(h) {
     const body = { category: P.category, symbol: sym, side: d > 0 ? "Buy" : "Sell", orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: idx, orderLinkId: "sg_h_" + now() };
     const r = await h.placeEntry(body, inst);   // the lot is fitted to the free money on the account
     if (!r) { delete H[sym]; COOL[sym] = now() + 30000; return; }
-    hunt.orderId = r.orderId; hunt.qty = Number(body.qty);
+    hunt.orderId = r.orderId; hunt.qty = Number(body.qty); MINE.add(sym); saveMine();
   }
 
   // ---------- the position: every price tick from the WebSocket ----------
@@ -179,7 +181,7 @@ function create(h) {
     STATS.n++; STATS.pnl += pnl; if (pnl >= 0) STATS.wins++; else STATS.losses++; if (sim) STATS.sim++; saveStats();
     if (!sim) h.recordTrade(pnl, sym, "🎯 импульс: " + (x.exitWhy || "выход"));
     else log(`🎯 ${sym} [СИМ]: ${x.exitWhy} — PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} USDT`, pnl >= 0 ? "ok" : "err");
-    delete H[sym]; COOL[sym] = now() + (P.hCoolSec || 120) * 1000;
+    delete H[sym]; COOL[sym] = now() + (P.hCoolSec || 120) * 1000; MINE.delete(sym); saveMine();
   }
 
   // ---------- the hunts against the exchange: twice a second ----------
@@ -201,7 +203,7 @@ function create(h) {
             }
             if (now() - x.at > 3000) {   // the rest of the entry limit is cancelled: the impulse does not wait
               try { await h.priv("POST", "/v5/order/cancel", { category: P.category, symbol: sym, orderId: x.orderId }); } catch (e) { /* filled / gone */ }
-              if (!mine) { log(`🎯 ${sym}: лимитка не исполнилась за 3 с — снял, ищу дальше`, "info"); delete H[sym]; COOL[sym] = now() + 30000; }
+              if (!mine) { log(`🎯 ${sym}: лимитка не исполнилась за 3 с — снял, ищу дальше`, "info"); delete H[sym]; COOL[sym] = now() + 30000; MINE.delete(sym); saveMine(); }
             }
           } else if (x.state === "in") {
             if (!mine) { x.exitWhy = x.exitWhy || "закрыто на бирже (стоп)"; x.state = "exiting"; x.exitAt = now(); }
@@ -223,7 +225,11 @@ function create(h) {
     if (!P.liveEnabled || !h.keys()) return;
     try {
       const r = await h.priv("GET", "/v5/position/list", { category: P.category, settleCoin: "USDT" });
-      for (const p of r.list || []) if (+p.size > 0 && !H[p.symbol]) {
+      const open = new Set();
+      for (const p of r.list || []) if (+p.size > 0) open.add(p.symbol);
+      for (const s0 of [...MINE]) if (!open.has(s0)) MINE.delete(s0);
+      saveMine();
+      for (const p of r.list || []) if (+p.size > 0 && !H[p.symbol] && MINE.has(p.symbol)) {   // only the hunter's own positions
         const d = p.side === "Buy" ? 1 : -1;
         H[p.symbol] = { sym: p.symbol, d, state: "in", at: now(), entry: +p.avgPrice, best: +p.avgPrice, act: false, live: true, qty: +p.size, why: "позиция с биржи" };
         if (!subs.has(p.symbol)) { subs.add(p.symbol); B[p.symbol] = { bids: new Map(), asks: new Map(), trades: [], hist: [], ready: false, last: 0 }; sendSub([p.symbol], "subscribe"); }

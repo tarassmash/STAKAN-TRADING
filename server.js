@@ -98,8 +98,21 @@ async function refreshAccount() {
 }
 
 
+// ---------------- fal.ai: the AI that analyses the days (FAL_KEY in Railway) ----------------
+const FAL_KEY = (process.env.FAL_KEY || process.env.FAL_API_KEY || "").trim();
+const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
+const FAL_URL = (process.env.TEST_FAL_URL || process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
+async function fal(prompt) {
+  const r = await fetch(FAL_URL, { method: "POST", headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: FAL_MODEL, system_prompt: "You analyse a crypto trading bot's day and tune it. Answer only with one JSON object.", prompt, temperature: 0.2, max_tokens: 1500 }), signal: AbortSignal.timeout(120000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || j.detail || "ошибка"}`);
+  const m = String(j.output || "").match(/\{[\s\S]*\}/); if (!m) throw new Error("AI не вернул JSON");
+  return JSON.parse(m[0]);
+}
+
 // ---------------- the bot ----------------
-const BOT = require("./bot").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("bot", m) });
+const BOT = require("./bot").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("bot", m), dataDir: DATA_DIR, fal: FAL_KEY ? fal : null });
 
 function state() {
   return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, bot: BOT.view() };
@@ -111,6 +124,9 @@ async function act(b) {
   if (what === "start") return await BOT.start();
   if (what === "stop") return await BOT.stop();
   if (what === "reset") return BOT.resetStats();
+  if (what === "btcOnly") { const on = !BOT.view().cfg.btcOnly; BOT.setCfg({ btcOnly: on }); return on ? "₿ SELL только когда BTC в локальном тренде вниз" : "₿ Фильтр BTC выключен"; }
+  if (what === "analyze") return await BOT.analyze(String(b.day || ""), "по кнопке");
+  if (what === "applyRec") return BOT.applyRec(String(b.day || ""));
   if (what === "test") { await bx("/v5/market/time"); if (!HAS_KEYS) return "Public OK (нет ключей — только симуляция)"; await refreshAccount(); if (ACC.err) throw new Error(ACC.err); return `Связь OK · баланс ${(ACC.equity || 0).toFixed(2)} USDT, свободно ${(ACC.available || 0).toFixed(2)}`; }
   return "неизвестная команда";
 }
@@ -134,6 +150,13 @@ http.createServer(async (req, res) => {
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="SELL Grid"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
     if (url.pathname === "/api/state") return json(200, state());
+    if (url.pathname === "/api/days") return json(200, { days: BOT.days() });
+    if (url.pathname === "/api/journal") {   // the detailed journal of a day: one JSON per line
+      const f = BOT.journalPath(String(url.searchParams.get("day") || ""));
+      if (!f || !fs.existsSync(f)) return json(404, { error: "нет журнала" });
+      res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Content-Disposition": `attachment; filename="journal-${path.basename(f)}"` });
+      return fs.createReadStream(f).pipe(res);
+    }
     if (req.method === "POST" && url.pathname.startsWith("/api/")) {
       if (!PASSWORD) return json(200, { error: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом зі сторінки" });
       const b = await readBody(req);

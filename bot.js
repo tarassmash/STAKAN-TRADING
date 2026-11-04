@@ -5,12 +5,24 @@
 //  • выход ТОЛЬКО в плюс: одна лимитка BUY reduce-only на всю позицию на −take % от средней; стопа нет;
 //  • только лимитные ордера; Live выкл — симуляция по живым ценам.
 "use strict";
+const fs = require("fs");
+const path = require("path");
 
-const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 3, maxPos: 20, live: false };
+const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 3, maxPos: 20, live: false };
 const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxPos"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
+  // ---------------- 📒 the detailed journal: one JSON line per event, one file per UTC day, on the volume ----------------
+  const JDIR = path.join(host.dataDir || ".", "journal");
+  try { fs.mkdirSync(JDIR, { recursive: true }); } catch (e) { /* read-only */ }
+  const dayOf = (t) => new Date(t || Date.now()).toISOString().slice(0, 10);
+  function jlog(type, data) {
+    const line = JSON.stringify(Object.assign({ t: Date.now(), type, live: !!(CFG.live && keys()) }, data)) + "\n";
+    fs.appendFile(path.join(JDIR, dayOf() + ".jsonl"), line, () => {});
+  }
+  const TRADES = lsGet("vg.trades", {});   // symbol -> the open trade being recorded
+  const saveTrades = () => lsSet("vg.trades", TRADES);
   const now = () => Date.now(), sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
@@ -72,6 +84,22 @@ function create(host) {
   const hasShort = (s) => !!(C[s] && C[s].pos && C[s].pos.side === "Sell" && C[s].pos.size > 0);
   const gridCoins = () => [...new Set([...ACTIVE, ...Object.keys(C).filter(hasShort)])];
 
+  // ---------------- ₿ the local trend of Bitcoin: 5m EMA9 < EMA21 and the price below EMA21 = down ----------------
+  let BTC = { down: null, at: 0, why: "—" };
+  async function btcTrend() {
+    if (now() - BTC.at < 50000 && BTC.down != null) return BTC;
+    try {
+      const k = await pub("/v5/market/kline", { category: "linear", symbol: "BTCUSDT", interval: "5", limit: 60 });
+      const cl = (k.list || []).map(r => +r[4]).reverse();   // oldest first
+      const ema = (n) => { const a = 2 / (n + 1); let e = cl[0]; for (const x of cl) e = x * a + e * (1 - a); return e; };
+      const e9 = ema(9), e21 = ema(21), last = cl[cl.length - 1], ch30 = (last / cl[Math.max(0, cl.length - 7)] - 1) * 100;
+      const down = e9 < e21 && last < e21;
+      BTC = { down, e9: +e9.toFixed(1), e21: +e21.toFixed(1), last, ch30: +ch30.toFixed(2), at: now(),
+        why: `BTC ${last} · EMA9 ${e9.toFixed(0)} ${e9 < e21 ? "<" : ">"} EMA21 ${e21.toFixed(0)} · 30 мин ${ch30 >= 0 ? "+" : ""}${ch30.toFixed(2)}% → ${down ? "тренд ВНИЗ" : "не вниз"}` };
+    } catch (e) { BTC.why = "BTC: " + e.message; }
+    return BTC;
+  }
+
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
   // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
   async function budget() {
@@ -115,7 +143,13 @@ function create(host) {
       const B = await budget(), flat = out.filter(x => !x.held);
       // K coins: as many as the free money allows (up to maxCoins and the candidates found);
       // money left over when K hits that limit -> a bigger lot, so budgetPct % of the deposit is always in the limits
-      const kMax = Math.min(Math.round(CFG.maxCoins), flat.length), K = Math.max(0, Math.min(kMax, Math.floor(B.free / B.perCoinBase)));
+      const kMax = Math.min(Math.round(CFG.maxCoins), flat.length);
+      let K = Math.max(0, Math.min(kMax, Math.floor(B.free / B.perCoinBase)));
+      const btc = await btcTrend();
+      if (CFG.btcOnly && !btc.down) {   // ₿ filter: no new SELL entries while Bitcoin is not in a local downtrend (open shorts are still led)
+        if (BTC.blocked !== true) log(`₿ Фильтр BTC: ${btc.why} — новые SELL не ставлю, сетки входа снимаю (шорты веду)`, "info");
+        BTC.blocked = true; K = 0;
+      } else if (CFG.btcOnly && BTC.blocked !== false) { log(`₿ Фильтр BTC: ${btc.why} — ставлю SELL`, "ok"); BTC.blocked = false; }
       const scale = K ? Math.max(1, B.free / (K * B.perCoinBase)) : 1;
       B.k = K; B.lot = +(CFG.usdt * scale).toFixed(2); B.perCoin = B.perCoinBase * scale;
       const keep = new Set(flat.slice(0, K + 1).map(x => x.sym));
@@ -128,6 +162,8 @@ function create(host) {
       CAND = out.filter(x => !x.held || ACTIVE.includes(x.sym)).slice(0, 15).map(x => ({ sym: x.sym, rPrev: x.rPrev, rCur: x.rCur, move: x.move, turn: x.turn, active: ACTIVE.includes(x.sym) }));
       for (const x of out) if (ACTIVE.includes(x.sym) || hasShort(x.sym)) { const c = coin(x.sym); c.range = x.range; c.last = x.last; c.anchor = x.anchor; }   // the grid anchor = the price delay min ago
       STAT.scans++; lastScanAt = now(); saveStat();
+      jlog("scan", { btc: { down: btc.down, ch30: btc.ch30, e9: btc.e9, e21: btc.e21 }, btcBlock: !!(CFG.btcOnly && !btc.down), eq: +B.eq.toFixed(2), free: +B.free.toFixed(2), k: B.k, lot: B.lot, active: ACTIVE, held: Object.keys(C).filter(hasShort),
+        top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.move.toFixed(2)]) });
       if (added.length || removed.length) log(`Скан: ${ACTIVE.length} монет на ${CFG.budgetPct}% депозита → ${ACTIVE.map(s => s.replace(/USDT$/, "")).join(", ")}${added.length ? " · + " + added.join(", ") : ""}${removed.length ? " · − " + removed.join(", ") : ""}`, "ok");
       for (const s of removed) if (!hasShort(s)) await dropGrid(s);   // a coin with an open short keeps its grid (the adds)
       for (const s of gridCoins()) { try { await gridFor(s); } catch (e) { log(`${s}: сетка: ${e.message}`, "err"); } }
@@ -196,7 +232,10 @@ function create(host) {
         const c = coin(x.symbol); STAT.fills++;
         c.lastAdd = Math.max(c.lastAdd || 0, +x.execPrice); LAST_ADD[x.symbol] = c.lastAdd; saveLastAdd(); touched.add(x.symbol);
         log(`${x.symbol}: SELL ${x.execQty} исполнен @ ${x.execPrice}${hasShort(x.symbol) ? " — добор" : ""} → следующий добор +${CFG.addStep}%`, "ok");
-      } else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — шорт закрыт в плюс`, "ok"); }
+        const tr = TRADES[x.symbol] || (TRADES[x.symbol] = { sym: x.symbol, open: now(), first: +x.execPrice, fills: 0, qty: 0, maxPx: +x.execPrice, minPx: +x.execPrice, range: +(c.range || 0).toFixed(2), btcDown: BTC.down, lot: lot(), cfg: { step: CFG.step, addStep: CFG.addStep, take: CFG.take, trailGap: CFG.trailGap, lev: CFG.lev, levels: CFG.levels } });
+        tr.fills++; tr.qty += +x.execQty; saveTrades();
+        jlog("fill", { sym: x.symbol, px: +x.execPrice, qty: +x.execQty, n: tr.fills, add: tr.fills > 1 });
+      } else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — шорт закрыт в плюс`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; saveTrades(); } }
     }
     if (SEEN.size > 5000) { const a = [...SEEN].slice(-2000); SEEN.clear(); a.forEach(v => SEEN.add(v)); }
     saveStat();
@@ -237,7 +276,7 @@ function create(host) {
     if (!p) return;
     if (!t.on) {
       if (p > act) return;
-      t.on = true; t.best = p; log(`${sym}: 🎯 трейлинг тейка включён: цена ${fmt(p)} ≤ −${CFG.take}% от средней ${fmt(avg)} — веду за минимумом, откат ${CFG.trailGap}% → выход`, "ok");
+      t.on = true; t.best = p; jlog("trail", { sym, px: p, avg }); log(`${sym}: 🎯 трейлинг тейка включён: цена ${fmt(p)} ≤ −${CFG.take}% от средней ${fmt(avg)} — веду за минимумом, откат ${CFG.trailGap}% → выход`, "ok");
     }
     if (p < t.best) t.best = p;
     const level = +rnd(Math.min(t.best * (1 + CFG.trailGap / 100), act), i.tick, "down");
@@ -284,10 +323,22 @@ function create(host) {
       if (C[s].pos.side === "Sell" && C[s].pos.size > 0 && OURS.has(s)) log(`${s}: позиция закрыта`, "info");
       if (TRAIL[s] && TRAIL[s].orderId) await cancelOrder(s, { orderId: TRAIL[s].orderId });
       if (TRAIL[s] && TRAIL[s].exitId) await cancelOrder(s, { orderId: TRAIL[s].exitId });
+      await closeTrade(s, C[s].pos, null);
       C[s].pos = null; C[s].stopKey = ""; C[s].takeKey = ""; C[s].lastAdd = 0; delete LAST_ADD[s]; saveLastAdd(); delete TRAIL[s]; saveTrail();
       if (!ACTIVE.includes(s)) await dropGrid(s);   // it was kept only for the adds
     }
   }
+
+  // a trade is over: everything about it goes into the journal (the PnL from Bybit, net of fees)
+  async function closeTrade(sym, pos, simPnl) {
+    const tr = TRADES[sym]; if (!tr) return;
+    let pnl = simPnl;
+    if (pnl == null && isLive()) { try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; } }
+    const avg = pos ? pos.avg : tr.first, hold = (now() - tr.open) / 60000;
+    jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), avg, adverse: +((tr.maxPx / avg - 1) * 100).toFixed(2), best: +((1 - tr.minPx / avg) * 100).toFixed(2), pnl: pnl == null ? null : +(+pnl).toFixed(4) }));
+    delete TRADES[sym]; saveTrades();
+  }
+  function trackTrades() { for (const s of Object.keys(TRADES)) { const c = C[s], p = c && (c.lp || c.last); if (p) { TRADES[s].maxPx = Math.max(TRADES[s].maxPx, p); TRADES[s].minPx = Math.min(TRADES[s].minPx, p); } } }
 
   // ---------------- the simulation (Live off): the same rules on the live prices ----------------
   async function simTick() {
@@ -298,20 +349,22 @@ function create(host) {
       const i = INST[s]; if (!i) continue;
       const fills = c.sim.fills;
       if (!fills.length) {
-        if (ACTIVE.includes(s)) for (const lv of c.grid) if (p >= lv && fills.length < CFG.maxPos && !fills.some(o => Math.abs(o.px - lv) < +i.tick / 2)) { fills.push({ px: lv, qty: qtyFor(i, lv) }); STAT.fills++; log(`[СИМ] ${s}: SELL @ ${lv}`, "ok"); }
+        if (ACTIVE.includes(s)) for (const lv of c.grid) if (p >= lv && fills.length < CFG.maxPos && !fills.some(o => Math.abs(o.px - lv) < +i.tick / 2)) { fills.push({ px: lv, qty: qtyFor(i, lv) }); STAT.fills++; log(`[СИМ] ${s}: SELL @ ${lv}`, "ok");
+          if (!TRADES[s]) TRADES[s] = { sym: s, open: now(), first: lv, fills: 0, qty: 0, maxPx: p, minPx: p, range: +(c.range || 0).toFixed(2), btcDown: BTC.down, lot: lot(), cfg: { step: CFG.step, addStep: CFG.addStep, take: CFG.take, trailGap: CFG.trailGap, lev: CFG.lev, levels: CFG.levels } };
+          TRADES[s].fills++; TRADES[s].qty += fills[fills.length - 1].qty; jlog("fill", { sym: s, px: lv, n: TRADES[s].fills, add: false }); }
       } else {
         let top = Math.max(...fills.map(o => o.px));
-        while (fills.length < CFG.maxPos && p >= top * (1 + CFG.addStep / 100)) { const lv = +rnd(top * (1 + CFG.addStep / 100), i.tick, "up"); fills.push({ px: lv, qty: qtyFor(i, lv) }); STAT.fills++; top = lv; log(`[СИМ] ${s}: добор №${fills.length - 1} SELL @ ${lv} (+${CFG.addStep}% от прошлого)`, "ok"); }
+        while (fills.length < CFG.maxPos && p >= top * (1 + CFG.addStep / 100)) { const lv = +rnd(top * (1 + CFG.addStep / 100), i.tick, "up"); fills.push({ px: lv, qty: qtyFor(i, lv) }); STAT.fills++; top = lv; log(`[СИМ] ${s}: добор №${fills.length - 1} SELL @ ${lv} (+${CFG.addStep}% от прошлого)`, "ok"); if (TRADES[s]) { TRADES[s].fills++; jlog("fill", { sym: s, px: lv, n: TRADES[s].fills, add: true }); } }
         c.grid = []; for (let k = 1; k <= Math.min(CFG.levels, CFG.maxPos - fills.length); k++) c.grid.push(+rnd(top * (1 + CFG.addStep * k / 100), i.tick, "up"));
       }
       if (fills.length) {
         const size = fills.reduce((a, o) => a + o.qty, 0), avg = fills.reduce((a, o) => a + o.px * o.qty, 0) / size, take = avg * (1 - CFG.take / 100);
         c.pos = { side: "Sell", size, avg, upnl: (avg - p) * size, sim: true };
-        const close = (px, how) => { const pnl = (avg - px) * size - (avg + px) * size * 0.0004; STAT.simPnl += pnl; STAT.takes++; c.takes++; c.sim.fills = []; c.sim.trail = null; c.pos = null; log(`[СИМ] ${s}: ✅ ${how} @ ${rnd(px, i.tick)} на всю позицию (${fills.length} заявок, средняя ${fmt(avg)}) PnL +${pnl.toFixed(4)}`, "ok"); };
+        const close = (px, how) => { const pnl = (avg - px) * size - (avg + px) * size * 0.0004; if (TRADES[s]) TRADES[s].exitPx = px; closeTrade(s, { avg }, pnl); STAT.simPnl += pnl; STAT.takes++; c.takes++; c.sim.fills = []; c.sim.trail = null; c.pos = null; log(`[СИМ] ${s}: ✅ ${how} @ ${rnd(px, i.tick)} на всю позицию (${fills.length} заявок, средняя ${fmt(avg)}) PnL +${pnl.toFixed(4)}`, "ok"); };
         if (!CFG.trailOn) { if (p <= take) close(take, "тейк"); }
         else {
           let t = c.sim.trail; if (!t || Math.abs(t.avg - avg) > +i.tick / 2) t = c.sim.trail = { avg, on: false, best: 0 };
-          if (!t.on && p <= take) { t.on = true; t.best = p; log(`[СИМ] ${s}: 🎯 трейлинг тейка включён @ ${fmt(p)}`, "info"); }
+          if (!t.on && p <= take) { t.on = true; t.best = p; jlog("trail", { sym: s, px: p, avg }); log(`[СИМ] ${s}: 🎯 трейлинг тейка включён @ ${fmt(p)}`, "info"); }
           if (t.on) {
             t.best = Math.min(t.best, p); const level = Math.min(t.best * (1 + CFG.trailGap / 100), take); c.pos.trail = level;
             if (p >= level) close(level, `трейлинг-тейк (минимум ${fmt(t.best)}, откат ${CFG.trailGap}%)`);
@@ -375,6 +428,7 @@ function create(host) {
         await trailGrids();
         await refreshRealized();
       } else { await simTick(); await trailGrids(); }
+      trackTrades();
     } catch (e) { log("Опрос: " + e.message, "err"); }
     finally { fastBusy = false; }
   }
@@ -396,7 +450,9 @@ function create(host) {
     CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.usdt = Math.max(1, CFG.usdt);
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: симуляция", CFG.live ? "err" : "info"); for (const c of Object.values(C)) { c.sim.fills = []; c.pos = null; c.lev = false; } }
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
+    if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
     saveCfg();
+    if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });
     if (ch.includes("delay")) schedule();
     return ch;
   }
@@ -405,6 +461,7 @@ function create(host) {
     running = true; lsSet("vg.running", true); execFrom = now() - 60000;
     if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
     log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: лимитки на ${CFG.budgetPct}% депозита — сетки на столько самых волатильных за 1 мин монет, сколько помещается (до ${CFG.maxCoins}) · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · без стопа (только плюс) · добор каждые ${CFG.addStep}% до ${CFG.maxPos} заявок · плечо x${CFG.lev}`, "ok");
+    jlog("start", { cfg: CFG });
     schedule(); scan().catch(() => {});
     return "Бот запущен — торгует на сервере 24/7";
   }
@@ -414,7 +471,7 @@ function create(host) {
     for (const s of list) if (!hasShort(s)) await dropGrid(s);
     for (const s of Object.keys(C)) if (hasShort(s) && isLive()) await dropGrid(s);
     for (const c of Object.values(C)) if (!isLive()) { c.sim.fills = []; c.pos = null; }
-    log("СТОП: сетки и доборы сняты. Открытые шорты остаются с тейком на бирже.", "info");
+    log("СТОП: сетки и доборы сняты. Открытые шорты остаются с тейком на бирже.", "info"); jlog("stop", {});
     return "Остановлен";
   }
   function resetStats() { Object.assign(STAT, { scans: 0, fills: 0, takes: 0, simPnl: 0, since: running ? now() : 0, realized: 0, closed: 0, realDone: 0, closedDone: 0, doneUntil: running ? now() : 0 }); realAt = 0; saveStat(); return "Статистика сброшена — счёт заработка с этого момента"; }
@@ -432,6 +489,68 @@ function create(host) {
     lsSet("vg.adopted", true);
   }
 
+  // ---------------- 📒 the days: trades + PnL per day; 🧠 the fal analysis of a day -> the summary and better settings ----------------
+  const DAYC = {};
+  function readDay(day) {
+    const f = path.join(JDIR, day + ".jsonl"); let st;
+    try { st = fs.statSync(f); } catch (e) { return null; }
+    if (DAYC[day] && DAYC[day].mtime === st.mtimeMs) return DAYC[day];
+    const ev = []; for (const l of fs.readFileSync(f, "utf8").split("\n")) { if (!l) continue; try { ev.push(JSON.parse(l)); } catch (e) { /* a broken line */ } }
+    const trades = ev.filter(e => e.type === "trade"), pnl = trades.reduce((a, x) => a + (+x.pnl || 0), 0);
+    return (DAYC[day] = { mtime: st.mtimeMs, ev, trades, pnl: +pnl.toFixed(4), n: trades.length, wins: trades.filter(x => x.pnl > 0).length, size: st.size });
+  }
+  function anFile(day) { return path.join(JDIR, day + ".analysis.json"); }
+  function days() {
+    let files = []; try { files = fs.readdirSync(JDIR).filter(f => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort().reverse().slice(0, 60); } catch (e) { /* none */ }
+    return files.map(f => { const day = f.slice(0, 10), d = readDay(day) || {}; let an = null; try { an = JSON.parse(fs.readFileSync(anFile(day), "utf8")); } catch (e) { /* none */ }
+      return { day, n: d.n || 0, wins: d.wins || 0, pnl: d.pnl || 0, kb: Math.round((d.size || 0) / 1024), an }; });
+  }
+  let anBusy = false;
+  async function analyze(day, why) {
+    if (!host.fal) return "Нет FAL_KEY в Railway → Variables — анализ fal недоступен";
+    if (anBusy) return "Анализ уже идёт"; anBusy = true;
+    try {
+      const d = readDay(day); if (!d) return "Нет журнала за " + day;
+      const scans = d.ev.filter(e => e.type === "scan"), cfgs = d.ev.filter(e => e.type === "cfg" || e.type === "start");
+      const btcDown = scans.length ? Math.round(scans.filter(x => x.btc && x.btc.down).length / scans.length * 100) : null;
+      const trades = d.trades.slice(-150).map(x => ({ sym: x.sym, holdMin: x.holdMin, fills: x.fills, range1m: x.range, btcDown: x.btcDown, adversePct: x.adverse, bestPct: x.best, pnl: x.pnl, lot: x.lot, cfg: x.cfg }));
+      const open = Object.values(TRADES).map(x => ({ sym: x.sym, minOpen: Math.round((now() - x.open) / 60000), fills: x.fills, adversePct: +((x.maxPx / x.first - 1) * 100).toFixed(2) }));
+      const prompt = `You analyse one UTC day (${day}) of a crypto bot on Bybit (USDT perpetuals). Goal: more profit next days, the account must survive.
+STRATEGY (SHORT ONLY, limit orders only, NO STOP-LOSS): every minute it picks the most volatile coins of the last 1m candle and keeps budgetPct% of the deposit in SELL limit grids on them (levels orders, step% apart, the grid follows the price with a delay of delay min, down at once by gridTrail%). A short open -> adds every addStep% above the last fill, up to maxPos orders per coin. Exit only in profit: at -take% from the average a trailing take starts and exits on a bounce of trailGap% from the low (never worse than -take%). btcOnly = new SELLs only while BTC is in a local downtrend (5m EMA9<EMA21).
+Settings now: ${JSON.stringify(CFG)}
+Settings changes during the day: ${JSON.stringify(cfgs.slice(-10).map(x => ({ t: new Date(x.t).toISOString().slice(11, 16), changed: x.changed || "start", cfg: x.cfg })))}
+The day: ${d.n} closed trades, ${d.wins} in profit, PnL ${d.pnl} USDT. Scans: ${scans.length}, BTC was in a downtrend ${btcDown}% of them, average coins with a grid ${scans.length ? (scans.reduce((a, x) => a + (x.k || 0), 0) / scans.length).toFixed(1) : "—"}.
+Closed trades (holdMin, fills = entries+adds, range1m % at the entry, adversePct = the max move against the short from the average, bestPct = the max move in favour, pnl USDT net of fees):
+${JSON.stringify(trades)}
+Shorts still open: ${JSON.stringify(open)}
+Write the result of the day and the best settings for the next days. Only change what the data supports. Allowed keys: budgetPct 10-100, maxCoins 1-60, minTurn, maxCand, levels 1-20, step, usdt, lev 1-50, delay 1-10, take, trailOn, trailGap, gridTrail, addStep, maxPos, btcOnly.
+Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коротких пунктов через \\n", "params": {...only the keys to change...}, "reason": "почему такие настройки, по-русски, 2-4 предложения"}`;
+      const r = await host.fal(prompt);
+      const params = {}; for (const [k, v] of Object.entries(r.params || {})) if (NUMS.includes(k) || ["trailOn", "btcOnly"].includes(k)) params[k] = v;
+      const an = { day, at: now(), why: why || "по кнопке", pnl: d.pnl, n: d.n, summary: String(r.summary || "").slice(0, 2000), reason: String(r.reason || "").slice(0, 1000), params, applied: false };
+      fs.writeFileSync(anFile(day), JSON.stringify(an));
+      log(`🧠 Анализ fal за ${day} (${an.why}): PnL ${d.pnl}, сделок ${d.n} — ${Object.keys(params).length ? "рекомендованы настройки: " + JSON.stringify(params) : "настройки менять не нужно"}`, "ok");
+      jlog("analysis", { day, params, pnl: d.pnl });
+      return `Анализ за ${day} готов`;
+    } catch (e) { log("🧠 Анализ fal: " + e.message, "err"); return "Ошибка анализа: " + e.message; }
+    finally { anBusy = false; }
+  }
+  function applyRec(day) {
+    let an; try { an = JSON.parse(fs.readFileSync(anFile(day), "utf8")); } catch (e) { return "Нет анализа за " + day; }
+    const o = Object.assign({}, an.params);
+    for (const k of ["trailOn", "btcOnly"]) if (k in o) o[k] = o[k] === true || o[k] === "true";
+    const ch = setCfg(o); an.applied = now(); fs.writeFileSync(anFile(day), JSON.stringify(an));
+    log(`🧠 Применены настройки из анализа за ${day}: ${ch.join(", ") || "без изменений"}`, "ok");
+    return ch.length ? "Применено: " + ch.join(", ") : "Настройки уже такие";
+  }
+  // a positive day is analysed by itself after the UTC midnight
+  setInterval(() => {
+    if (!host.fal || anBusy) return;
+    const y = dayOf(now() - 864e5), d = readDay(y);
+    if (d && d.pnl > 0 && !fs.existsSync(anFile(y))) analyze(y, "автоматически: плюсовой день").catch(() => {});
+  }, 10 * 60000);
+  const journalPath = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) ? path.join(JDIR, day + ".jsonl") : null;
+
   function view() {
     const rows = [...new Set([...ACTIVE, ...Object.keys(C).filter(s => C[s].pos)])].map(s => {
       const c = coin(s);
@@ -441,10 +560,10 @@ function create(host) {
     const unreal = Object.keys(C).filter(hasShort).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);
     const realized = isLive() ? STAT.realized || 0 : STAT.simPnl || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: isLive() ? STAT.closed || 0 : STAT.takes };
-    return { pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    return { btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();
-  return { start, stop, setCfg, resetStats, view };
+  return { start, stop, setCfg, resetStats, view, days, analyze, applyRec, journalPath };
 }
 module.exports = { create };

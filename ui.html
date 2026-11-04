@@ -63,6 +63,10 @@
     <div class="row"><label class="warn">LIVE — реальные ордера</label><input type="checkbox" id="live" /></div>
     <button class="btn sec" id="testBtn">Проверить связь</button>
 
+    <h2>Фильтр входа</h2>
+    <button class="btn sec" id="btcBtn" style="margin-top:0">₿ SELL только при BTC вниз: ВЫКЛ</button>
+    <div class="note" id="btcInfo">—</div>
+
     <h2>Монеты</h2>
     <div class="row"><label>В лимитках, % депозита</label><input type="number" id="budgetPct" min="5" max="100" step="5" /></div>
     <div class="row"><label>Монет максимум</label><input type="number" id="maxCoins" min="1" max="60" step="1" /></div>
@@ -113,6 +117,15 @@
       </table></div>
     </div>
     <div class="panel">
+      <h2>📒 Журнал по дням и анализ fal</h2>
+      <div class="note" style="margin:-4px 0 8px" id="falInfo">Каждый скан, исполнение, добор, трейлинг и итог каждой сделки пишутся в журнал на сервере (файл на каждый день UTC). Плюсовой день fal разбирает сам после полуночи UTC; любой день — кнопкой «Анализ».</div>
+      <div class="tbl"><table>
+        <thead><tr><th>День (UTC)</th><th>Сделок</th><th>В плюс</th><th>PnL</th><th>Журнал</th><th>Анализ fal</th></tr></thead>
+        <tbody id="daysBody"><tr><td colspan="6" class="mut">журнала пока нет</td></tr></tbody>
+      </table></div>
+      <div id="anBox"></div>
+    </div>
+    <div class="panel">
       <h2>Лог</h2>
       <div class="log" id="log"></div>
     </div>
@@ -151,6 +164,9 @@ function render() {
   fillCfg(c);
   $("keysInfo").innerHTML = (S.keys ? "✅ ключи Bybit на сервере" : "❌ нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET — работает только симуляция") + " · " + (S.env === "testnet" ? "TESTNET" : "MAINNET")
     + (S.password ? "" : '<br><span class="warn">⚠ задайте UI_PASSWORD в Railway → Variables, иначе кнопки не работают</span>');
+  { const bt = B.btc || {}, bb = $("btcBtn"); bb.textContent = bt.on ? "₿ SELL только при BTC вниз: ВКЛ" : "₿ SELL только при BTC вниз: ВЫКЛ"; bb.style.color = bt.on ? "var(--yellow)" : "var(--muted)"; bb.style.borderColor = bt.on ? "var(--yellow)" : "var(--border)";
+    $("btcInfo").innerHTML = (bt.on ? (bt.down ? '<span class="up">✓ BTC в тренде вниз — SELL ставятся</span>' : '<span class="warn">⏸ BTC не вниз — новые SELL не ставятся, шорты веду</span>') : "выкл — SELL ставятся при любом BTC") + "<br>" + esc(bt.why || "");
+    $("falInfo").style.color = B.fal ? "" : "var(--yellow)"; if (!B.fal) $("falInfo").textContent = "⚠ Нет FAL_KEY в Railway → Variables — журнал пишется, анализ fal недоступен."; }
   $("equity").textContent = S.acc.equity != null ? (+S.acc.equity).toFixed(2) + " (свободно " + (+S.acc.available || 0).toFixed(2) + ")" : (S.acc.err ? "ошибка" : "—");
   $("modeBadge").textContent = B.live ? "LIVE" : "СИМУЛЯЦИЯ"; $("modeBadge").className = "badge" + (B.live ? " live" : "");
   $("runBadge").textContent = B.running ? "РАБОТАЕТ 24/7" : "СТОП"; $("runBadge").className = "badge" + (B.running ? " on" : "");
@@ -186,7 +202,32 @@ $("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `За
 $("stopBtn").onclick = () => act("stop", "Остановить бота? Сетки и доборы снимутся, открытые шорты останутся с тейком на бирже.");
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");
-load(); setInterval(load, 2000);
+$("btcBtn").onclick = () => act("btcOnly");
+// ---------- the days and the fal analysis ----------
+let DAYS = [], anOpen = "";
+async function loadDays() { try { DAYS = (await fetch("/api/days", { cache: "no-store" }).then(r => r.json())).days || []; renderDays(); } catch (e) { /* next time */ } }
+function renderDays() {
+  $("daysBody").innerHTML = DAYS.length ? DAYS.map(d => `<tr><td><b>${esc(d.day)}</b></td><td>${d.n}</td><td>${d.wins}</td><td class="${d.pnl > 0 ? "up" : d.pnl < 0 ? "dn" : "mut"}"><b>${d.pnl >= 0 ? "+" : ""}${(+d.pnl).toFixed(2)}</b></td>`
+    + `<td><a href="/api/journal?day=${esc(d.day)}" style="color:var(--violet)">скачать (${d.kb} КБ)</a></td>`
+    + `<td>${d.an ? `<a href="#" data-show="${esc(d.day)}" style="color:var(--green)">итоги${d.an.applied ? " ✓ применено" : ""}</a> · ` : ""}<a href="#" data-an="${esc(d.day)}" style="color:var(--yellow)">${d.an ? "заново" : "🧠 анализ"}</a></td></tr>`).join("")
+    : '<tr><td colspan="6" class="mut">журнала пока нет — появится после запуска</td></tr>';
+  document.querySelectorAll("[data-an]").forEach(a => a.onclick = async (e) => { e.preventDefault(); const day = a.getAttribute("data-an"); a.textContent = "⏳ fal думает…"; await actDay("analyze", day); anOpen = day; await loadDays(); });
+  document.querySelectorAll("[data-show]").forEach(a => a.onclick = (e) => { e.preventDefault(); anOpen = anOpen === a.getAttribute("data-show") ? "" : a.getAttribute("data-show"); renderDays(); });
+  const d = DAYS.find(x => x.day === anOpen && x.an), an = d && d.an;
+  $("anBox").innerHTML = !an ? "" : `<div style="margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>🧠 Итоги fal за ${esc(an.day)}</b><span class="mut" style="font-size:.75rem">${esc(an.why)} · ${new Date(an.at).toLocaleString("ru-RU")} · PnL ${an.pnl >= 0 ? "+" : ""}${an.pnl} · сделок ${an.n}</span></div>
+    <div style="white-space:pre-line;margin:8px 0;font-size:.85rem">${esc(an.summary)}</div>
+    <div class="note" style="font-size:.8rem">${esc(an.reason)}</div>
+    ${Object.keys(an.params || {}).length ? `<div style="margin-top:8px;font-size:.82rem">Рекомендованные настройки: ${Object.entries(an.params).map(([k, v]) => `<b>${esc(k)}</b> ${S && S.bot ? esc(S.bot.cfg[k]) + " → " : ""}<b class="up">${esc(v)}</b>`).join(" · ")}</div>
+      <button class="btn start" style="width:auto;padding:8px 14px" id="applyBtn" ${an.applied ? "disabled" : ""}>${an.applied ? "✓ применено " + new Date(an.applied).toLocaleString("ru-RU") : "Применить эти настройки"}</button>` : '<div class="note">Менять настройки не нужно.</div>'}</div>`;
+  const ab = $("applyBtn"); if (ab) ab.onclick = async () => { if (!confirm("Применить рекомендованные fal настройки?")) return; await actDay("applyRec", an.day); await loadDays(); };
+}
+async function actDay(what, day) {
+  const r = await fetch("/api/act", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ what, day }) }).then(r => r.json()).catch(() => ({ error: "нет связи с сервером" }));
+  if (r.error) alert(r.error); else if (r.text) toast(r.text);
+  await load();
+}
+load(); setInterval(load, 2000); loadDays(); setInterval(loadDays, 30000);
 </script>
 </body>
 </html>

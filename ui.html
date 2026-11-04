@@ -280,12 +280,14 @@
     <h2>Счёт</h2>
     <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
     <div class="row"><label>Баланс USDT</label><span class="val" id="equityText" style="font-weight:600">—</span></div>
+    <h2>Фильтр входа</h2>
+    <button class="btn btn-sec" id="shukinFilterBtn" title="ВКЛ — SELL только когда открытый интерес начал падать и CVD падает. ВЫКЛ — SELL-сетки на всех найденных пампах без этой проверки.">⚡ Фильтр Щукина: ВКЛ</button>
     <h2>Защита</h2>
     <div class="row">
       <label title="Единственное, что AI менять не может: при таком убытке за день бот снимает ордера и ждёт следующего дня">Стоп-лимит убытка за день, USDT</label>
       <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
     </div>
-    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Скан всего рынка раз в минуту</b>: SELL-сетки сразу на всех пампах, где по Щукину открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
+    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Скан всего рынка раз в минуту</b>: SELL-сетки сразу на всех пампах; с фильтром Щукина — только где открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
     <div class="stats">
       <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
@@ -725,10 +727,11 @@
     const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
+    { const on = P.shukinOn !== false, b = $('shukinFilterBtn'); b.textContent = on ? '⚡ Фильтр Щукина: ВКЛ (OI↓ + CVD↓)' : '⚠ Фильтр Щукина: ВЫКЛ (все пампы)'; b.style.color = on ? '#c4b5fd' : 'var(--yellow)'; b.style.borderColor = on ? '#a855f7' : 'var(--yellow)'; b.disabled = BUSY; }
     const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ'; fb.disabled = BUSY;
     $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🔥 работает (без AI: нет FAL_KEY)'} · SELL-сетки: <b>${esc((G.fa.syms || []).map(x => x.replace(/USDT$/, '')).join(', ') || 'нет — жду памп с открытым входом')}</b>`
       + `<br><span style="font-size:10px">скан рынка через ${G.fa.scan ?? '—'} с${G.aiFal ? ' · решение AI через ' + (G.fa.left ?? '—') + ' с' : ''} · до ${P.maxCoins} монет · памп от ${P.pumpMin}%</span>`
-      + ((G.targets || []).filter(t => t.isPump).length ? '<div style="text-align:left;margin-top:4px">' + (G.targets || []).filter(t => t.isPump).slice(0, 8).map(t => `<div style="display:flex;justify-content:space-between;gap:6px;font-size:10.5px" title="${esc(t.why || '')}"><span>${(G.fa.syms || []).includes(t.symbol) ? '🔥' : '·'} <b>${esc(t.symbol.replace(/USDT$/, ''))}</b> памп +${Number(t.pump).toFixed(1)}%, откат ${Number(t.pull).toFixed(1)}%</span><span style="color:${t.gate ? 'var(--green)' : 'var(--muted)'}">${t.gate ? 'OI↓ CVD↓ ✓' : 'OI ' + (t.oiChg ?? '—') + '% · CVD ' + (t.cvdPct ?? '—') + '%'}</span></div>`).join('') + '</div>' : '<br><span style="color:var(--muted)">пампов от ' + P.pumpMin + '% сейчас нет</span>')
+      + ((G.targets || []).filter(t => t.isPump).length ? '<div style="text-align:left;margin-top:4px">' + (G.targets || []).filter(t => t.isPump).slice(0, 8).map(t => `<div style="display:flex;justify-content:space-between;gap:6px;font-size:10.5px" title="${esc(t.why || '')}"><span>${(G.fa.syms || []).includes(t.symbol) ? '🔥' : '·'} <b>${esc(t.symbol.replace(/USDT$/, ''))}</b> памп +${Number(t.pump).toFixed(1)}%, откат ${Number(t.pull).toFixed(1)}%</span><span style="color:${t.gate ? 'var(--green)' : 'var(--muted)'}">${P.shukinOn === false ? 'без фильтра' : t.gate ? 'OI↓ CVD↓ ✓' : 'OI ' + (t.oiChg ?? '—') + '% · CVD ' + (t.cvdPct ?? '—') + '%'}</span></div>`).join('') + '</div>' : '<br><span style="color:var(--muted)">пампов от ' + P.pumpMin + '% сейчас нет</span>')
       + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.skip && G.fa.ai.skip.length ? `<br><span style="font-size:10px">не шортить: ${esc(G.fa.ai.skip.join(', '))}</span>` : '') + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
@@ -826,6 +829,7 @@
   $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
   $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
   $('stopBtn').onclick = () => act('stop');
+  $('shukinFilterBtn').onclick = () => act('shukinFilter', null, (S && S.sg && S.sg.params.shukinOn !== false) ? 'Выключить фильтр Щукина? SELL-сетки будут ставиться на все найденные пампы без проверки падения OI и CVD.' : null);
   $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить автопилот с РЕАЛЬНЫМИ ордерами? Управление полностью у AI (fal.ai): монета, стратегия, все настройки, плечо до x10, размер лота — только лимитками, 24/7. Ваш единственный лимит — стоп-лимит убытка за день.').then(() => loadChart(true));
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');

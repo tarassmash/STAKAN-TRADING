@@ -126,6 +126,7 @@ async function act(b) {
   if (b.o && typeof b.o === "object" && b.o.maxDailyLoss != null) SG.setParams({ maxDailyLoss: b.o.maxDailyLoss });
   if (what === "save") return "Сохранено";
   if (what === "fullauto") return await SG.fullAuto();
+  if (what === "shukinFilter") return SG.toggleShukinFilter();
   if (what === "stop") return await SG.stop(true);
   if (what === "sync") { if (!HAS_KEYS) return "Нет API ключей в Railway → Variables"; return await SG.sync(); }
   if (what === "close") { if (!HAS_KEYS) return "Нет API ключей"; return await SG.closePos(b.symbol); }

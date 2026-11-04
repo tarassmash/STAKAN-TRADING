@@ -46,6 +46,7 @@ const DEFAULTS = {
   pumpMin: 3,              // a pump = the rise from the low to the high of the last 3 h, % (at least this)
   scanN: 30,               // how many pumped candidates are checked every minute
   symbols: [],             // the coins with a SELL grid now (chosen by the scanner / the AI)
+  shukinOn: true,          // the Shukin filter (the user's button; the AI cannot switch it)
   shOiPct: 0.3,            // Shukin entry: OI fell at least this % over the last 3 five-minute points (and the last one is lower) ...
   shCvdPct: 10,            // ... and the CVD falls: the sellers outweigh the buyers by at least this % of the volume of the last 10 one-minute candles
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
@@ -306,6 +307,7 @@ function create(host) {
   // the Shukin filter (exactly as on the page): OI + CVD -> may we short
   // ⚡ Shukin entry gate (strict): a SELL is entered only when the open interest has started to fall AND the CVD falls
   async function shukinGate(symbol, w) {
+    if (P.shukinOn === false) return { ok: true, off: true, why: "фильтр Щукина выключен — вход без проверки OI / CVD" };
     if (!w.oi || now() - (w.oiAt || 0) > 60000) { try { w.oi = await getOpenInterest(symbol, P.category, "5", 12); w.oiAt = now(); } catch (e) { /* keep */ } }
     const oi = w.oi || [], c = (w.candles || []).slice(-10);
     if (oi.length < 4 || c.length < 10) return { ok: false, why: "мало данных OI / свечей" };
@@ -788,7 +790,7 @@ function create(host) {
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); the free money is shared by all the coins with a grid and every opening order is cut to it. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT.
 STRATEGY: SHORT PUMPS ONLY. Every minute the bot scans the whole market for pumps (rise from the low to the high of the last 3 h >= pumpMin%, not fully retraced) and puts SELL limit grids on up to maxCoins of them AT ONCE (now ${P.maxCoins}).
-SHUKIN ENTRY RULE (fixed, you cannot switch it off): a SELL is entered only when the open interest has started to fall (the last 5-min OI point lower than the previous and OI down >= shOiPct% over 15 min) AND the CVD falls (sellers outweigh buyers by >= shCvdPct% of the volume of the last 10 one-minute candles, and of the last 5 too). Coins without it get no entry limits.
+SHUKIN ENTRY RULE (the user's switch, you cannot change it; now ${P.shukinOn === false ? "OFF - the grids go on every pump without the OI / CVD check" : "ON"}): a SELL is entered only when the open interest has started to fall (the last 5-min OI point lower than the previous and OI down >= shOiPct% over 15 min) AND the CVD falls (sellers outweigh buyers by >= shCvdPct% of the volume of the last 10 one-minute candles, and of the last 5 too). Coins without it get no entry limits.
 SHORT ONLY: BUY orders only close shorts. ONLY limit orders (never market). Every take keeps at least 10x the round-trip Bybit fee (micro takes are impossible). NO STOP-LOSSES (the user's decision): a losing short is held until the take / trailing, the pulse cut or liquidation - choose the leverage, the lot, maxCoins and the adds so the account survives a 15-25% pump against the shorts.
 On each grid coin: SELL limits from +bandPct% above the average of the last bandRef 1m candles (bandLevels, each further by the fee step); a fill -> adds every step above the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take. Pulse: a pump of pulsePct% within pulseSec s -> the short is cut; a dump -> a short with the move. Exits are limits chased after the price. autoStep=true takes bandTp/bandTrailGap from the fees.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT.
@@ -1011,6 +1013,13 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     if (ch.includes("liveEnabled")) log(P.liveEnabled ? "⚠ LIVE включён: реальные ордера" : "Live выключен: только симуляция", P.liveEnabled ? "err" : "info");
     return ch;
   }
+  function toggleShukinFilter() {
+    P.shukinOn = P.shukinOn === false; save();
+    for (const w of Object.values(W)) { w.gateOk = null; w.oiAt = 0; }
+    log(P.shukinOn ? "⚡ Фильтр Щукина ВКЛ: SELL только когда OI начал падать и CVD падает" : "⚠ Фильтр Щукина ВЫКЛ: SELL-сетки на всех пампах без проверки OI / CVD", P.shukinOn ? "ok" : "err");
+    if (P.running && P.fullAuto) { lastScan = 0; faTick().catch(() => {}); }
+    return P.shukinOn ? "Фильтр Щукина включён" : "Фильтр Щукина выключен";
+  }
   function toggleShukin() {
     P.shukinMode = !P.shukinMode;
     if (P.shukinMode) { Object.assign(P, SHUKIN); if (P.interval === "15") P.interval = "5"; log("⚡ Режим Щукина ВКЛ: шаг сетки 1%, тейк 0.7%, аварийный SL 10% + фильтр OI/CVD", "ok"); }
@@ -1031,6 +1040,6 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
   }
   if (P.strategy === "impulse") { P.strategy = "follow"; save(); }   // the impulse hunter is gone
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } }, 3000);
-  return { aiJournal, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  return { toggleShukinFilter, aiJournal, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

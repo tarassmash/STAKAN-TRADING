@@ -42,13 +42,10 @@ const DEFAULTS = {
   bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
   fullAuto: false,         // 🚀 one button: the grid only on the most volatile coin of the last 1 minute, re-picked every faEveryMin minutes
   faEveryMin: 3,
-  hunt: false,             // 🎯 the impulse hunter (order books + tape of ~25 coins, entries seconds before a pump / dump)
-  hUniverse: 25, hBand: 0.25, hSpeed: 3, hScore: 5, hLate: 0.8, hMaxSpread: 0.12, hSlipTicks: 1,
-  hAct: 0.3, hGap: 0.25, hStop: 0.6, hTimeSec: 30, hChaseSec: 2, hCoolSec: 120, hMax: 2,
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["hUniverse", "hBand", "hSpeed", "hScore", "hLate", "hMaxSpread", "hSlipTicks", "hAct", "hGap", "hStop", "hTimeSec", "hChaseSec", "hCoolSec", "hMax", "chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -564,8 +561,6 @@ function create(host) {
     if (P.liveEnabled) { try { const open = await getOpenOrders(symbol, category); w.orders = open.length; w.ourOrders = open.filter(o => (o.orderLinkId || "").startsWith("sg_")).length; w.open = openForChart(open); w.openAt = now(); } catch (e) { /* keep */ } }
     else w.open = null;
     if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
-    if (HUNT.has(symbol)) { w.status = "🎯 импульс"; return; }
-    if (P.strategy === "impulse") { w.status = HUNT.has(symbol) ? "🎯 импульс" : "🎯 охота"; return; }
     if (P.strategy === "follow") await runFollowCycle(symbol, mid, inst, volOk, isSpike, candles, w);
     else await runSellGridCycle(symbol, mid, inst, volOk, isSpike, candles, w);
   }
@@ -605,7 +600,7 @@ function create(host) {
       results.forEach((r, i) => { if (r.status === "rejected") log(list[i] + ": " + (r.reason && r.reason.message || r.reason), "err"); });
       S.cycles++;
       if (P.running) { const posN = list.filter(s => W[s] && W[s].pos && W[s].pos.size > 0).length, spikes = list.filter(s => W[s] && W[s].isSpike).length;
-        status = (P.strategy === "impulse" ? "🎯 ОХОТНИК" : P.fullAuto ? "🚀 ПОЛНЫЙ АВТОПИЛОТ" : P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
+        status = (P.fullAuto ? "🚀 ПОЛНЫЙ АВТОПИЛОТ" : P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
       else status = "ВЫКЛ";
       conn = { ok: true, text: "OK" };
       if (S.cycles % 20 === 0) saveS();
@@ -659,29 +654,6 @@ function create(host) {
     return found.length + " горячих пар";
   }
 
-  // ---------- 🎯 the impulse hunter ----------
-  const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, placeEntry: (b, i) => placeEntry(b, i), wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
-    getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, clearPosStops, cancelOurOrders, recordTrade,
-    feeOf: (s2) => feeOf(s2, P.category),
-    closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
-    posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },
-    dayStopped: () => (P.maxDailyLoss || 0) > 0 && S.dayPnl <= -Math.abs(P.maxDailyLoss),
-    skip: (s2) => s2 === (P.symbol || "").toUpperCase(),
-    hasPosition: (s2) => { const w = W[s2]; return !!(w && ((w.pos && w.pos.size > 0) || (w.posEx && w.posEx.size > 0))); } });
-  function syncHunt() {
-    const want = !!(P.hunt && P.running && P.fullAuto);
-    if (want && !HUNT.isOn()) HUNT.start(); else if (!want && HUNT.isOn()) HUNT.stop();
-  }
-  async function hunt() {
-    if (P.hunt && HUNT.isOn()) { P.hunt = false; HUNT.stop(); P.strategy = "follow"; save(); return await stop(false); }
-    if (P.liveEnabled && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
-    Object.assign(P, { hunt: true, strategy: "impulse", fullAuto: false, autopilot: false, shukinMode: false }); save();
-    if (P.liveEnabled) { const s0 = (P.symbol || "").toUpperCase(); if (s0 && !(W[s0] && W[s0].pos && W[s0].pos.size > 0)) await cancelOurOrders(s0, P.category).catch(() => {}); }
-    HUNT.start();
-    const r = P.running ? "бот уже работает" : await start();
-    return `🎯 Охотник за импульсом запущен${P.liveEnabled ? "" : " (СИМУЛЯЦИЯ — Live выкл)"} — ${r}`;
-  }
-
   // ---------- 🚀 full autopilot: the most volatile coin of the LAST 1 MINUTE ----------
   // score = the range of the last closed 1m candle + of the current one + |the 1-minute move| (all %), the volume spike as a tie-break
   async function scanLast1m(exclude) {
@@ -726,8 +698,7 @@ function create(host) {
     pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
     fastK: [1.5, 5], fastAggr: [0.55, 0.85], fastSpeed: [1.2, 4], chaseAggrSec: [5, 60], faEveryMin: [1, 10],
     leverage: [1, 10], orderUsdt: [5, 5000],
-    hScore: [4, 8], hAct: [0.15, 1.5], hGap: [0.1, 1], hTimeSec: [10, 120], hMax: [1, 4],
-    pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool", hunt: "bool",
+    pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool",
   };
   function aiApply(params) {
     const ch = [];
@@ -736,11 +707,10 @@ function create(host) {
       if (rg === "bool") { if (typeof v === "boolean" && P[k] !== v) { ch.push(`${k} ${P[k]}→${v}`); P[k] = v; } continue; }
       let n = Number(v); if (!Number.isFinite(n)) continue;
       n = Math.min(rg[1], Math.max(rg[0], n));
-      if (["bandLevels", "bandAdds", "bandRef", "momAdds", "faEveryMin", "pulseSec", "momHoldMin", "chaseAggrSec", "leverage", "orderUsdt", "hScore", "hTimeSec", "hMax"].includes(k)) n = Math.round(n); else n = +n.toFixed(3);
+      if (["bandLevels", "bandAdds", "bandRef", "momAdds", "faEveryMin", "pulseSec", "momHoldMin", "chaseAggrSec", "leverage", "orderUsdt"].includes(k)) n = Math.round(n); else n = +n.toFixed(3);
       if (P[k] !== n) { ch.push(`${k} ${P[k]}→${n}`); P[k] = n; }
     }
     if (ch.length) save();
-    syncHunt();
     return ch;
   }
   async function aiPilot(found, cur) {
@@ -751,12 +721,10 @@ function create(host) {
     const params = {}; for (const k of Object.keys(AI_KEYS)) params[k] = P[k];
     const steps = cw && cw.steps ? { maker: cw.steps.maker, taker: cw.steps.taker, minStepPct: cw.steps.lim } : null;
     await availUsdt(true);
-    const hv = HUNT.view();
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
-ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit, hunter exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
+ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
 How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; no stop-loss. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move, back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
-Parallel impulse hunter (hunt=true/false): watches the order books + tape of ~25 liquid coins, 4x a second scores an explosion seconds ahead (book imbalance up to 2, pulled liquidity up to 2, tape speed + aggression up to 3, an early move 1; out of 8), score >= hScore -> enters by a limit at the opposite best price, a trailing exit by a limit from +hAct% with a pull-back hGap% (no stop-loss), out after hTimeSec s without the impulse, up to hMax at once. Its stats: ${JSON.stringify(hv.stats)}, active: ${JSON.stringify(hv.hunts.map(x => ({ sym: x.sym, d: x.d, prof: x.prof, sec: x.sec })))}.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
 Now trading: ${cur} for ${fa.since ? Math.round((now() - fa.since) / 60000) : 0} min, its status "${cw ? cw.status : "—"}", our open orders ${cw ? cw.ourOrders : 0}.
 Open positions: ${JSON.stringify(positions)}
@@ -803,7 +771,7 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
       } catch (e) { log("🧠 AI-пилот (fal.ai) недоступен: " + e.message + " — решает алгоритм", "err"); }
     }
     await availUsdt();
-    journal({ sym: target, prev: cur, sw: target !== cur, by: by === "🧠 AI" ? "ai" : "algo", why: String(jr.why || "").slice(0, 200), ch: jr.ch || [], top: found[0].symbol, lev: P.leverage, lot: P.orderUsdt, hunt: !!P.hunt });
+    journal({ sym: target, prev: cur, sw: target !== cur, by: by === "🧠 AI" ? "ai" : "algo", why: String(jr.why || "").slice(0, 200), ch: jr.ch || [], top: found[0].symbol, lev: P.leverage, lot: P.orderUsdt });
     if (target === cur && fa.sym === cur && fa.since) { if (by !== "🧠 AI") log(`🚀 Автопилот: ${cur} всё ещё самая волатильная за 1 мин — сетка остаётся`, "info"); return; }
     const t = found.find(x => x.symbol === target);
     const list = t ? [t, ...found.filter(x => x !== t)] : found;
@@ -837,7 +805,7 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
     log(`🚀 ПОЛНЫЙ АВТОПИЛОТ: сетка лимиток только на самой волатильной за последнюю 1 мин монете; каждые ${Math.max(1, P.faEveryMin || 3)} мин — новый скан и перенос сетки на новый топ`, "ok");
     await faDecide("старт"); const sym = faState().sym;
     if (P.running) { runCycle(); return "Полный автопилот включён" + (sym ? " · " + sym : ""); }
-    const r = await start(); syncHunt();
+    const r = await start();
     return "🚀 Полный автопилот" + (host.fal ? " под управлением AI" : " (без AI: нет FAL_KEY)") + (sym ? " · " + sym : "") + " — " + r;
   }
 
@@ -967,7 +935,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     return "Бот запущен — все позиции под контролем";
   }
   async function stop(cancel) {
-    P.running = false; P.fullAuto = false; if (HUNT.isOn()) HUNT.stop(); P.hunt = false; save(); schedule(); status = "ВЫКЛ";
+    P.running = false; P.fullAuto = false; save(); schedule(); status = "ВЫКЛ";
     if (cancel && P.liveEnabled && keys()) await cancelOurOrders((P.symbol || "").toUpperCase().trim(), P.category);
     log("STOP", "info"); return "Остановлен";
   }
@@ -978,7 +946,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     if (typeof o.symbol === "string" && o.symbol.trim()) { const s = o.symbol.trim().toUpperCase(); if (s !== P.symbol) { P.symbol = s; ch.push("symbol"); } }
     if (["1", "3", "5", "15"].includes(String(o.interval)) && String(o.interval) !== P.interval) { P.interval = String(o.interval); ch.push("interval"); }
     if (["linear", "inverse"].includes(o.category) && o.category !== P.category) { P.category = o.category; ch.push("category"); }
-    if (["sell", "follow", "impulse"].includes(o.strategy) && o.strategy !== P.strategy) { P.strategy = o.strategy; ch.push("strategy"); }
+    if (["sell", "follow"].includes(o.strategy) && o.strategy !== P.strategy) { P.strategy = o.strategy; ch.push("strategy"); }
     if (["pump", "ultra"].includes(o.autoScanMode) && o.autoScanMode !== P.autoScanMode) { P.autoScanMode = o.autoScanMode; ch.push("autoScanMode"); }
     save(); if (ch.includes("intervalSec")) schedule();
     if (ch.includes("liveEnabled")) log(P.liveEnabled ? "⚠ LIVE включён: реальные ордера" : "Live выключен: только симуляция", P.liveEnabled ? "err" : "info");
@@ -998,11 +966,12 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
   function view() {
     ensureDayKey();
     const fa = S.fa || {};
-    return { hunt: HUNT.view(), fa: P.fullAuto && P.running ? { ai: S.faAi || null, sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    return { fa: P.fullAuto && P.running ? { ai: S.faAi || null, sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, hl: HUNT.levels(w.symbol), open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
-  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } else syncHunt(); }, 3000);
-  return { aiJournal, hunt, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  if (P.strategy === "impulse") { P.strategy = "follow"; save(); }   // the impulse hunter is gone
+  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } }, 3000);
+  return { aiJournal, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

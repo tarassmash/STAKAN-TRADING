@@ -241,6 +241,7 @@ function create(host) {
   // an opening (not reduce-only) limit: its qty is cut to the free balance × leverage; "not enough" from Bybit -> half the lot, again
   // share: how many orders still to place this cycle - the free money is split evenly between them (the nearest first)
   async function placeEntry(body, inst, share) {
+    if (body.side === "Buy" && !body.reduceOnly) { log(`${body.symbol}: BUY на открытие запрещён — бот торгует только SELL (шорт)`, "info"); return null; }
     const symbol = body.symbol, px = Number(body.price), step = inst.qtyStep, stepN = parseFloat(step), lev = Math.max(1, Number(P.leverage) || 1);
     const minQty = Math.max(parseFloat(inst.minQty), Math.ceil(inst.minNotional * 1.02 / px / stepN - 1e-9) * stepN);
     const want = Number(body.qty);
@@ -447,7 +448,7 @@ function create(host) {
     let want = [];
     const nL = Math.max(1, Math.round(P.bandLevels) || 3);
     const cap = (P.momCap || 0.15) / 100, iocPx = (d) => roundToStep(d > 0 ? (w.ask || mid) * (1 + cap) : (w.bid || mid) * (1 - cap), inst.tickSize);
-    if (md && !pd) {
+    if (md < 0 && !pd) {   // a dump: a short with the move (a pump: the usual SELL limits above - short the fade)
       if (P.momIoc) { if (now() - (w.lastIoc || 0) > 1500) want.push({ side: md > 0 ? "Buy" : "Sell", d: md, px: iocPx(md), mom: true, ioc: true }); }
       else want.push({ side: md > 0 ? "Buy" : "Sell", d: md, px: roundToStep(md > 0 ? (w.bid || mid) : (w.ask || mid), inst.tickSize), mom: true });   // a limit at the best price, chased every cycle
     }
@@ -461,6 +462,8 @@ function create(host) {
     else if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
     else if (pre && pre === -pd) { /* the price is starting to run against the position: no adds against it */ }
     else for (let k = 1; k <= Math.max(0, Math.round(P.bandAdds)); k++) want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pos.avgPrice * (1 - pd * step * k), inst.tickSize), add: true });   // dense adds beyond the average
+    // SHORT ONLY: the bot never opens a long - every opening BUY is dropped (a BUY only closes a short, reduce-only)
+    want = want.filter(x => x.d < 0);
     w.levels = want.map(x => ({ px: x.px, side: x.d })); w.targets = want.map(x => x.px); w.side = pd || 0;
     w.dir = md ? { d: pd || md, why: `⚡ ${md > 0 ? "памп" : "дамп"} ${w.mom.mv}% — ${pd ? `еду по движению, трейлинг-тейк, стоп ${P.momSl}%` : "вход по движению лимиткой по лучшей цене"}` } : { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (средняя ${n} свечей ${fmt(ref)})` };
     if (!live) { log(`[SIM АВТОПИЛОТ] ${symbol}: ${md ? `⚡ ${md > 0 ? "памп" : "дамп"} → ` : ""}${want.map(x => `${x.side} @ ${x.px}`).join(" · ")}${pd ? "" : ` (цена ${fmt(mid)})`}`, "info"); return; }
@@ -723,7 +726,7 @@ function create(host) {
     await availUsdt(true);
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
-ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
+SHORT ONLY: the bot only SELLS to open (shorts); it never opens a long - BUY orders only close shorts. Pick coins and settings for shorting (pumps that fade, tops, downtrends). ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
 How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; no stop-loss. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move, back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
 Now trading: ${cur} for ${fa.since ? Math.round((now() - fa.since) / 60000) : 0} min, its status "${cw ? cw.status : "—"}", our open orders ${cw ? cw.ourOrders : 0}.

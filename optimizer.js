@@ -26,14 +26,14 @@ function simBand(c, p, fee, from, to) {
     if (mom && i > mom.until && !pos) mom = null;
     const md = mom ? mom.d : 0, pre = p.pulse && Math.abs(mv) >= p.pulse / 2 ? Math.sign(mv) : 0;
     if (pos && md && pos.d === -md) close(k.open, "pulse");                        // against a pump / dump: out at once
-    if (!pos && md) open(md, k.open, true);                                         // with the move (a limit at the best price ~ the open)
+    if (!pos && md < 0) open(md, k.open, true);   // short only                                         // with the move (a limit at the best price ~ the open)
     for (const x of path(k)) {
       if (!pos) {
         if (md) continue;
         for (let l = 0; l < p.levels && !pos; l++) {
           const s = ref * (1 + off + step * l), b = ref * (1 - off - step * l);
           if (x >= s) { open(-1, s, false); for (let m = l + 1; m < p.levels; m++) if (x >= ref * (1 + off + step * m)) add(ref * (1 + off + step * m)); }
-          else if (x <= b) { open(1, b, false); for (let m = l + 1; m < p.levels; m++) if (x <= ref * (1 - off - step * m)) add(ref * (1 - off - step * m)); }
+          else if (false && x <= b) { open(1, b, false); for (let m = l + 1; m < p.levels; m++) if (x <= ref * (1 - off - step * m)) add(ref * (1 - off - step * m)); }   // short only: no BUY limit below
         }
         continue;
       }

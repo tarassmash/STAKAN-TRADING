@@ -150,7 +150,7 @@ function create(h) {
     if (qty * px < inst.minNotional) qty = h.roundToStep(Math.ceil(inst.minNotional * 1.02 / px / parseFloat(inst.qtyStep)) * parseFloat(inst.qtyStep), inst.qtyStep);
     const hunt = H[sym] = { sym, d, state: "entering", at: now(), px, qty, score: a.score, why: a.why.join(", "), best: px, entry: px, act: false, live };
     log(`🎯 ${sym}: ${d > 0 ? "▲ ПАМП" : "▼ ДАМП"} через секунды? (оценка ${a.score}: ${hunt.why}) — вход ${d > 0 ? "BUY" : "SELL"} лимиткой ${qty} @ ${px}${live ? "" : " [СИМУЛЯЦИЯ]"}`, "ok");
-    if (!live) { hunt.state = "in"; hunt.entry = px; hunt.best = px; hunt.stop = px * (1 - d * (P.hStop || 0.6) / 100); return; }
+    if (!live) { hunt.state = "in"; hunt.entry = px; hunt.best = px; return; }
     await h.ensureLev(sym, P.category);
     const idx = await h.posIdx(sym, d);
     const body = { category: P.category, symbol: sym, side: d > 0 ? "Buy" : "Sell", orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: idx, orderLinkId: "sg_h_" + now() };
@@ -168,7 +168,6 @@ function create(h) {
     if (!x.act && prof >= (P.hAct || 0.3)) { x.act = true; log(`🎯 ${sym}: импульс пошёл +${prof.toFixed(2)}% — трейлинг-выход включён, откат ${P.hGap || 0.25}% → выход лимиткой`, "ok"); }
     const back = (d > 0 ? (x.best - px) / x.best : (px - x.best) / x.best) * 100;
     if (x.act && back >= (P.hGap || 0.25)) return exit(sym, `трейлинг: откат ${back.toFixed(2)}% от лучшей (+${((x.best / x.entry - 1) * 100 * d).toFixed(2)}%)`);
-    if (prof <= -(P.hStop || 0.6)) return exit(sym, `стоп −${P.hStop || 0.6}%`);
   }
   async function exit(sym, why) {
     const x = H[sym]; if (!x || x.state !== "in") return; x.state = "exiting"; x.exitWhy = why; x.exitAt = now();
@@ -197,9 +196,7 @@ function create(h) {
           if (x.state === "entering") {
             if (mine) {
               x.state = "in"; x.entry = pos.avgPrice; x.best = pos.avgPrice; x.size = pos.size;
-              const inst = await h.getInstrument(sym, P.category), slPx = h.roundToStep(pos.avgPrice * (1 - x.d * (P.hStop || 0.6) * 1.5 / 100), inst.tickSize);
-              try { await h.setLimitStop(sym, P.category, pos, slPx, inst); } catch (e) { log(`🎯 ${sym}: стоп на бирже: ${e.message}`, "err"); }
-              log(`🎯 ${sym}: вошёл ${x.d > 0 ? "ЛОНГ" : "ШОРТ"} ${pos.size} @ ${pos.avgPrice} — трейлинг-выход лимиткой ждёт +${P.hAct || 0.3}%, стоп −${P.hStop || 0.6}% (на бирже стоп-лимит ${slPx})`, "ok");
+              log(`🎯 ${sym}: вошёл ${x.d > 0 ? "ЛОНГ" : "ШОРТ"} ${pos.size} @ ${pos.avgPrice} — трейлинг-выход лимиткой ждёт +${P.hAct || 0.3}%, без стоп-лосса`, "ok");
             }
             if (now() - x.at > 3000) {   // the rest of the entry limit is cancelled: the impulse does not wait
               try { await h.priv("POST", "/v5/order/cancel", { category: P.category, symbol: sym, orderId: x.orderId }); } catch (e) { /* filled / gone */ }
@@ -233,7 +230,8 @@ function create(h) {
         const d = p.side === "Buy" ? 1 : -1;
         H[p.symbol] = { sym: p.symbol, d, state: "in", at: now(), entry: +p.avgPrice, best: +p.avgPrice, act: false, live: true, qty: +p.size, why: "позиция с биржи" };
         if (!subs.has(p.symbol)) { subs.add(p.symbol); B[p.symbol] = { bids: new Map(), asks: new Map(), trades: [], hist: [], ready: false, last: 0 }; sendSub([p.symbol], "subscribe"); }
-        log(`🎯 ${p.symbol}: беру открытую позицию под трейлинг-выход`, "info");
+        h.clearPosStops(p.symbol, P.category, Number(p.positionIdx || 0)).catch(() => {});
+        log(`🎯 ${p.symbol}: беру открытую позицию под трейлинг-выход (без стоп-лосса)`, "info");
       }
     } catch (e) { /* skip */ }
   }
@@ -245,7 +243,7 @@ function create(h) {
     connect(); refreshUniverse(); adopt();
     timer = setInterval(() => { tick().catch(() => {}); }, 250);
     mTimer = setInterval(() => { manage().catch(() => {}); }, 500);
-    log(`🎯 ОХОТНИК ЗА ИМПУЛЬСОМ запущен: стаканы и лента ~${P.hUniverse || 25} монет в реальном времени, оценка ≥ ${P.hScore || 5} → вход лимиткой, трейлинг-выход лимиткой (+${P.hAct || 0.3}% / откат ${P.hGap || 0.25}%), стоп ${P.hStop || 0.6}%, до ${P.hMax || 2} сделок одновременно${P.liveEnabled ? "" : " — СИМУЛЯЦИЯ (Live выкл)"}`, "ok");
+    log(`🎯 ОХОТНИК ЗА ИМПУЛЬСОМ запущен: стаканы и лента ~${P.hUniverse || 25} монет в реальном времени, оценка ≥ ${P.hScore || 5} → вход лимиткой, трейлинг-выход лимиткой (+${P.hAct || 0.3}% / откат ${P.hGap || 0.25}%), без стоп-лосса, до ${P.hMax || 2} сделок одновременно${P.liveEnabled ? "" : " — СИМУЛЯЦИЯ (Live выкл)"}`, "ok");
   }
   function stop() {
     on = false; clearInterval(timer); clearInterval(mTimer); timer = mTimer = null;
@@ -260,7 +258,7 @@ function create(h) {
       hunts: Object.values(H).map(x => ({ sym: x.sym, d: x.d, state: x.state, entry: x.entry, best: x.best, prof: x.prof || 0, act: x.act, sec: Math.round((now() - x.at) / 1000), why: x.why, live: x.live })) };
   }
   const levels = (sym) => { const x = H[sym]; if (!x || x.state !== "in") return null; const d = x.d;
-    return { entry: x.entry, stop: x.entry * (1 - d * (P.hStop || 0.6) / 100), act: x.entry * (1 + d * (P.hAct || 0.3) / 100), trail: x.act ? x.best * (1 - d * (P.hGap || 0.25) / 100) : null, d }; };
+    return { entry: x.entry, stop: null, act: x.entry * (1 + d * (P.hAct || 0.3) / 100), trail: x.act ? x.best * (1 - d * (P.hGap || 0.25) / 100) : null, d }; };
   return { start, stop, view, levels, isOn: () => on, has: (s) => !!H[s], _analyse: analyse, _B: B, _H: H, _tick: tick, _manage: manage, _onMsg: onMsg, _subs: () => subs };
 }
 module.exports = { create };

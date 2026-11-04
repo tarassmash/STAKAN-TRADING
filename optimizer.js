@@ -79,10 +79,10 @@ async function optimize(c, P, steps, strategy) {
   const grid = [];
   if (strategy === "follow") {
     for (const bandPct of [1, 1.5, 2, 3, 4]) for (const levels of [1, 3, 5]) for (const adds of [0, 3, 5]) for (const tp of [mkt, 1, 1.5, 2.5].filter((v, i, a) => v >= mkt && a.indexOf(v) === i))
-      for (const gr of [0.3, 0.5]) for (const sl of [3, 5, 10]) for (const pulse of [0, 1, 1.5, 2.5])
-        grid.push({ bandPct, levels, adds, step: lim, tp: +tp.toFixed(3), gap: +(tp * gr).toFixed(3), sl, pulse, pulseSec: P.pulseSec, momSl: P.momSl, momHold: P.momHoldMin, bandRef: P.bandRef });
+      for (const gr of [0.3, 0.5]) for (const sl of [1000]) for (const pulse of [0, 1, 1.5, 2.5])
+        grid.push({ bandPct, levels, adds, step: lim, tp: +tp.toFixed(3), gap: +(tp * gr).toFixed(3), sl, pulse, pulseSec: P.pulseSec, momSl: 1000, momHold: P.momHoldMin, bandRef: P.bandRef });
   } else {
-    for (const step of [lim, 0.6, 1, 1.5, 2].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const levels of [3, 5, 8]) for (const tp of [lim, 0.6, 1, 1.5].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const sl of [3, 5, 10])
+    for (const step of [lim, 0.6, 1, 1.5, 2].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const levels of [3, 5, 8]) for (const tp of [lim, 0.6, 1, 1.5].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const sl of [1000])
       grid.push({ step: +step.toFixed(3), levels, tp: +tp.toFixed(3), sl, makerExit: P.makerExit });
   }
   const sim = strategy === "follow" ? simBand : simSell, res = [];
@@ -97,8 +97,8 @@ async function optimize(c, P, steps, strategy) {
   top.sort((a, b) => b.vscore - a.vscore);
   // the current settings on the same data, for comparison
   const cur = strategy === "follow"
-    ? { bandPct: P.bandPct, levels: P.bandLevels, adds: P.bandAdds, step: lim, tp: P.autoStep ? mkt : Math.max(P.bandTp, mkt), gap: P.autoStep ? +(mkt * 0.4).toFixed(3) : P.bandTrailGap, sl: P.bandSl, pulse: P.pulseOn ? P.pulsePct : 0, pulseSec: P.pulseSec, momSl: P.momSl, momHold: P.momHoldMin, bandRef: P.bandRef }
-    : { step: P.autoStep ? lim : Math.max(P.gridStepPct, lim), levels: P.gridLevels, tp: P.autoStep ? lim : Math.max(P.tpPct, lim), sl: P.slPct, makerExit: P.makerExit };
+    ? { bandPct: P.bandPct, levels: P.bandLevels, adds: P.bandAdds, step: lim, tp: P.autoStep ? mkt : Math.max(P.bandTp, mkt), gap: P.autoStep ? +(mkt * 0.4).toFixed(3) : P.bandTrailGap, sl: 1000, pulse: P.pulseOn ? P.pulsePct : 0, pulseSec: P.pulseSec, momSl: 1000, momHold: P.momHoldMin, bandRef: P.bandRef }
+    : { step: P.autoStep ? lim : Math.max(P.gridStepPct, lim), levels: P.gridLevels, tp: P.autoStep ? lim : Math.max(P.tpPct, lim), sl: 1000, makerExit: P.makerExit };
   const current = { p: cur, train: sim(c, cur, fee, 0, cut), valid: sim(c, cur, fee, cut, c.length) };
   return { tested: grid.length, candles: c.length, top: top.slice(0, 8), current };
 }

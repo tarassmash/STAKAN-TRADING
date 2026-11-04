@@ -281,7 +281,6 @@ function create(host) {
   async function placeSellLimit(symbol, category, qty, price, tp, sl, inst, share) {
     const limitPrice = roundToStep(price, inst.tickSize);
     const body = { category, symbol, side: "Sell", orderType: "Limit", qty: String(qty), price: String(limitPrice), timeInForce: "GTC", positionIdx: await shortIdx(symbol, category), orderLinkId: "sg_s_" + now() + "_" + Math.floor(Math.random() * 999) };
-    if (sl) attachLimitSl(body, sl, -1, inst);
     if (tp && !P.makerExit) Object.assign(body, { tpslMode: "Partial", takeProfit: String(tp), tpTriggerBy: "LastPrice", tpOrderType: "Limit", tpLimitPrice: String(tp) });
     log(`${symbol}: → Sell limit ${qty} @ ${limitPrice}`, "info");
     try { const r = await placeEntry(body, inst, share); if (r) log(`${symbol}: ✅ Sell ${body.qty} #${r.orderId}`, "ok"); }
@@ -497,20 +496,9 @@ function create(host) {
         const okTp = tps.find(o => Math.abs(parseFloat(o.price) - tpPx) <= parseFloat(inst.tickSize) * 2 && Math.abs(parseFloat(o.qty) - pos.size) < 1e-9);
         if (!okTp) { for (const o of tps) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } } await placeMakerExit(symbol, category, pos, tpPx, inst); }
       }
-      // the stop of the whole position on the exchange (from the average)
-      const slUse = w.posMom ? (P.momSl || 1.5) / 100 : sl;
-      const slPx = roundToStep(pos.avgPrice * (1 - pd * slUse), inst.tickSize);
-      if (pd > 0 ? mid <= slPx : mid >= slPx) {
-        const pnl = pos.unrealisedPnl || 0;
-        log(`${symbol}: 🚨 стоп ${slPx} пройден — выхожу лимиткой с догонкой`, "err");
-        await cancelOurOrders(symbol, category); await closeChase(symbol, category, "стоп"); recordTrade(pnl, symbol, "стоп"); return;
-      }
-      const slKey = slPx + "|" + pos.size;
-      if (w.slSet !== slKey) {
-        try { await setLimitStop(symbol, category, pos, slPx, inst); w.slSet = slKey; log(`${symbol}: стоп позиции ${slPx} ЛИМИТКОЙ (не хуже ${slLim(slPx, pd, inst)}; −${w.posMom ? P.momSl : P.bandSl}% от средней, плечо x${P.leverage})`, "info"); }
-        catch (e) { if (String(e.code) === "34040") w.slSet = slKey; else log(`${symbol}: стоп: ${e.message}`, "err"); }
-      }
-    } else { w.slSet = 0; w.trailSet = null; w.trailGap = 0; w.trOn = false; w.trBest = 0; }
+      // NO stop-loss (the user's decision: the stops only got hit by false moves). Stops left on the exchange are removed once.
+      if (!w.stopsCleared) { w.stopsCleared = true; await clearPosStops(symbol, category, pos.positionIdx); log(`${symbol}: стоп-лосса нет — позиция ведётся до тейка / трейлинга`, "info"); }
+    } else { w.slSet = 0; w.trailSet = null; w.trailGap = 0; w.trOn = false; w.trBest = 0; w.stopsCleared = false; }
     if (isSpike && !pd) { w.status = "SPIKE — лимиты держу"; }
     // sync the entry limits: the opposite side goes, the others follow the price behind it
     const tol = md && !pd ? mid * 0.0005 : ref * Math.min(off * 0.15, step * 0.4), keep = new Set(), freeze = isSpike && !md;
@@ -531,7 +519,6 @@ function create(host) {
       const x = want[k], stopPx = roundToStep(x.px * (1 - x.d * sl), inst.tickSize);
       const body = { category, symbol, side: x.side, orderType: "Limit", qty: String(qty), price: String(x.px), timeInForce: x.ioc ? "IOC" : "PostOnly", positionIdx: idxOf(x.d), orderLinkId: "sg_b_" + now() + "_" + Math.floor(Math.random() * 999) };
       if (x.ioc) { w.lastIoc = now(); if (x.momAdd) { w.momAddN = (w.momAddN || 0) + 1; w.lastAddPx = mid; } }
-      if (!pd) attachLimitSl(body, stopPx, x.d, inst);
       try { if (!(await placeEntry(body, inst, share))) continue; log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc || x.mom ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${body.qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
       catch (e) { log(`${symbol}: ❌ ${x.side} limit: ${e.message}`, "err"); }
     }
@@ -673,7 +660,7 @@ function create(host) {
 
   // ---------- 🎯 the impulse hunter ----------
   const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, placeEntry: (b, i) => placeEntry(b, i), wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
-    getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, cancelOurOrders, recordTrade,
+    getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, clearPosStops, cancelOurOrders, recordTrade,
     closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
     posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },
     dayStopped: () => (P.maxDailyLoss || 0) > 0 && S.dayPnl <= -Math.abs(P.maxDailyLoss),
@@ -733,11 +720,11 @@ function create(host) {
   // ---------- 🧠 AI pilot (fal.ai): every faEveryMin minutes the AI gets the whole picture and decides
   // which coin to trade and how the strategy is tuned. Risk limits (order size, leverage, daily loss, live) stay the user's.
   const AI_KEYS = {   // what the AI may change, and the safe ranges
-    bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandSl: [1.5, 15], bandTp: [0.3, 3], bandTrailGap: [0.1, 2], bandRef: [1, 20],
-    momSl: [0.5, 5], pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
+    bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandTp: [0.3, 3], bandTrailGap: [0.1, 2], bandRef: [1, 20],
+    pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
     fastK: [1.5, 5], fastAggr: [0.55, 0.85], fastSpeed: [1.2, 4], chaseAggrSec: [5, 60], faEveryMin: [1, 10],
     leverage: [1, 10], orderUsdt: [5, 5000],
-    hScore: [4, 8], hAct: [0.15, 1.5], hGap: [0.1, 1], hStop: [0.3, 2], hTimeSec: [10, 120], hMax: [1, 4],
+    hScore: [4, 8], hAct: [0.15, 1.5], hGap: [0.1, 1], hTimeSec: [10, 120], hMax: [1, 4],
     pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool", hunt: "bool",
   };
   function aiApply(params) {
@@ -765,9 +752,9 @@ function create(host) {
     const hv = HUNT.view();
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
-ONLY limit orders are used (never market).
-How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; the stop bandSl% from the average. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move (stop momSl%), back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
-Parallel impulse hunter (hunt=true/false): watches the order books + tape of ~25 liquid coins, 4x a second scores an explosion seconds ahead (book imbalance up to 2, pulled liquidity up to 2, tape speed + aggression up to 3, an early move 1; out of 8), score >= hScore -> enters by a limit at the opposite best price, a trailing exit by a limit from +hAct% with a pull-back hGap%, stop hStop%, out after hTimeSec s without the impulse, up to hMax at once. Its stats: ${JSON.stringify(hv.stats)}, active: ${JSON.stringify(hv.hunts.map(x => ({ sym: x.sym, d: x.d, prof: x.prof, sec: x.sec })))}.
+ONLY limit orders are used (never market). There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
+How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; no stop-loss. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move, back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
+Parallel impulse hunter (hunt=true/false): watches the order books + tape of ~25 liquid coins, 4x a second scores an explosion seconds ahead (book imbalance up to 2, pulled liquidity up to 2, tape speed + aggression up to 3, an early move 1; out of 8), score >= hScore -> enters by a limit at the opposite best price, a trailing exit by a limit from +hAct% with a pull-back hGap% (no stop-loss), out after hTimeSec s without the impulse, up to hMax at once. Its stats: ${JSON.stringify(hv.stats)}, active: ${JSON.stringify(hv.hunts.map(x => ({ sym: x.sym, d: x.d, prof: x.prof, sec: x.sec })))}.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
 Now trading: ${cur} for ${fa.since ? Math.round((now() - fa.since) / 60000) : 0} min, its status "${cw ? cw.status : "—"}", our open orders ${cw ? cw.ourOrders : 0}.
 Open positions: ${JSON.stringify(positions)}
@@ -919,8 +906,8 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
     const seen = new Set(); return out.filter(x => !seen.has(x.t) && seen.add(x.t)).sort((a, b) => a.t - b.t);
   }
   const fmtP = (st, p) => st === "follow"
-    ? `лимитки ±${p.bandPct}% × ${p.levels}, доборов ${p.adds}, трейлинг с ${p.tp}% отступ ${p.gap}%, стоп ${p.sl}%, пульс ${p.pulse ? p.pulse + "%" : "выкл"}`
-    : `шаг ${p.step}%, уровней ${p.levels}, тейк ${p.tp}%, стоп ${p.sl}%`;
+    ? `лимитки ±${p.bandPct}% × ${p.levels}, доборов ${p.adds}, трейлинг с ${p.tp}% отступ ${p.gap}%, ${p.sl >= 100 ? "без стопа" : "стоп " + p.sl + "%"}, пульс ${p.pulse ? p.pulse + "%" : "выкл"}`
+    : `шаг ${p.step}%, уровней ${p.levels}, тейк ${p.tp}%, ${p.sl >= 100 ? "без стопа" : "стоп " + p.sl + "%"}`;
   async function aiLearn(why) {
     if (aiBusy) return "Обучение уже идёт"; aiBusy = true;
     const t0 = now(), symbol = (P.symbol || "BTCUSDT").toUpperCase(), category = P.category, st = P.strategy === "follow" ? "follow" : "sell";

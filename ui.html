@@ -709,7 +709,7 @@
       src.forEach(o => { if (!(o.px > 0)) return; const buy = o.side > 0;
         L.push({ px: o.px, color: o.kind === 'sl' ? '#ff9800' : o.kind === 'close' ? '#a855f7' : o.kind === 'tp' ? '#2ea6ff' : buy ? '#0ecb81' : '#f6465d', style: o.kind === 'plan' ? 3 : 2, title: (KIND[o.kind] || '') + (buy ? 'Buy' : 'Sell') + (o.kind === 'plan' ? ' (план)' : '') }); });
       if (w.sl && !src.some(o => o.kind === 'sl')) L.push({ px: w.sl, color: '#ff9800', style: 2, title: 'Стоп (лимит)' });
-      if (w.hl) { if (w.hl.trail) L.push({ px: w.hl.trail, color: '#a855f7', style: 2, title: '🎯 трейл-выход' }); else L.push({ px: w.hl.act, color: '#2ea6ff', style: 3, title: '🎯 трейлинг с' }); L.push({ px: w.hl.stop, color: '#ff9800', style: 3, title: '🎯 стоп' }); }
+      if (w.hl) { if (w.hl.trail) L.push({ px: w.hl.trail, color: '#a855f7', style: 2, title: '🎯 трейл-выход' }); else L.push({ px: w.hl.act, color: '#2ea6ff', style: 3, title: '🎯 трейлинг с' }); if (w.hl.stop) L.push({ px: w.hl.stop, color: '#ff9800', style: 3, title: '🎯 стоп' }); }
       if (w.pos && w.pos.size > 0 && w.pos.avgPrice) L.push({ px: w.pos.avgPrice, color: '#f0b90b', style: 0, title: 'Средняя ' + (w.pos.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ') });
     }
     const key = JSON.stringify(L);

@@ -6,8 +6,8 @@
 //  • только лимитные ордера; Live выкл — симуляция по живым ценам.
 "use strict";
 
-const DEF = { coins: 3, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, addStep: 3, maxPos: 20, live: false };
-const NUMS = ["coins", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
+const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, addStep: 3, maxPos: 20, live: false };
+const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -52,8 +52,9 @@ function create(host) {
     const s = +step, d = decs(step), f = mode === "up" ? Math.ceil : mode === "down" ? Math.floor : Math.round;
     return (f(v / s - (mode === "up" ? 1e-9 : -1e-9)) * s).toFixed(d);
   }
+  const lot = () => Math.max(CFG.usdt, (BUD && BUD.lot) || 0);   // USDT per order: at least the setting, more when the money would lie idle
   function qtyFor(i, px) {
-    let q = +rnd(CFG.usdt / px, i.step, "down");
+    let q = +rnd(lot() / px, i.step, "down");
     if (q < i.minQty) q = i.minQty;
     if (q * px < i.minNot) q = +rnd(i.minNot * 1.02 / px, i.step, "up");
     return q;
@@ -62,11 +63,26 @@ function create(host) {
 
   // ---------------- state ----------------
   const C = {};
+  let BUD = null, noMoneyAt = 0;   // the budget: 90 % of the deposit is always in the limits
   let ACTIVE = [], CAND = [], scanning = false, fastBusy = false, execFrom = 0, scanTimer = null, fastTimer = null, lastScanAt = 0;
   function coin(sym) { return C[sym] || (C[sym] = { sym, range: 0, last: 0, anchor: 0, grid: [], pos: null, takes: 0, lev: false, hedge: null, sim: { fills: [] }, stopKey: "", takeKey: "", lastAdd: LAST_ADD[sym] || 0 }); }
   const isLive = () => !!(CFG.live && keys());
   const hasShort = (s) => !!(C[s] && C[s].pos && C[s].pos.side === "Sell" && C[s].pos.size > 0);
   const gridCoins = () => [...new Set([...ACTIVE, ...Object.keys(C).filter(hasShort)])];
+
+  // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
+  // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
+  async function budget() {
+    const lev = Math.max(1, CFG.lev), perCoin = CFG.levels * CFG.usdt * 1.03 / lev;   // the margin of one coin's orders
+    let eq = BUD ? BUD.eq : 0;
+    if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); eq = +((w.list || [])[0] || {}).totalEquity || 0; } catch (e) { /* keep the last */ } }
+    else eq = (CFG.simEq || 1000) + (STAT.simPnl || 0);
+    const posIM = Object.values(C).filter(c => c.pos && c.pos.size > 0).reduce((a, c) => a + c.pos.size * c.pos.avg / lev, 0);
+    const held = Object.keys(C).filter(hasShort).length;
+    const cap = eq * CFG.budgetPct / 100, free = cap - posIM - held * perCoin;
+    BUD = Object.assign(BUD || {}, { eq, cap, posIM, held, perCoinBase: perCoin, free, at: now() });
+    return BUD;
+  }
 
   // ---------------- 1) the scanner: the most volatile coins of the last minute ----------------
   async function scan() {
@@ -93,16 +109,24 @@ function create(host) {
       }
       for (const x of out) x.held = hasShort(x.sym);
       out.sort((a, b) => b.range - a.range);
-      // hysteresis: a coin stays while it is in the top (coins + 1)
-      const top = out.slice(0, CFG.coins).map(x => x.sym), keep = out.slice(0, CFG.coins + 1).map(x => x.sym);
-      const next = ACTIVE.filter(s => keep.includes(s));
-      for (const s of top) if (next.length < CFG.coins && !next.includes(s)) next.push(s);
+      // as many coins as the free money allows: 90 % of the deposit always in the limits (a coin stays while it is in the top K + 1)
+      const B = await budget(), flat = out.filter(x => !x.held);
+      // K coins: as many as the free money allows (up to maxCoins and the candidates found);
+      // money left over when K hits that limit -> a bigger lot, so budgetPct % of the deposit is always in the limits
+      const kMax = Math.min(Math.round(CFG.maxCoins), flat.length), K = Math.max(0, Math.min(kMax, Math.floor(B.free / B.perCoinBase)));
+      const scale = K ? Math.max(1, B.free / (K * B.perCoinBase)) : 1;
+      B.k = K; B.lot = +(CFG.usdt * scale).toFixed(2); B.perCoin = B.perCoinBase * scale;
+      const keep = new Set(flat.slice(0, K + 1).map(x => x.sym));
+      const next = flat.filter(x => ACTIVE.includes(x.sym) && keep.has(x.sym)).map(x => x.sym).slice(0, K);
+      for (const x of flat.slice(0, K)) if (next.length < K && !next.includes(x.sym)) next.push(x.sym);
+      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${CFG.budgetPct}% = ${B.cap.toFixed(2)} · шорты ${B.posIM.toFixed(2)} + доборы ${(B.held * B.perCoin).toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
+      BUD.prevK = K; BUD.prevLot = B.lot; BUD.kLogged = true;
       const added = next.filter(s => !ACTIVE.includes(s)), removed = ACTIVE.filter(s => !next.includes(s));
       ACTIVE = next;
       CAND = out.filter(x => !x.held || ACTIVE.includes(x.sym)).slice(0, 15).map(x => ({ sym: x.sym, rPrev: x.rPrev, rCur: x.rCur, move: x.move, turn: x.turn, active: ACTIVE.includes(x.sym) }));
       for (const x of out) if (ACTIVE.includes(x.sym) || hasShort(x.sym)) { const c = coin(x.sym); c.range = x.range; c.last = x.last; c.anchor = x.anchor; }   // the grid anchor = the price delay min ago
       STAT.scans++; lastScanAt = now(); saveStat();
-      if (added.length || removed.length) log(`Скан: самые волатильные за 1 мин → ${ACTIVE.map(s => s.replace(/USDT$/, "")).join(", ")}${added.length ? " · + " + added.join(", ") : ""}${removed.length ? " · − " + removed.join(", ") : ""}`, "ok");
+      if (added.length || removed.length) log(`Скан: ${ACTIVE.length} монет на ${CFG.budgetPct}% депозита → ${ACTIVE.map(s => s.replace(/USDT$/, "")).join(", ")}${added.length ? " · + " + added.join(", ") : ""}${removed.length ? " · − " + removed.join(", ") : ""}`, "ok");
       for (const s of removed) if (!hasShort(s)) await dropGrid(s);   // a coin with an open short keeps its grid (the adds)
       for (const s of gridCoins()) { try { await gridFor(s); } catch (e) { log(`${s}: сетка: ${e.message}`, "err"); } }
     } catch (e) { log("Скан: " + e.message, "err"); }
@@ -133,15 +157,19 @@ function create(host) {
       const o = open[k], px = want[k];
       if (o && px == null) { await cancelOrder(sym, o); continue; }
       if (!o) { await placeEntry(sym, px, qty, c); continue; }
-      if (Math.abs(+o.price - px) >= tick / 2) {
-        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: o.orderId, price: String(px) }); }
+      const qtyOff = Math.abs(+o.qty / qty - 1) > 0.1 && !(+o.cumExecQty > 0);   // the lot changed a lot -> the order follows it
+      if (Math.abs(+o.price - px) >= tick / 2 || qtyOff) {
+        try { await post("/v5/order/amend", Object.assign({ category: "linear", symbol: sym, orderId: o.orderId, price: String(px) }, qtyOff ? { qty: String(qty) } : {})); }
         catch (e) { await cancelOrder(sym, o); await placeEntry(sym, px, qty, c); }
       }
     }
   }
   async function placeEntry(sym, px, qty, c) {
     try { await post("/v5/order/create", { category: "linear", symbol: sym, side: "Sell", orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: c.hedge ? 2 : 0, orderLinkId: "vg_e" + now() + Math.floor(Math.random() * 1e4) }); }
-    catch (e) { log(`${sym}: SELL ${qty} @ ${px}: ${e.message}`, "err"); }
+    catch (e) {
+      if (/^(110004|110007|110012|110044|110045|110052)$/.test(String(e.code)) || /not enough|insufficient/i.test(e.message)) { if (now() - (noMoneyAt || 0) > 60000) { noMoneyAt = now(); log(`Маржи на новые заявки не хватает — ${CFG.budgetPct}% депозита уже в работе, жду`, "info"); } }
+      else log(`${sym}: SELL ${qty} @ ${px}: ${e.message}`, "err");
+    }
   }
   async function cancelOrder(sym, o) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: o.orderId }); } catch (e) { /* gone */ } }
   async function dropGrid(sym) {
@@ -257,7 +285,7 @@ function create(host) {
   function setCfg(o) {
     const ch = [];
     for (const k of NUMS) if (o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
-    CFG.coins = Math.max(1, Math.min(10, Math.round(CFG.coins))); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
+    CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
     CFG.addStep = Math.max(0.5, CFG.addStep || 3); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
     CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.usdt = Math.max(1, CFG.usdt);
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: симуляция", CFG.live ? "err" : "info"); for (const c of Object.values(C)) { c.sim.fills = []; c.pos = null; c.lev = false; } }
@@ -269,7 +297,7 @@ function create(host) {
   async function start() {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("vg.running", true); execFrom = now() - 60000;
-    log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: ${CFG.coins} самых волатильных за 1 мин · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · без стопа (только плюс) · добор каждые ${CFG.addStep}% до ${CFG.maxPos} заявок · плечо x${CFG.lev}`, "ok");
+    log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: лимитки на ${CFG.budgetPct}% депозита — сетки на столько самых волатильных за 1 мин монет, сколько помещается (до ${CFG.maxCoins}) · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · без стопа (только плюс) · добор каждые ${CFG.addStep}% до ${CFG.maxPos} заявок · плечо x${CFG.lev}`, "ok");
     schedule(); scan().catch(() => {});
     return "Бот запущен — торгует на сервере 24/7";
   }
@@ -303,7 +331,7 @@ function create(host) {
       return { sym: s, active: ACTIVE.includes(s), held: hasShort(s), range: c.range, last: c.last, anchor: c.anchor, grid: c.grid, pos: c.pos, take: c.pos ? c.pos.avg * (1 - CFG.take / 100) : null, takes: c.takes };
     });
     const upnl = rows.reduce((a, r) => a + (r.pos ? r.pos.upnl : 0), 0);
-    return { running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    return { bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();

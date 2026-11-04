@@ -1,15 +1,12 @@
 {
-  "name": "stakan-scalper",
+  "name": "stakan-sell-grid",
   "private": true,
-  "description": "Bybit order-book scalper 24/7 on a server with a fal.ai autopilot",
+  "description": "Bybit SELL grid on the most volatile coins of the last minute, 24/7 on a server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
     "node": ">=20"
-  },
-  "dependencies": {
-    "ws": "8.18.0"
   }
 }

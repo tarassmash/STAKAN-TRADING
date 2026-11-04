@@ -1,4 +1,4 @@
-// SELL GRID — SHORT (режим Щукина) 24/7 на Railway: торгует сервер, страница только показывает и управляет.
+// SELL-сетка на самых волатильных за 1 мин монетах · 24/7 на Railway: торгует сервер, страница только показывает и управляет.
 "use strict";
 const http = require("http");
 const fs = require("fs");
@@ -14,7 +14,6 @@ const KEY = (process.env.BYBIT_API_KEY || "").trim();
 const SECRET = (process.env.BYBIT_API_SECRET || "").trim();
 const HAS_KEYS = !!(KEY && SECRET);
 const REST = (process.env.TEST_BYBIT_URL || "").trim() || (ENV === "testnet" ? "https://api-testnet.bybit.com" : "https://api.bybit.com");
-const AUTOSTART = /^(1|true|yes|on|ai)$/i.test((process.env.AUTOSTART || "").trim());
 const UI = fs.readFileSync(path.join(__dirname, "ui.html"), "utf8");
 
 const ts = () => new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -99,48 +98,21 @@ async function refreshAccount() {
 }
 
 
-// ---------------- the engine ----------------
-// AI (fal.ai) for the lightning learning: FAL_KEY in Railway -> the AI chooses among the tested candidates
-const FAL_KEY = (process.env.FAL_KEY || process.env.FAL_API_KEY || "").trim();
-const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
-const FAL_URL = (process.env.TEST_FAL_URL || process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
-async function fal(prompt) {
-  const r = await fetch(FAL_URL, { method: "POST", headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: FAL_MODEL, system_prompt: "You optimise a crypto trading bot. Answer only with one JSON object.", prompt, temperature: 0.2, max_tokens: 900 }), signal: AbortSignal.timeout(60000) });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || "ошибка"}`);
-  const m = String(j.output || "").match(/\{[\s\S]*\}/); if (!m) throw new Error("AI не вернул JSON");
-  return JSON.parse(m[0]);
-}
-let SG = null;
-const wsUrl = () => (process.env.TEST_WS_URL || "").trim() || (ENV === "testnet" ? "wss://stream-testnet.bybit.com/v5/public/" : "wss://stream.bybit.com/v5/public/") + (SG && SG.params.category === "inverse" ? "inverse" : "linear");
-SG = require("./engine").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("sg", m), fal: FAL_KEY ? fal : null, wsUrl });
+// ---------------- the bot ----------------
+const BOT = require("./bot").create({ bx, lsGet, lsSet, keys: () => HAS_KEYS, log: (m) => log("bot", m) });
 
 function state() {
-  const ws = wsUrl();
-  return { env: ENV, ws, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, sg: SG.view() };
+  return { env: ENV, keys: HAS_KEYS, password: !!PASSWORD, acc: { equity: ACC.equity, available: ACC.available, err: ACC.err }, bot: BOT.view() };
 }
 async function act(b) {
   const what = String(b.what || "");
-  // everything is run by the AI: the page may only set the day loss limit (the one hard limit of the user)
-  if (b.o && typeof b.o === "object" && b.o.maxDailyLoss != null) SG.setParams({ maxDailyLoss: b.o.maxDailyLoss });
+  if (b.cfg && typeof b.cfg === "object") BOT.setCfg(b.cfg);   // the page sends its settings with every command
   if (what === "save") return "Сохранено";
-  if (what === "fullauto") return await SG.fullAuto();
-  if (what === "shukinFilter") return SG.toggleShukinFilter();
-  if (what === "stop") return await SG.stop(true);
-  if (what === "sync") { if (!HAS_KEYS) return "Нет API ключей в Railway → Variables"; return await SG.sync(); }
-  if (what === "close") { if (!HAS_KEYS) return "Нет API ключей"; return await SG.closePos(b.symbol); }
-  if (what === "position") { if (!HAS_KEYS) return "Нет API ключей"; return JSON.stringify(await SG.position(b.symbol)); }
-  if (what === "test") { await bx("/v5/market/time"); if (!HAS_KEYS) return "Public OK (нет ключей)"; await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true }); return "Public + Private OK"; }
+  if (what === "start") return await BOT.start();
+  if (what === "stop") return await BOT.stop();
+  if (what === "reset") return BOT.resetStats();
+  if (what === "test") { await bx("/v5/market/time"); if (!HAS_KEYS) return "Public OK (нет ключей — только симуляция)"; await refreshAccount(); if (ACC.err) throw new Error(ACC.err); return `Связь OK · баланс ${(ACC.equity || 0).toFixed(2)} USDT, свободно ${(ACC.available || 0).toFixed(2)}`; }
   return "неизвестная команда";
-}
-// chart data for the page (via the server: no CORS / region problems in the browser)
-async function chart(q) {
-  const sym = String(q.get("symbol") || SG.params.symbol).toUpperCase(), iv = String(q.get("interval") || SG.params.interval), cat = SG.params.category;
-  const candles = await SG.getKlines(sym, cat, iv, 200);
-  let oi = []; try { oi = await SG.getOpenInterest(sym, cat, iv, 200); } catch (e) { /* no OI */ }
-  let fills = []; try { fills = await SG.fills(sym); } catch (e) { /* no keys / no fills */ }
-  return { symbol: sym, candles, oi, fills, sig: SG.analyzeShukinContext(candles, oi) };
 }
 
 // ---------------- web ----------------
@@ -160,10 +132,8 @@ http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/healthz") return json(200, { ok: true });
-    if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Sell Grid"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
+    if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="SELL Grid"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
     if (url.pathname === "/api/state") return json(200, state());
-    if (url.pathname === "/api/ai") return json(200, { journal: SG.aiJournal() });
-    if (url.pathname === "/api/chart") { try { return json(200, await chart(url.searchParams)); } catch (e) { return json(200, { error: e.message }); } }
     if (req.method === "POST" && url.pathname.startsWith("/api/")) {
       if (!PASSWORD) return json(200, { error: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом зі сторінки" });
       const b = await readBody(req);
@@ -180,35 +150,11 @@ http.createServer(async (req, res) => {
 process.on("unhandledRejection", (e) => log("unhandledRejection", e && e.message || e));
 process.on("uncaughtException", (e) => log("uncaughtException", e && e.stack || e));
 
-// ---------------- one-time: the previous bot of this project («Пробій після стиснення») is retired ----------------
-// its pending entries are cancelled and its positions closed, otherwise the sell grid would take them over
-async function retireSqueeze() {
-  if (!HAS_KEYS || lsGet("retired.sqz", false)) return;
-  const pos = lsGet("sq.pos", {}) || {};
-  for (const [sym, p] of Object.entries(pos)) {
-    try {
-      const open = ((await bx("/v5/order/realtime", { query: { category: "linear", symbol: sym }, auth: true })).list || []).filter(o => /^sq/.test(o.orderLinkId || ""));
-      for (const o of open) await bx("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderId: o.orderId } }).catch(() => {});
-      if (p.state === "open") {
-        const r = await bx("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true });
-        for (const x of r.list || []) if (Number(x.size) > 0 && (x.side === "Buy" ? 1 : -1) === p.d)
-          { const ob = await bx("/v5/market/orderbook", { query: { category: "linear", symbol: sym, limit: 1 } }), px = x.side === "Buy" ? (ob.b || [])[0] : (ob.a || [])[0];
-            if (px) await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: x.side === "Buy" ? "Sell" : "Buy", orderType: "Limit", price: String(px[0]), qty: String(x.size), reduceOnly: true, positionIdx: Number(x.positionIdx || 0), timeInForce: "GTC" } }); }
-      }
-      log(`retired squeeze bot on ${sym}`);
-    } catch (e) { log(`retire ${sym}: ${e.message}`); }
-  }
-  lsSet("sq.pos", {}); const sp = lsGet("sq.p", null); if (sp) lsSet("sq.p", Object.assign(sp, { on: false }));
-  lsSet("retired.sqz", true);
-}
-
 // ---------------- start ----------------
 (async () => {
   await syncTime();
   await refreshAccount();
-  await retireSqueeze();
   if (ACC.err) log("Bybit: " + ACC.err);
   setInterval(refreshAccount, 15000);
   setInterval(syncTime, 30 * 60000);
-  if (AUTOSTART && HAS_KEYS && !lsGet("autostarted", false)) { lsSet("autostarted", true); SG.start(); }
 })();

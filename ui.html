@@ -1,897 +1,167 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8" />
+<meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>AI Автопилот 24/7</title>
-<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<title>SELL-сетка 24/7</title>
 <style>
-  :root {
-    --bg: #0b0e11;
-    --panel: #12161c;
-    --border: #1e2329;
-    --text: #eaecef;
-    --muted: #848e9c;
-    --green: #0ecb81;
-    --red: #f6465d;
-    --blue: #3861fb;
-    --yellow: #f0b90b;
-    --input: #1a1f27;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-  }
-  header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 20px; border-bottom: 1px solid var(--border);
-    background: var(--panel);
-  }
-  header h1 { font-size: 1.15rem; font-weight: 600; }
-  header h1 span { color: var(--red); }
-  .badge {
-    font-size: 0.75rem; padding: 4px 10px; border-radius: 20px;
-    background: #1a1f27; color: var(--muted);
-  }
-  .badge.on { background: rgba(14,203,129,.15); color: var(--green); }
-  .badge.err { background: rgba(246,70,93,.15); color: var(--red); }
-
-  .layout {
-    display: grid;
-    grid-template-columns: 300px 1fr;
-    min-height: calc(100vh - 56px);
-  }
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-
-  .sidebar {
-    background: var(--panel);
-    border-right: 1px solid var(--border);
-    padding: 16px;
-    overflow-y: auto;
-  }
-  .main { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-
-  h2 {
-    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em;
-    color: var(--muted); margin: 16px 0 8px;
-  }
-  h2:first-child { margin-top: 0; }
-
-  .row {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 8px; margin-bottom: 8px;
-  }
-  .row label { font-size: 0.85rem; color: var(--muted); flex: 1; }
-  input, select {
-    background: var(--input); border: 1px solid var(--border);
-    color: var(--text); border-radius: 6px; padding: 6px 8px;
-    font-size: 0.85rem; width: 110px;
-  }
-  input[type="checkbox"] { width: auto; }
-  input[type="password"], #apiKey, #apiSecret { width: 100%; }
-
-  .btn {
-    width: 100%; border: none; border-radius: 8px; padding: 10px;
-    font-size: 0.9rem; font-weight: 600; cursor: pointer; margin-top: 8px;
-  }
-  .btn-full { background: linear-gradient(135deg, #0ecb81, #f0b90b); color: #000; font-size: 15px; font-weight: 800; padding: 14px 10px; box-shadow: 0 0 14px rgba(14,203,129,.35); }
-  .btn-full.on { background: linear-gradient(135deg, #f6465d, #a855f7); color: #fff; }
-  .fa-note { font-size: 11px; color: var(--muted); margin: -4px 0 12px; text-align: center; }
-  .btn-start { background: var(--green); color: #000; }
-  .btn-stop { background: #2b3139; color: var(--text); }
-  .btn-once { background: var(--blue); color: #fff; }
-  .btn-sec { background: transparent; border: 1px solid var(--border); color: var(--muted); }
-  .btn-scan { background: rgba(246,70,93,.2); border: 1px solid var(--red); color: var(--red); }
-  .btn-ultra {
-    background: rgba(240,185,11,.12); border: 1px solid var(--yellow); color: #f0b90b;
-  }
-  .btn-shukin {
-    background: rgba(168, 85, 247, 0.15); border: 1px solid #a855f7; color: #c4b5fd;
-  }
-  .btn-shukin.active {
-    background: linear-gradient(135deg, #7c3aed, #a855f7);
-    color: #fff; border-color: #c4b5fd;
-    box-shadow: 0 0 12px rgba(168, 85, 247, 0.35);
-  }
-  .btn:disabled { opacity: .5; cursor: not-allowed; }
-
-  .info {
-    font-size: 0.8rem; color: var(--muted); line-height: 1.45;
-    background: #0d1117; border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px; margin-bottom: 8px;
-  }
-
-  .stats {
-    background: #0d1117; border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px; margin-top: 10px;
-  }
-  .stats .row { margin-bottom: 4px; font-size: .85rem; }
-  .stats #statusText { font-size: .8rem; text-align: right; }
-  .stats .val { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-
-  .log {
-    background: #0d1117; border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px; height: 200px; overflow-y: auto;
-    font-size: 0.75rem; font-family: ui-monospace, monospace; margin-top: 10px;
-  }
-  .log div { margin-bottom: 3px; }
-
-  .ai-panel { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 4px 0 14px; background: #0d1117; }
-  .ai-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-  .ai-head b { font-size: .9rem; }
-  .ai-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: .78rem; color: var(--muted); margin-bottom: 6px; }
-  .ai-stats span b { color: var(--text); font-variant-numeric: tabular-nums; }
-  .ai-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .72rem; color: var(--muted); margin-bottom: 4px; }
-  .ai-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
-  #aiChart { height: 260px; width: 100%; }
-  .ai-list { margin-top: 8px; font-size: .74rem; max-height: 190px; overflow-y: auto; }
-  .ai-row { display: grid; grid-template-columns: 54px 108px 82px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,.06); align-items: start; }
-  .ai-row .r { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
-  .ai-row .w { color: var(--muted); overflow-wrap: anywhere; }
-  @media (max-width: 640px) { .ai-row { grid-template-columns: 46px 1fr 70px; } .ai-row .w { grid-column: 1 / -1; } }
-  #chart {
-    flex: none; height: 460px; min-height: 320px;
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  }
-  .sub-charts {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-  .sub-chart-wrap {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    overflow: hidden;
-  }
-  .sub-chart-label {
-    font-size: 0.7rem; color: var(--muted); text-transform: uppercase;
-    letter-spacing: .05em; padding: 6px 10px 0; font-weight: 600;
-  }
-  .sub-chart {
-    height: 110px; width: 100%;
-  }
-
-  .pos-card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px 16px;
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px;
-  }
-  .pos-card .k { font-size: 0.75rem; color: var(--muted); }
-  .pos-card .v { font-size: 1rem; font-weight: 600; }
-  .pos-card .v.pos { color: var(--green); }
-  .pos-card .v.neg { color: var(--red); }
-
-  .toast {
-    position: fixed; right: 16px; bottom: 16px; z-index: 99;
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px 16px; min-width: 200px;
-    box-shadow: 0 8px 24px rgba(0,0,0,.4); display: none;
-  }
-  .toast.show { display: block; }
-  .toast.ok { border-color: var(--green); }
-  .toast.err { border-color: var(--red); }
-
-  .targets-box {
-    background: #0d1117; border: 1px solid var(--border);
-    border-radius: 8px; padding: 8px; margin-top: 8px;
-    max-height: 280px; overflow-y: auto;
-  }
-  .targets-head {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 6px; gap: 6px;
-  }
-  .targets-head span {
-    font-size: 0.72rem; color: var(--muted); text-transform: uppercase;
-    letter-spacing: .05em; font-weight: 600;
-  }
-  .targets-head button {
-    background: transparent; border: 1px solid var(--border);
-    color: var(--muted); border-radius: 6px; padding: 3px 8px;
-    font-size: 0.7rem; cursor: pointer;
-  }
-  .targets-head button:hover { border-color: var(--red); color: var(--red); }
-  .target-item {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 6px; padding: 8px 10px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--panel);
-    margin-bottom: 5px; cursor: pointer; transition: border-color .15s;
-  }
-  .target-item:hover { border-color: #3a4450; }
-  .target-item.active { border-color: var(--yellow); }
-  .target-item .sym { font-size: 0.82rem; font-weight: 700; }
-  .target-item .meta {
-    font-size: 0.7rem; color: var(--muted);
-    display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
-  }
-  .target-item .chg.up { color: var(--green); font-weight: 600; }
-  .target-item .chg.dn { color: var(--red); font-weight: 600; }
-  .target-item .rsi { font-variant-numeric: tabular-nums; }
-  .targets-empty {
-    font-size: 0.78rem; color: var(--muted); padding: 10px 4px; text-align: center;
-  }
-
-  .watch-section { margin-bottom: 4px; }
-  .watch-head {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 8px; margin-bottom: 8px;
-  }
-  .watch-head h3 {
-    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em;
-    color: var(--muted); font-weight: 600;
-  }
-  .watch-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 10px;
-  }
-  .watch-card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 10px; cursor: pointer;
-    transition: border-color .15s;
-  }
-  .watch-card:hover { border-color: #3a4450; }
-  .watch-card.active { border-color: var(--yellow); }
-  .watch-card.spike { border-color: var(--red); box-shadow: 0 0 0 1px rgba(246,70,93,.25); }
-  .watch-card .wc-top {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 6px;
-  }
-  .watch-card .wc-sym { font-weight: 700; font-size: 0.88rem; }
-  .watch-card .wc-badge {
-    font-size: 0.65rem; padding: 2px 6px; border-radius: 10px;
-    background: #1a1f27; color: var(--muted);
-  }
-  .watch-card .wc-badge.pos { background: rgba(246,70,93,.2); color: var(--red); }
-  .watch-card .wc-badge.ord { background: rgba(56,97,251,.2); color: #93b4ff; }
-  .watch-card .wc-badge.ok { background: rgba(14,203,129,.15); color: var(--green); }
-  .watch-card .wc-badge.warn { background: rgba(240,185,11,.15); color: var(--yellow); }
-  .watch-card .wc-mini {
-    height: 72px; width: 100%; border-radius: 6px;
-    background: #0d1117; margin-bottom: 6px; overflow: hidden;
-  }
-  .watch-card .wc-meta {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px;
-    font-size: 0.72rem; color: var(--muted);
-  }
-  .watch-card .wc-meta b { color: var(--text); font-weight: 600; }
-  .watch-card .wc-meta .up { color: var(--green); }
-  .watch-card .wc-meta .dn { color: var(--red); }
-  .watch-empty {
-    font-size: 0.8rem; color: var(--muted); padding: 12px;
-    text-align: center; border: 1px dashed var(--border); border-radius: 10px;
-  }
+  :root { --bg:#0b0e11; --panel:#12161c; --border:#2b3139; --text:#eaecef; --muted:#848e9c; --green:#0ecb81; --red:#f6465d; --yellow:#f0b90b; --violet:#a855f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; padding:12px 16px; border-bottom:1px solid var(--border); }
+  h1 { margin:0; font-size:1.1rem; } h1 span { color:var(--red); }
+  .badge { padding:3px 10px; border-radius:999px; font-size:.75rem; border:1px solid var(--border); color:var(--muted); }
+  .badge.on { color:var(--green); border-color:var(--green); } .badge.live { color:var(--red); border-color:var(--red); }
+  .wrap { display:grid; grid-template-columns:320px 1fr; gap:16px; padding:16px; }
+  @media (max-width:860px) { .wrap { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  h2 { font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:14px 0 8px; } h2:first-child { margin-top:0; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:7px; }
+  .row label { color:var(--muted); font-size:.85rem; }
+  input[type=text], input[type=password], input[type=number] { width:130px; background:#0d1117; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font:inherit; }
+  input.wide { width:100%; }
+  .btn { width:100%; padding:11px; border-radius:8px; border:0; font-weight:700; font-size:.95rem; cursor:pointer; margin-top:6px; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .start { background:linear-gradient(135deg,#f6465d,#f0b90b); color:#000; }
+  .stop { background:#2b3139; color:var(--text); }
+  .sec { background:transparent; border:1px solid var(--border); color:var(--muted); font-weight:500; }
+  .note { font-size:.75rem; color:var(--muted); margin-top:6px; }
+  .warn { color:var(--yellow); }
+  table { width:100%; border-collapse:collapse; font-size:.82rem; font-variant-numeric:tabular-nums; }
+  th, td { text-align:right; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.05); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; font-size:.72rem; text-transform:uppercase; letter-spacing:.04em; }
+  .tbl { overflow-x:auto; }
+  .up { color:var(--green); } .dn { color:var(--red); } .mut { color:var(--muted); }
+  .stats { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:.85rem; margin-bottom:10px; color:var(--muted); }
+  .stats b { color:var(--text); }
+  .log { height:300px; overflow-y:auto; font:12px/1.5 ui-monospace,Menlo,monospace; background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:8px; }
+  .log .ok { color:var(--green); } .log .err { color:var(--red); } .log .info { color:var(--muted); }
+  .grid { font-size:.72rem; color:var(--muted); }
+  .main { display:flex; flex-direction:column; gap:16px; min-width:0; }
 </style>
 </head>
 <body>
 <header>
-  <h1>AI <span>Автопилот</span> <small style="font-size:.7rem;color:var(--muted);font-weight:400">· fal.ai · только SELL (шорт) · только лимитки · сервер 24/7</small></h1>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <span class="badge" id="connBadge">● Связь</span>
-    <span class="badge" id="runBadge">Стоп</span>
-  </div>
+  <h1><span>SELL</span>-сетка на самых волатильных за 1 мин <small style="font-size:.7rem;color:var(--muted);font-weight:400">· сервер 24/7</small></h1>
+  <div style="display:flex;gap:8px"><span class="badge" id="modeBadge">СИМУЛЯЦИЯ</span><span class="badge" id="runBadge">СТОП</span></div>
 </header>
 
-<div class="layout">
-  <aside class="sidebar">
-    <button class="btn btn-full" id="fullAutoBtn" title="AI (fal.ai) полностью управляет ботом 24/7: анализирует рынок, выбирает монету и стратегию, оптимизирует настройки, плечо и лот. Только лимитные ордера.">🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ</button>
-    <div class="fa-note" id="faText">AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7</div>
-    <h2>Счёт</h2>
-    <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
-    <div class="row"><label>Баланс USDT</label><span class="val" id="equityText" style="font-weight:600">—</span></div>
-    <h2>Фильтр входа</h2>
-    <button class="btn btn-sec" id="shukinFilterBtn" title="ВКЛ — SELL только когда открытый интерес начал падать и CVD падает. ВЫКЛ — SELL-сетки на всех найденных пампах без этой проверки.">⚡ Фильтр Щукина: ВКЛ</button>
-    <h2>Защита</h2>
-    <div class="row">
-      <label title="Единственное, что AI менять не может: при таком убытке за день бот снимает ордера и ждёт следующего дня">Стоп-лимит убытка за день, USDT</label>
-      <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
-    </div>
-    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Скан всего рынка раз в минуту</b>: SELL-сетки сразу на всех пампах; с фильтром Щукина — только где открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
-    <div class="stats">
-      <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
-      <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
-      <div class="row"><span>Win / Loss</span><span class="val" id="wlText">0 / 0</span></div>
-      <div class="row"><span>День PnL</span><span class="val" id="dayPnlText">0</span></div>
-    </div>
-    <div class="log" id="log">Лог пуст</div>
-    <div id="legacy" hidden>
-    <h2>Bybit API</h2>
-    <div class="row">
-      <label>Category</label>
-      <select id="category">
-        <option value="linear" selected>linear (USDT perp)</option>
-        <option value="inverse">inverse</option>
-      </select>
-    </div>
-    <button class="btn btn-sec" id="saveKeysBtn">Сохранить настройки</button>
-    <button class="btn btn-sec" id="testConnBtn">Проверить связь</button>
+<div class="wrap">
+  <aside class="panel">
+    <h2>Bybit · сервер</h2>
+    <div class="note" id="keysInfo" style="margin:0 0 8px">—</div>
+    <div class="row"><label>Баланс USDT</label><b id="equity">—</b></div>
+    <div class="row"><label class="warn">LIVE — реальные ордера</label><input type="checkbox" id="live" /></div>
+    <button class="btn sec" id="testBtn">Проверить связь</button>
 
-    <h2>Инструмент</h2>
-    <div class="row">
-      <label>Символ</label>
-      <input id="symbol" value="BTCUSDT" style="width:120px;text-transform:uppercase;" />
-    </div>
-    <div class="row">
-      <label>Таймфрейм</label>
-      <select id="interval">
-        <option value="1">1m</option>
-        <option value="3">3m</option>
-        <option value="5" selected>5m</option>
-        <option value="15">15m</option>
-      </select>
-    </div>
-    <button class="btn btn-scan" id="scanBtn">🔍 Найти пампы под Short</button>
-    <button class="btn btn-ultra" id="ultraVolBtn" title="Скан USDT-перпов по свечам 1m: кто сейчас дёргается сильнее всех">⚡ Найти ультра-волатильные (1m сейчас)</button>
-    <button class="btn btn-shukin" id="shukinBtn" title="Логика Дмитрия Щукина: шорт от пампа, сетка от 1%, тейк от 0.7%, аварийный стоп 10%">⚡ Режим Щукина</button>
+    <h2>Монеты</h2>
+    <div class="row"><label>Монет одновременно</label><input type="number" id="coins" min="1" max="10" step="1" /></div>
+    <div class="row"><label>Оборот за 24ч от, млн $</label><input type="number" id="minTurn" min="0" step="1" /></div>
+    <div class="row"><label>Проверять кандидатов</label><input type="number" id="maxCand" min="10" max="100" step="5" /></div>
 
-    <div class="targets-box" id="targetsBox">
-      <div class="targets-head">
-        <span>Цели (клик → график)</span>
-        <button type="button" id="clearTargetsBtn" title="Очистить список">Очистить</button>
-      </div>
-      <div id="targetsList"><div class="targets-empty">Нажми «Найти пампы» или «ультра-волатильные 1m»</div></div>
-    </div>
+    <h2>Сетка SELL</h2>
+    <div class="row"><label>Заявок на монету</label><input type="number" id="levels" min="1" max="20" step="1" /></div>
+    <div class="row"><label>Шаг сетки, %</label><input type="number" id="step" min="0.1" step="0.1" /></div>
+    <div class="row"><label>USDT на заявку</label><input type="number" id="usdt" min="5" step="1" /></div>
+    <div class="row"><label>Плечо</label><input type="number" id="lev" min="1" max="50" step="1" /></div>
+    <div class="row"><label>Добор каждые, % (против шорта)</label><input type="number" id="addStep" min="0.5" step="0.5" /></div>
+    <div class="row"><label>Макс. заявок в позиции на монету (доборы)</label><input type="number" id="maxPos" min="1" max="100" step="1" /></div>
+    <div class="row"><label>Опоздание сетки, мин</label><input type="number" id="delay" min="1" max="10" step="1" /></div>
 
-    <h2>Плечо и комиссии</h2>
-    <div class="row"><label>Плечо</label><input type="number" id="leverage" value="3" min="1" max="100" step="1" /></div>
-    <div class="row"><label>Шаг/тейк от комиссии (авто)</label><input type="checkbox" id="autoStep" /></div>
-    <div class="row"><label>Покрывать комиссию в N раз</label><input type="number" id="feeX" value="10" min="2" max="50" step="1" /></div>
-    <div class="info" id="feeInfo" style="font-size:.75rem">—</div>
-    <h2>Стратегия</h2>
-    <select id="strategy" style="width:100%;margin-bottom:8px">
-      <option value="sell">Sell Grid — шорт от пампа</option>
-      <option value="follow">🧭 Автопилот за ценой — лимитки ±% в обе стороны</option>
-    </select>
-    <button class="btn btn-shukin" id="aiBtn" style="background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#fff;border-color:#818cf8;margin-bottom:8px">🧠 AI: молниеносное обучение и оптимизация</button>
-    <div class="row"><label>Учиться постоянно</label><input type="checkbox" id="aiAuto" /></div>
-    <div class="row"><label>Каждые (мин)</label><input type="number" id="aiEveryMin" value="30" min="5" step="5" /></div>
-    <div class="info" id="aiInfo" style="font-size:.75rem">Нажми — бот за секунды прогонит тысячи вариантов настроек текущей стратегии на ~2 сутках минутных свечей монеты (с твоими комиссиями), проверит на последних 30% истории, которых варианты не видели, и применит лучший, если он в плюсе и лучше текущих.</div>
-    <div id="bandBox" style="display:none">
-      <div class="info"><b style="color:#0ecb81">🧭 Автопилот за ценой:</b> только лимитки. SELL выше цены и BUY ниже на заданный %, едут за ценой следом (по средней последних свечей — резкий прострел их исполняет). Исполнилась одна → трейлинг-тейк (с уровня тейка едет за лучшей ценой) или тейк лимитом, противоположная снимается, добор дальше, стоп на бирже. После тейка — снова пара вокруг цены.</div>
-      <div class="row"><label>Отступ от цены % (вверх и вниз)</label><input type="number" id="bandPct" value="3" min="0.1" step="0.1" /></div>
-      <div class="row"><label>Лимиток с каждой стороны</label><input type="number" id="bandLevels" value="3" min="1" max="10" step="1" /></div>
-      <div class="row"><label>Тейк % (старт трейлинга)</label><input type="number" id="bandTp" value="1" min="0.1" step="0.1" /></div>
-      <div class="row"><label>Трейлинг тейка</label><input type="checkbox" id="bandTrail" /></div>
-      <div class="row"><label>Отступ трейлинга %</label><input type="number" id="bandTrailGap" value="0.5" min="0.1" step="0.1" /></div>
-      <div class="row"><label>Стоп % (на бирже)</label><input type="number" id="bandSl" value="3" min="0.3" step="0.1" /></div>
-      <div class="row"><label>Доборов</label><input type="number" id="bandAdds" value="1" min="0" max="5" step="1" /></div>
-      <div class="row"><label>Следом за средней N свечей</label><input type="number" id="bandRef" value="5" min="1" max="60" step="1" /></div>
-      <div class="row"><label>Размер USDT (общий)</label><span class="val" id="bandUsdt">—</span></div>
-      <h2 style="margin-top:12px">⚡ Умная адаптация (лента в реальном времени)</h2>
-      <div class="info" style="font-size:.75rem">Сервер слушает ленту сделок Bybit и реагирует на каждую сделку. Старт движения = цена за 15 с прошла в K раз больше обычного для этой монеты + большая часть объёма бьёт в одну сторону + лента ускорилась. Тогда сразу: позиция против — закрыть, вход по движению IOC-лимиткой (мгновенно, но не хуже лучшей цены + cap), доборы пока движение идёт, трейлинг по волатильности монеты; лента развернулась при прибыли — фиксирует сразу.</div>
-      <div class="row"><label>Включено</label><input type="checkbox" id="smartOn" /></div>
-      <div class="row"><label>Движение × обычного (K)</label><input type="number" id="fastK" value="2.5" min="0.5" step="0.1" /></div>
-      <div class="row"><label>Но не меньше %</label><input type="number" id="fastMinPct" value="0.35" min="0.05" step="0.05" /></div>
-      <div class="row"><label>Доля объёма в одну сторону</label><input type="number" id="fastAggr" value="0.65" min="0.5" max="0.95" step="0.05" /></div>
-      <div class="row"><label>Ускорение ленты ×</label><input type="number" id="fastSpeed" value="2" min="0.5" step="0.1" /></div>
-      <div class="row"><label title="Выкл (по умолчанию) = вход лимиткой по лучшей цене с догонкой, без маркета/IOC">Вход IOC (не рекомендуется)</label><input type="checkbox" id="momIoc" /></div>
-      <div class="row"><label>Не хуже лучшей цены на %</label><input type="number" id="momCap" value="0.15" min="0.01" step="0.01" /></div>
-      <div class="row"><label>Доборов по движению</label><input type="number" id="momAdds" value="2" min="0" max="5" step="1" /></div>
-      <h2 style="margin-top:12px">⚡ Пульс: внезапный памп / дамп</h2>
-      <div class="info" style="font-size:.75rem">Цена прошла N% за M секунд → бот сразу адаптируется: позицию против движения закрывает, встречные лимитки убирает и входит по движению лимиткой по лучшей цене (с трейлинг-тейком и коротким стопом). Движение утихло → снова лимитки ±%.</div>
-      <div class="row"><label>Включено</label><input type="checkbox" id="pulseOn" /></div>
-      <div class="row"><label>Движение %</label><input type="number" id="pulsePct" value="1.5" min="0.3" step="0.1" /></div>
-      <div class="row"><label>За секунд</label><input type="number" id="pulseSec" value="60" min="10" max="600" step="5" /></div>
-      <div class="row"><label>Стоп входа по движению %</label><input type="number" id="momSl" value="1.5" min="0.3" step="0.1" /></div>
-      <div class="row"><label>Вернуться к ±% через (мин)</label><input type="number" id="momHoldMin" value="10" min="1" max="120" step="1" /></div>
-    </div>
-    <h2>Sell Grid</h2>
-    <div class="info">
-      Сетка SELL-лимитов выше цены. Ловит откат после пампа.
-    </div>
-    <div class="row">
-      <label>Шаг сетки %</label>
-      <input type="number" id="gridStepPct" value="0.25" min="0.05" step="0.05" />
-    </div>
-    <div class="row">
-      <label>Уровней вверх</label>
-      <input type="number" id="gridLevels" value="4" min="1" max="10" step="1" />
-    </div>
-    <div class="row">
-      <label>Тейк %</label>
-      <input type="number" id="tpPct" value="0.30" min="0.1" step="0.05" />
-    </div>
-    <div class="row">
-      <label>Стоп %</label>
-      <input type="number" id="slPct" value="1.0" min="0.2" max="15" step="0.1" />
-    </div>
-    <div class="row">
-      <label>Размер USDT</label>
-      <input type="number" id="orderUsdt" value="20" min="5" step="1" />
-    </div>
-    <div class="row">
-      <label>Интервал цикла (с)</label>
-      <input type="number" id="intervalSec" value="3" min="2" step="1" />
-    </div>
-    <div class="row">
-      <label>Live (реальные ордера)</label>
-      <input type="checkbox" id="liveEnabled" />
-    </div>
-    <div class="row">
-      <label>Maker TP (лимит)</label>
-      <input type="checkbox" id="makerExit" checked />
-    </div>
-    <div class="row">
-      <label>Защита от спайка</label>
-      <input type="checkbox" id="superSpikeProtect" checked />
-    </div>
-    <div class="row">
-      <label>Порог спайка %</label>
-      <input type="number" id="maxSpikePct" value="0.40" min="0.1" step="0.05" />
-    </div>
-    <div class="row">
-      <label>Фильтр ATR</label>
-      <input type="checkbox" id="volFilter" checked />
-    </div>
-    <div class="row">
-      <label>Мин ATR %</label>
-      <input type="number" id="minAtrPct" value="0.15" min="0.05" step="0.05" />
-    </div>
-    <div class="row">
-      <label>Макс ATR %</label>
-      <input type="number" id="maxAtrPct" value="4" min="0.5" step="0.1" />
-    </div>
+    <h2>Выход</h2>
+    <div class="row"><label>Тейк (движение в плюс), %</label><input type="number" id="take" min="0.1" step="0.1" /></div>
 
-
-    <h2>Автопилот 24/7</h2>
-    <div class="row">
-      <label>Автопилот (сам ищет цели)</label>
-      <input type="checkbox" id="autopilot" />
-    </div>
-    <div class="row">
-      <label>Скан каждые (мин)</label>
-      <input type="number" id="autoScanMin" value="5" min="1" step="1" />
-    </div>
-    <div class="row">
-      <label>Что искать</label>
-      <select id="autoScanMode"><option value="pump">Пампы под Short</option><option value="ultra">Ультра-волатильные 1m</option></select>
-    </div>
-
-    <button class="btn btn-start" id="startBtn">▶ Старт</button>
-    <button class="btn btn-stop" id="stopBtn">■ Стоп</button>
-    <button class="btn btn-once" id="onceBtn">1 цикл</button>
-
-    <div class="stats">
-      <div class="row"><span>Режим</span><span class="val" id="modeStatusText" style="color:var(--muted)">Обычный</span></div>
-      <div class="row"><span>Mid</span><span class="val" id="midText">—</span></div>
-      <div class="row"><span>ATR %</span><span class="val" id="atrText">—</span></div>
-      <div class="row"><span>RSI(14)</span><span class="val" id="rsiText">—</span></div>
-      <div class="row"><span>Спайк</span><span class="val" id="spikeText">OK</span></div>
-      <div class="row"><span>OI тренд</span><span class="val" id="oiTrendText">—</span></div>
-      <div class="row"><span>CVD тренд</span><span class="val" id="cvdTrendText">—</span></div>
-      <div class="row"><span>Фильтр Щукина</span><span class="val" id="shukinFilterText">—</span></div>
-      <div class="row"><span>Направление</span><span class="val" id="dirText">—</span></div>
-      <div class="row"><span>Лента 15 с</span><span class="val" id="tapeText">—</span></div>
-      <div class="row"><span>Автопилот</span><span class="val" id="autoText">—</span></div>
-      <div class="row"><span>Циклов</span><span class="val" id="cyclesText">0</span></div>
-    </div>
-    </div>
+    <button class="btn start" id="startBtn">▶ СТАРТ</button>
+    <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять сетки и доборы)</button>
+    <div class="note">Только лимитные заявки. <b>Выход только в плюс</b>: одна лимитка BUY reduce-only на всю позицию на −тейк% от средней. <b>В минус не выходит никогда</b> — стопа нет. Пока позиции нет — сетка SELL с шагом «шаг сетки» за ценой (с опозданием). Шорт открыт — сетка входа снимается, вместо неё доборы каждые «добор, %» выше последнего исполненного SELL; после каждого добора тейк переставляется от новой средней.</div>
+    <button class="btn sec" id="resetBtn">Сбросить статистику</button>
+    <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD. После перезапуска сервера бот продолжает сам.</div>
   </aside>
 
-  <main class="main">
-    <div class="watch-section">
-      <div class="watch-head">
-        <h3>Активные на бирже (позиции + заявки)</h3>
-        <button class="btn btn-sec" id="syncWatchBtn" style="width:auto;margin:0;padding:6px 12px;">↻ Синхр. с биржи</button>
-      </div>
-      <div class="watch-grid" id="watchGrid">
-        <div class="watch-empty" id="watchEmpty">Нет активных. После ордеров/позиций или «Синхр. с биржи» появятся карточки с мини-графиками. При старте бота всё подтягивается автоматически.</div>
-      </div>
+  <section class="main">
+    <div class="panel">
+      <div class="stats" id="stats"></div>
+      <div class="tbl"><table>
+        <thead><tr><th>Монета</th><th>Диап. 1m</th><th>Цена</th><th>Якорь (−1 мин)</th><th>Сетка SELL / доборы</th><th>Позиция</th><th>Средняя → тейк</th><th>uPnL</th><th>Тейков</th></tr></thead>
+        <tbody id="coinsBody"><tr><td colspan="9" class="mut">Нажмите «СТАРТ»</td></tr></tbody>
+      </table></div>
     </div>
-
-    <div class="ai-panel">
-      <div class="ai-head"><b>🧠 Как AI (fal) принимает решения</b><span id="aiUpd" style="font-size:.72rem;color:var(--muted)"></span></div>
-      <div class="ai-stats" id="aiStats">решений ещё нет — появятся после запуска автопилота</div>
-      <div class="ai-legend">
-        <span><i style="background:#a855f7"></i>итог решений AI, USDT (сделки + открытые позиции)</span>
-        <span><i style="background:#0ecb81"></i>закрытые сделки, USDT</span>
-        <span><i style="background:#f0b90b"></i>баланс счёта (левая шкала)</span>
-        <span><i style="background:#2ea6ff"></i>удачных из последних 10, %</span>
-        <span>▮ результат каждого решения · ● решение: <b style="color:#0ecb81">в плюс</b> / <b style="color:#f6465d">в минус</b> / <b style="color:#848e9c">0</b>; «→XXX» — смена монеты</span>
-      </div>
-      <div id="aiChart"></div>
-      <div class="ai-list" id="aiList"></div>
+    <div class="panel">
+      <h2>Кандидаты: волатильность последней минуты</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>Монета</th><th>Диапазон прошлой 1m</th><th>Диапазон текущей 1m</th><th>Ход за 1 мин</th><th>Оборот 24ч</th></tr></thead>
+        <tbody id="candBody"><tr><td colspan="5" class="mut">—</td></tr></tbody>
+      </table></div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <span style="color:var(--muted);font-size:0.85rem;">Позиция (выбранная)</span>
-      <button class="btn btn-sec" id="refreshPosBtn" style="width:auto;margin:0;padding:6px 12px;">Обновить</button>
-      <button class="btn btn-sec" id="closePosBtn" style="width:auto;margin:0;padding:6px 12px;color:var(--red);">Закрыть (лимит)</button>
+    <div class="panel">
+      <h2>Лог</h2>
+      <div class="log" id="log"></div>
     </div>
-    <div class="pos-card" id="posCard">
-      <div><div class="k">Side</div><div class="v" id="posSide">FLAT</div></div>
-      <div><div class="k">Size</div><div class="v" id="posSize">—</div></div>
-      <div><div class="k">Entry</div><div class="v" id="posEntry">—</div></div>
-      <div><div class="k">uPnL</div><div class="v" id="posUpnl">—</div></div>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--muted)"><span>Линии — реальные ордера на бирже: <b style="color:#0ecb81">BUY</b> · <b style="color:#f6465d">SELL</b> · <b style="color:#2ea6ff">тейк</b> · <b style="color:#a855f7">выход ⏩</b> · <b style="color:#ff9800">стоп</b> · <b style="color:#f0b90b">средняя</b>; ▲▼ — сделки</span><span id="chartLive" style="color:var(--green)"></span></div>
-    <div id="chart"></div>
-    <div class="sub-charts">
-      <div class="sub-chart-wrap">
-        <div class="sub-chart-label">Объём</div>
-        <div class="sub-chart" id="volChart"></div>
-      </div>
-      <div class="sub-chart-wrap">
-        <div class="sub-chart-label">Открытый интерес (OI)</div>
-        <div class="sub-chart" id="oiChart"></div>
-      </div>
-      <div class="sub-chart-wrap">
-        <div class="sub-chart-label">CVD (кумулятивная дельта объёма)</div>
-        <div class="sub-chart" id="cvdChart"></div>
-      </div>
-    </div>
-  </main>
-</div>
-
-<div class="toast" id="toast">
-  <b id="toastTitle"></b>
-  <div id="toastSub" style="font-size:0.8rem;color:var(--muted)"></div>
+  </section>
 </div>
 
 <script>
-(function () {
-  'use strict';
-  const $ = id => document.getElementById(id);
-  let chartPin = '';
-  let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
-  let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries;
-  const minis = {};
-  const NUMS = ['fastK', 'fastMinPct', 'fastAggr', 'fastSpeed', 'momCap', 'momAdds', 'aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
-  const BOOLS = ['smartOn', 'momIoc', 'aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
+"use strict";
+const $ = (id) => document.getElementById(id);
+const NUMS = ["coins", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
+const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
+let S = null, BUSY = false, DIRTY = false;
 
-  function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
-  function toast(title, sub, ok) { const el = $('toast'); $('toastTitle').textContent = title; $('toastSub').textContent = sub || ''; el.className = 'toast show ' + (ok ? 'ok' : 'err'); setTimeout(() => el.classList.remove('show'), 2800); }
-  function setConn(ok, text) { const b = $('connBadge'); b.textContent = '● ' + (text || (ok ? 'OK' : 'ERR')); b.className = 'badge ' + (ok === true ? 'on' : ok === false ? 'err' : ''); }
-  const esc = (x) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function readCfg() { const o = {}; for (const k of NUMS) { const v = parseFloat($(k).value); if (Number.isFinite(v)) o[k] = v; } o.live = $("live").checked; return o; }
+function fillCfg(c) {
+  if (DIRTY || BUSY) return;
+  const a = document.activeElement;
+  for (const k of NUMS) if ($(k) !== a) $(k).value = c[k];
+  $("live").checked = !!c.live;
+}
+async function act(what, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const cfg = readCfg();   // read before anything re-draws the form
+  BUSY = true; DIRTY = true; render();
+  const r = await fetch("/api/act", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ what, cfg }) }).then(r => r.json()).catch(() => ({ error: "нет связи с сервером" }));
+  BUSY = false; DIRTY = false;
+  if (r.error) alert(r.error); else if (r.text && what !== "save") toast(r.text);
+  await load();
+}
+function toast(t) { const d = document.createElement("div"); d.textContent = t; d.style.cssText = "position:fixed;right:16px;bottom:16px;background:#12161c;border:1px solid #2b3139;border-radius:8px;padding:10px 14px;z-index:9;max-width:360px"; document.body.appendChild(d); setTimeout(() => d.remove(), 4000); }
 
-  // ---------- settings: page <-> server ----------
-  function readForm() {
-    return { maxDailyLoss: parseFloat($('maxDailyLoss').value) };   // everything else is run by the AI
-  }
-  function fillForm(P) {
-    if (DIRTY) return;
-    const act = document.activeElement;
-    for (const k of NUMS) if ($(k) !== act) $(k).value = P[k];
-    for (const k of BOOLS) $(k).checked = !!P[k];
-    if ($('symbol') !== act) $('symbol').value = P.symbol;
-    $('interval').value = P.interval; $('category').value = P.category; if ($('autoScanMode') !== act) $('autoScanMode').value = P.autoScanMode || 'pump'; if ($('strategy') !== act) $('strategy').value = P.strategy || 'sell';
-  }
-  document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('input', () => { DIRTY = true; }));
-  document.querySelectorAll('.sidebar input, .sidebar select').forEach(el => el.addEventListener('change', () => { if (el.id !== 'symbol' && el.id !== 'interval') act('save'); }));
+function render() {
+  if (!S) return;
+  const B = S.bot, c = B.cfg;
+  fillCfg(c);
+  $("keysInfo").innerHTML = (S.keys ? "✅ ключи Bybit на сервере" : "❌ нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET — работает только симуляция") + " · " + (S.env === "testnet" ? "TESTNET" : "MAINNET")
+    + (S.password ? "" : '<br><span class="warn">⚠ задайте UI_PASSWORD в Railway → Variables, иначе кнопки не работают</span>');
+  $("equity").textContent = S.acc.equity != null ? (+S.acc.equity).toFixed(2) + " (свободно " + (+S.acc.available || 0).toFixed(2) + ")" : (S.acc.err ? "ошибка" : "—");
+  $("modeBadge").textContent = B.live ? "LIVE" : "СИМУЛЯЦИЯ"; $("modeBadge").className = "badge" + (B.live ? " live" : "");
+  $("runBadge").textContent = B.running ? "РАБОТАЕТ 24/7" : "СТОП"; $("runBadge").className = "badge" + (B.running ? " on" : "");
+  $("startBtn").disabled = BUSY || B.running; $("stopBtn").disabled = BUSY || !B.running;
+  $("coinsBody").innerHTML = B.rows.length ? B.rows.map(r => {
+    const p = r.pos;
+    return `<tr><td><b>${esc(r.sym.replace(/USDT$/, ""))}</b>${r.active ? "" : r.held ? ' <span class="mut">(доборы)</span>' : ' <span class="mut">(без сетки)</span>'}</td><td>${r.range ? r.range.toFixed(2) + "%" : "—"}</td><td>${f(r.last)}</td><td>${f(r.anchor)}</td>`
+      + `<td class="grid">${(r.active || r.held) && r.grid.length ? r.grid.map(f).join(" · ") : "—"}</td>`
+      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side === "Sell" ? ' → <span class="up">' + f(r.take) + "</span>" : "") : "—"}</td>`
+      + `<td class="${!p ? "mut" : p.upnl >= 0 ? "up" : "dn"}">${p ? (p.upnl >= 0 ? "+" : "") + (+p.upnl).toFixed(3) : "—"}</td><td>${r.takes}</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу самые волатильные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
+  const st = B.stat;
+  $("stats").innerHTML = `<span>сканов <b>${st.scans}</b></span><span>исполнено SELL <b>${st.fills}</b></span><span>тейков <b class="up">${st.takes}</b></span>`
+    + (B.live ? "" : `<span>PnL симуляции <b class="${st.simPnl >= 0 ? "up" : "dn"}">${st.simPnl >= 0 ? "+" : ""}${(+st.simPnl).toFixed(3)} USDT</b></span>`)
+    + `<span>uPnL позиций <b class="${B.upnl >= 0 ? "up" : "dn"}">${B.upnl >= 0 ? "+" : ""}${(+B.upnl).toFixed(3)}</b></span><span>монет с сеткой <b>${B.rows.filter(r => r.active).length}</b></span>`
+    + (B.nextScan != null ? `<span>скан через <b>${B.nextScan} с</b></span>` : "");
+  $("candBody").innerHTML = B.cand.map(x => `<tr><td><b>${esc(x.sym.replace(/USDT$/, ""))}</b>${x.active ? " 🔥" : ""}</td><td>${x.rPrev.toFixed(2)}%</td><td>${x.rCur.toFixed(2)}%</td>`
+    + `<td class="${x.move >= 0 ? "up" : "dn"}">${x.move >= 0 ? "+" : ""}${x.move.toFixed(2)}%</td><td>${(x.turn / 1e6).toFixed(0)} M$</td></tr>`).join("") || '<tr><td colspan="5" class="mut">—</td></tr>';
+  $("log").innerHTML = B.log.map(([t, m, cls]) => `<div class="${esc(cls)}">[${new Date(t).toLocaleTimeString("ru-RU")}] ${esc(m)}</div>`).join("");
+}
+async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); render(); } catch (e) { /* next tick */ } }
 
-  async function act(what, extra, confirmText) {
-    if (confirmText && !confirm(confirmText)) return '';
-    BUSY = true;
-    const body = Object.assign({ what, o: readForm() }, extra || {});
-    const r = await fetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({ error: 'нет связи с сервером' }));
-    BUSY = false; DIRTY = false;
-    if (r.error) { toast('Ошибка', r.error, false); } else if (r.text && what !== 'save') toast(what === 'start' ? 'Бот' : 'Готово', r.text, true);
-    await load();
-    return r.text || '';
-  }
-
-  // ---------- charts ----------
-  function subOpts(el) { return { layout: { background: { color: '#12161c' }, textColor: '#848e9c' }, grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } }, rightPriceScale: { borderColor: '#1e2329', scaleMargins: { top: 0.1, bottom: 0.05 } }, timeScale: { borderColor: '#1e2329', timeVisible: true, visible: true }, width: el.clientWidth, height: el.clientHeight || 110 }; }
-  function initChart() {
-    if (!window.LightweightCharts) return;
-    const el = $('chart');
-    chart = LightweightCharts.createChart(el, { layout: { background: { color: '#12161c' }, textColor: '#eaecef' }, grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } }, rightPriceScale: { borderColor: '#1e2329' }, timeScale: { borderColor: '#1e2329', timeVisible: true }, width: el.clientWidth, height: el.clientHeight || 320 });
-    candleSeries = chart.addCandlestickSeries({ upColor: '#0ecb81', downColor: '#f6465d', borderUpColor: '#0ecb81', borderDownColor: '#f6465d', wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
-      // the scale takes in the order lines too (limits at ±3% would be off the screen otherwise); a far stop does not squash the candles
-      autoscaleInfoProvider: (orig) => { const r = orig(); if (!r || !r.priceRange || !scaleLv.length) return r;
-        let lo = r.priceRange.minValue, hi = r.priceRange.maxValue; const mid = (lo + hi) / 2;
-        for (const v of scaleLv) if (Math.abs(v / mid - 1) <= 0.06) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-        return { priceRange: { minValue: lo, maxValue: hi }, margins: r.margins }; } });
-    midSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 1, title: 'Mid' });
-    volChart = LightweightCharts.createChart($('volChart'), subOpts($('volChart'))); volSeries = volChart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '' }); volChart.priceScale('').applyOptions({ scaleMargins: { top: 0.15, bottom: 0 } });
-    oiChart = LightweightCharts.createChart($('oiChart'), subOpts($('oiChart'))); oiSeries = oiChart.addLineSeries({ color: '#a855f7', lineWidth: 2, title: 'OI' });
-    cvdChart = LightweightCharts.createChart($('cvdChart'), subOpts($('cvdChart'))); cvdSeries = cvdChart.addLineSeries({ color: '#06b6d4', lineWidth: 2, title: 'CVD' });
-    const all = [chart, volChart, oiChart, cvdChart];
-    all.forEach(c => c.timeScale().subscribeVisibleLogicalRangeChange(r => { if (!r) return; all.forEach(o => { if (o !== c) { try { o.timeScale().setVisibleLogicalRange(r); } catch (e) {} } }); }));
-    window.addEventListener('resize', resizeAll);
-  }
-  function resizeAll() {
-    if (!chart) return;
-    chart.applyOptions({ width: $('chart').clientWidth, height: $('chart').clientHeight || 320 });
-    [['volChart', volChart], ['oiChart', oiChart], ['cvdChart', cvdChart]].forEach(([id, c]) => c && c.applyOptions({ width: $(id).clientWidth, height: $(id).clientHeight || 110 }));
-  }
-  const uniq = (pts) => { const m = new Map(); for (const p of pts) if (p && isFinite(p.time) && p.time) m.set(p.time, p); return [...m.values()].sort((a, b) => a.time - b.time); };
-  // ---------- real time: Bybit kline stream straight into the chart (every price change) ----------
-  let ws = null, wsTopic = '', wsUrl = '', wsPing = null, cvdBase = 0, cvdT = 0, lastWs = 0;
-  function wsConnect() {
-    if (!S || !S.ws) return;
-    if (ws && wsUrl === S.ws && ws.readyState <= 1) return;
-    try { if (ws) ws.close(); } catch (e) {}
-    wsUrl = S.ws; wsTopic = '';
-    try { ws = new WebSocket(wsUrl); } catch (e) { return; }
-    ws.onopen = () => { wsTopic = ''; wsSub(); clearInterval(wsPing); wsPing = setInterval(() => { try { ws.send(JSON.stringify({ op: 'ping' })); } catch (e) {} }, 20000); };
-    ws.onmessage = (m) => { let j; try { j = JSON.parse(m.data); } catch (e) { return; } if (j.topic && j.topic === wsTopic && Array.isArray(j.data)) j.data.forEach(onKline); };
-    ws.onclose = () => { clearInterval(wsPing); setTimeout(wsConnect, 2000); };
-    ws.onerror = () => {};
-  }
-  function wsSub() {
-    if (!ws || ws.readyState !== 1 || !chartSym) return;
-    const t = `kline.${chartIv}.${chartSym}`; if (t === wsTopic) return;
-    if (wsTopic) ws.send(JSON.stringify({ op: 'unsubscribe', args: [wsTopic] }));
-    ws.send(JSON.stringify({ op: 'subscribe', args: [t] })); wsTopic = t;
-  }
-  function onKline(k) {
-    if (!candleSeries) return;
-    const bar = { time: Math.floor(Number(k.start) / 1000), open: +k.open, high: +k.high, low: +k.low, close: +k.close, volume: +k.volume || 0 };
-    const have = candleSeries.data(), lastT = have.length ? have[have.length - 1].time : 0;
-    if (!bar.time || bar.time < lastT) return;
-    if (bar.time > cvdT) { const cv = cvdSeries.data(); cvdBase = cv.length ? cv[cv.length - 1].value : 0; cvdT = bar.time; }
-    try { candleSeries.update(bar); volSeries.update({ time: bar.time, value: bar.volume, color: bar.close >= bar.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update({ time: bar.time, value: cvdBase + (bar.close >= bar.open ? bar.volume : -bar.volume) }); } catch (e) {}
-    lastWs = Date.now(); $('chartLive').textContent = '● LIVE ' + new Date().toLocaleTimeString('ru-RU') + ' · ' + bar.close;
-  }
-
-  // every 5 s: the last candles, OI and the filter are updated in place (the zoom stays)
-  let liveBusy = false;
-  async function liveChart() {
-    if (liveBusy || !chart || !chartSym) return; liveBusy = true;
-    try {
-      const r = await fetch(`/api/chart?symbol=${encodeURIComponent(chartSym)}&interval=${chartIv}`).then(r => r.json());
-      if (r.error || r.symbol !== chartSym) return;
-      const c = uniq(r.candles || []); if (!c.length) return;
-      const have = candleSeries.data(), lastT = have.length ? have[have.length - 1].time : 0;
-      if (c[c.length - 1].time - lastT > 3 * 3600) return loadChart(true);
-      let cum = 0; const cvd = c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; });
-      if (Date.now() - lastWs > 10000) for (let i = 0; i < c.length; i++) { const x = c[i]; if (x.time < lastT - 120) continue;
-        candleSeries.update(x); volSeries.update({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' }); cvdSeries.update(cvd[i]); }
-      const oi = uniq(r.oi || []); if (oi.length) oiSeries.setData(oi);
-      drawFills(r.fills);
-      if (r.sig) showSig(r.sig);
-      if (Date.now() - lastWs > 10000) $('chartLive').textContent = '● обновлено ' + new Date().toLocaleTimeString('ru-RU');
-    } catch (e) { /* next tick */ } finally { liveBusy = false; }
-  }
-  // price precision for the coin: 60000 -> 2 decimals, 0.05 -> 6, 0.00001 -> 8 (otherwise a cheap coin looks flat)
-  let PF = { type: 'price', precision: 2, minMove: 0.01 };
-  function priceFormatFor(px) {
-    const a = Math.abs(px || 0), d = a >= 1000 ? 2 : a >= 10 ? 3 : a >= 1 ? 4 : a >= 0.1 ? 5 : a >= 0.01 ? 6 : a >= 0.001 ? 7 : 8;
-    return { type: 'price', precision: d, minMove: +Math.pow(10, -d).toFixed(d) };
-  }
-  // the levels are price lines of the candle series: only re-drawn when something changed (no flicker, the scale stays)
-  let pLines = [], pKey = '', scaleLv = [];
-  function clearLevels() { pLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch (e) {} }); pLines = []; pKey = ''; scaleLv = []; try { midSeries.setData([]); } catch (e) {} try { candleSeries.setMarkers([]); } catch (e) {} }
-  // points: the account's fills on the candles (▲ buy / ▼ sell)
-  function drawFills(fl) {
-    if (!candleSeries) return;
-    const d = candleSeries.data(); if (!d.length) return;
-    const iv = (Number(chartIv) || 1) * 60, t0 = d[0].time, tl = d[d.length - 1].time;
-    const m = (fl || []).map(f => ({ t: Math.floor(f.t / 1000 / iv) * iv, f })).filter(x => x.t >= t0 && x.t <= tl).sort((a, b) => a.t - b.t)
-      .map(({ t, f }) => ({ time: t, position: f.side > 0 ? 'belowBar' : 'aboveBar', color: f.side > 0 ? '#0ecb81' : '#f6465d', shape: f.side > 0 ? 'arrowUp' : 'arrowDown', text: (f.side > 0 ? 'B ' : 'S ') + f.px }));
-    try { candleSeries.setMarkers(m); } catch (e) {}
-  }
-    async function loadChart(force) {
-    const sym = ($('symbol').value || '').toUpperCase().trim(), iv = $('interval').value;
-    if (!sym || !chart) return;
-    if (!force && sym === chartSym && iv === chartIv) return;
-    const my = ++loadId; setConn(null, 'загрузка ' + sym + '…');
-    const r = await fetch(`/api/chart?symbol=${encodeURIComponent(sym)}&interval=${iv}`).then(r => r.json()).catch(e => ({ error: e.message }));
-    if (my !== loadId) return;
-    if (r.error) { setConn(false, 'ошибка'); toast('График', r.error, false); return; }
-    const c = uniq(r.candles || []);
-    if (sym !== chartSym) { clearLevels(); try { candleSeries.setData([]); } catch (e) {} }   // the old coin's lines and prices must not stretch the scale
-    chartSym = sym; chartIv = iv;
-    PF = priceFormatFor(c.length ? c[c.length - 1].close : 0);
-    candleSeries.applyOptions({ priceFormat: PF }); midSeries.applyOptions({ priceFormat: PF });
-    chart.priceScale('right').applyOptions({ autoScale: true });
-    candleSeries.setData(c);
-    volSeries.setData(c.map(x => ({ time: x.time, value: x.volume || 0, color: x.close >= x.open ? 'rgba(14,203,129,0.55)' : 'rgba(246,70,93,0.55)' })));
-    let cum = 0; const cvdArr = c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }); cvdSeries.setData(cvdArr);
-    const lb = c[c.length - 1]; cvdT = lb ? lb.time : 0; cvdBase = cvdArr.length > 1 ? cvdArr[cvdArr.length - 2].value : 0;
-    oiSeries.setData(uniq(r.oi || []));
-    wsConnect(); wsSub();
-    resizeAll(); [chart, volChart, oiChart, cvdChart].forEach(x => { try { x.timeScale().fitContent(); } catch (e) {} });
-    if (r.sig) showSig(r.sig);
-    drawFills(r.fills); pKey = ''; if (S && S.sg) drawLevels(S.sg.watches.find(x => x.symbol === chartSym));
-    setConn(true, 'OK');
-  }
-  const KIND = { entry: '', tp: 'Тейк ', close: '⏩ Выход ', sl: 'Стоп ', other: '', plan: '' };
-  function drawLevels(w) {
-    if (!chart || !candleSeries) return;
-    const L = [];
-    if (w && w.symbol === chartSym) {
-      const src = w.open ? w.open : (w.levels || (w.targets || []).map(px => ({ px, side: w.side > 0 ? 1 : -1 }))).map(x => ({ px: x.px, side: x.side, kind: 'plan' }));
-      src.forEach(o => { if (!(o.px > 0)) return; const buy = o.side > 0;
-        L.push({ px: o.px, color: o.kind === 'sl' ? '#ff9800' : o.kind === 'close' ? '#a855f7' : o.kind === 'tp' ? '#2ea6ff' : buy ? '#0ecb81' : '#f6465d', style: o.kind === 'plan' ? 3 : 2, title: (KIND[o.kind] || '') + (buy ? 'Buy' : 'Sell') + (o.kind === 'plan' ? ' (план)' : '') }); });
-      if (w.sl && !src.some(o => o.kind === 'sl')) L.push({ px: w.sl, color: '#ff9800', style: 2, title: 'Стоп (лимит)' });
-      if (w.pos && w.pos.size > 0 && w.pos.avgPrice) L.push({ px: w.pos.avgPrice, color: '#f0b90b', style: 0, title: 'Средняя ' + (w.pos.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ') });
-    }
-    const key = JSON.stringify(L);
-    if (key === pKey) return;
-    pLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch (e) {} });
-    pKey = key; scaleLv = L.map(x => x.px);
-    pLines = L.map(x => candleSeries.createPriceLine({ price: x.px, color: x.color, lineWidth: x.style === 0 ? 2 : 1, lineStyle: x.style, axisLabelVisible: true, title: x.title }));
-    try { chart.priceScale('right').applyOptions({ autoScale: true }); } catch (e) {}
-  }
-  function showSig(sig) {
-    $('oiTrendText').textContent = sig.oiTrend + (sig.oiChangePct ? ' (' + Number(sig.oiChangePct).toFixed(1) + '%)' : '');
-    $('oiTrendText').style.color = sig.oiTrend === 'растёт' ? 'var(--green)' : sig.oiTrend === 'падает' ? 'var(--red)' : 'var(--muted)';
-    $('cvdTrendText').textContent = sig.cvdTrend;
-    $('cvdTrendText').style.color = sig.cvdTrend === 'покупки' ? 'var(--green)' : sig.cvdTrend === 'продажи' ? 'var(--red)' : 'var(--muted)';
-    const f = $('shukinFilterText');
-    if (!S || !S.sg.params.shukinMode) { f.textContent = 'выкл'; f.style.color = 'var(--muted)'; }
-    else if (sig.allowShort) { f.textContent = 'ШОРТ ОК ' + sig.reason; f.style.color = 'var(--green)'; }
-    else { f.textContent = 'ЖДАТЬ: ' + sig.reason; f.style.color = 'var(--yellow)'; }
-  }
-
-  // ---------- render from the server state ----------
-  function render() {
-    if (!S) return;
-    const G = S.sg, P = G.params;
-    fillForm(P);
-    $('keysInfo').innerHTML = (S.keys ? '✅ Ключи Bybit на сервере' : '❌ Нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET') + ' · ' + (S.env === 'testnet' ? 'TESTNET' : 'MAINNET')
-      + (S.password ? '' : '<br>⚠ Задайте UI_PASSWORD в Railway → Variables, чтобы кнопки работали') + '<br><span style="font-size:.75rem">Бот работает на сервере 24/7 — страницу можно закрыть.</span>';
-    $('equityText').textContent = S.acc.equity != null ? Number(S.acc.equity).toFixed(2) : (S.acc.err ? 'ошибка' : '—');
-    const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
-    if (G.conn) setConn(G.conn.ok, G.conn.text);
-    $('statusText').textContent = G.status;
-    { const on = P.shukinOn !== false, b = $('shukinFilterBtn'); b.textContent = on ? '⚡ Фильтр Щукина: ВКЛ (OI↓ + CVD↓)' : '⚠ Фильтр Щукина: ВЫКЛ (все пампы)'; b.style.color = on ? '#c4b5fd' : 'var(--yellow)'; b.style.borderColor = on ? '#a855f7' : 'var(--yellow)'; b.disabled = BUSY; }
-    const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ'; fb.disabled = BUSY;
-    $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🔥 работает (без AI: нет FAL_KEY)'} · SELL-сетки: <b>${esc((G.fa.syms || []).map(x => x.replace(/USDT$/, '')).join(', ') || 'нет — жду памп с открытым входом')}</b>`
-      + `<br><span style="font-size:10px">скан рынка через ${G.fa.scan ?? '—'} с${G.aiFal ? ' · решение AI через ' + (G.fa.left ?? '—') + ' с' : ''} · до ${P.maxCoins} монет · памп от ${P.pumpMin}%</span>`
-      + ((G.targets || []).filter(t => t.isPump).length ? '<div style="text-align:left;margin-top:4px">' + (G.targets || []).filter(t => t.isPump).slice(0, 8).map(t => `<div style="display:flex;justify-content:space-between;gap:6px;font-size:10.5px" title="${esc(t.why || '')}"><span>${(G.fa.syms || []).includes(t.symbol) ? '🔥' : '·'} <b>${esc(t.symbol.replace(/USDT$/, ''))}</b> памп +${Number(t.pump).toFixed(1)}%, откат ${Number(t.pull).toFixed(1)}%</span><span style="color:${t.gate ? 'var(--green)' : 'var(--muted)'}">${P.shukinOn === false ? 'без фильтра' : t.gate ? 'OI↓ CVD↓ ✓' : 'OI ' + (t.oiChg ?? '—') + '% · CVD ' + (t.cvdPct ?? '—') + '%'}</span></div>`).join('') + '</div>' : '<br><span style="color:var(--muted)">пампов от ' + P.pumpMin + '% сейчас нет</span>')
-      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.skip && G.fa.ai.skip.length ? `<br><span style="font-size:10px">не шортить: ${esc(G.fa.ai.skip.join(', '))}</span>` : '') + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
-    const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
-    $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
-    const info = document.querySelector('#legacy .info:not(#keysInfo)');
-    if (info) info.innerHTML = P.strategy === 'follow' ? 'Для «Автопилота за ценой» используются только «Размер USDT» и фильтр спайка ниже; отступ, тейк, стоп и доборы — в блоке выше.' : P.shukinMode ? '<b style="color:#c4b5fd">Режим Щукина:</b> шорт от пампа, шаг сетки от 1%, тейк от 0.7%, аварийный стоп 10%. Добор частями выше цены.' : 'Сетка SELL-лимитов выше цены. Ловит откат после пампа.';
-    $('startBtn').disabled = BUSY || P.running; $('stopBtn').disabled = BUSY || !P.running;
-    const cw = G.watches.find(x => x.symbol === (P.symbol || '').toUpperCase());
-    const A = G.ai, rs = (r) => r ? `${r.pnl >= 0 ? '+' : ''}${r.pnl}% · ${r.n} сд. · ${r.win}% в +` : '—';
-    if (G.aiBusy) $('aiBtn').textContent = '🧠 Учусь… (секунды)';
-    $('aiInfo').innerHTML = (A ? `<b>${A.applied ? '✅ Применено' : 'ℹ️ Оставлено как есть'}</b> · ${esc(A.sym)} · ${new Date(A.at).toLocaleTimeString('ru-RU')} · ${A.tested} вариантов за ${(A.ms / 1000).toFixed(1)} с · выбрал: ${esc(A.by)}<br>`
-      + (A.best ? `Лучшее: ${esc(A.best.p)}<br>на подборе ${rs(A.best.train)} · <b>на новых данных ${rs(A.best.valid)}</b><br>` : 'Подходящего варианта нет (мало сделок в истории)<br>')
-      + `Было: ${esc(A.current.p)}<br>на новых данных ${rs(A.current.valid)}` + (A.reason ? `<br>🤖 ${esc(A.reason)}` : '') : 'Нажми кнопку — бот за секунды переберёт тысячи настроек на истории монеты и применит лучшие.')
-      + `<br><span style="color:var(--muted)">${G.aiFal ? '🤖 AI fal.ai подключён: выбирает среди проверенных вариантов' : 'AI fal.ai не подключён (FAL_KEY в Railway) — выбирает оптимизатор'}</span>`;
-    const tp1 = cw && cw.tape;
-    $('tapeText').textContent = P.strategy === 'follow' && P.smartOn ? (tp1 ? `${tp1.mv15 >= 0 ? '+' : ''}${tp1.mv15}% · покупки ${Math.round(tp1.buy * 100)}% · ×${tp1.speedX} · порог ${tp1.thr}%` : 'жду сделки…') : 'выкл';
-    $('tapeText').style.color = tp1 && Math.abs(tp1.mv15) >= tp1.thr * 0.5 ? (tp1.mv15 > 0 ? 'var(--green)' : 'var(--red)') : 'var(--muted)';
-    $('bandBox').style.display = P.strategy === 'follow' ? '' : 'none'; $('bandUsdt').textContent = P.orderUsdt;
-    const stp = cw && cw.steps;
-    $('feeInfo').innerHTML = stp ? `Комиссии ${esc(cw.symbol)}: maker ${stp.maker}% · taker ${stp.taker}%<br>Шаг сетки / доборов: <b>${stp.lim}%</b> (${P.feeX}× лимит+лимит)<br>${P.strategy === 'follow' ? `Трейлинг-тейк с <b>${cw.band ? cw.band.tp : stp.mkt}%</b>, отступ ${cw.band ? cw.band.gap : '—'}% (${P.feeX}× лимит+рынок)` : `Тейк: <b>${P.makerExit ? stp.lim : stp.mkt}%</b>`}${P.autoStep ? '' : '<br><span style="color:var(--yellow)">авто выкл — но не меньше ' + P.feeX + '× комиссии</span>'}` : 'Посчитаю после первого цикла';
-    ['gridStepPct', 'tpPct', 'bandTp', 'bandTrailGap'].forEach(id => { if ($(id)) $(id).disabled = !!P.autoStep; });
-    $('dirText').textContent = P.strategy === 'follow' && cw && cw.mom ? `⚡ ${cw.mom.d > 0 ? 'ПАМП ▲' : 'ДАМП ▼'} ${cw.mom.mv}% — по движению` : P.strategy !== 'follow' ? 'шорт (Sell Grid)' : cw && cw.dir ? (cw.dir.d > 0 ? '▲ ЛОНГ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : cw.dir.d < 0 ? '▼ ШОРТ' + (P.bandTrail ? ' (трейлинг-тейк)' : ' (тейк лимитом)') : `± ${P.bandPct}% лимитки`) : '—';
-    $('dirText').style.color = P.strategy !== 'follow' ? 'var(--red)' : cw && cw.dir && cw.dir.d > 0 ? 'var(--green)' : cw && cw.dir && cw.dir.d < 0 ? 'var(--red)' : 'var(--muted)';
-    $('dirText').title = cw && cw.dir ? cw.dir.why : '';
-    $('autoText').textContent = !P.autopilot ? 'выкл' : P.running ? `скан через ${G.autoNext ?? '—'} мин (${P.autoScanMode === 'ultra' || P.strategy === 'follow' ? '1m движение' : 'пампы'})` : 'ждёт Старт';
-    $('autoText').style.color = P.autopilot && P.running ? 'var(--green)' : 'var(--muted)';
-    $('cyclesText').textContent = G.cycles; $('tradesText').textContent = G.trades; $('wlText').textContent = G.wins + ' / ' + G.losses;
-    $('dayPnlText').textContent = (G.dayPnl >= 0 ? '+' : '') + Number(G.dayPnl).toFixed(2); $('dayPnlText').style.color = G.dayPnl > 0 ? 'var(--green)' : G.dayPnl < 0 ? 'var(--red)' : '';
-    const cur = (P.symbol || '').toUpperCase(), w = G.watches.find(x => x.symbol === cur);
-    if (w) {
-      $('midText').textContent = fmt(w.mid);
-      $('spikeText').textContent = w.isSpike ? 'SPIKE!' : 'OK'; $('spikeText').style.color = w.isSpike ? 'var(--red)' : 'var(--green)';
-      $('atrText').textContent = w.atrPct != null ? (w.atrPct * 100).toFixed(3) + '%' : '—';
-      $('rsiText').textContent = w.rsi != null ? w.rsi.toFixed(1) : '—';
-      const p = w.pos || {}; $('posSide').textContent = p.size ? p.side : 'FLAT'; $('posSize').textContent = p.size ? fmt(p.size) : '—'; $('posEntry').textContent = p.size ? fmt(p.avgPrice) : '—';
-      const up = p.unrealisedPnl || 0; $('posUpnl').textContent = p.size ? (up >= 0 ? '+' : '') + up.toFixed(3) : '—'; $('posUpnl').className = 'v ' + (up > 0 ? 'pos' : up < 0 ? 'neg' : '');
-      if (w.sig) showSig(w.sig);
-    }
-    if (G.shukin) showSig(G.shukin);
-    drawLevels(G.watches.find(x => x.symbol === chartSym));   // the levels of the coin that is on the chart (none -> no lines)
-    // log
-    $('log').innerHTML = G.log.map(l => `<div style="color:${l[2] === 'ok' ? 'var(--green)' : l[2] === 'err' ? 'var(--red)' : 'var(--muted)'}">[${new Date(l[0]).toLocaleTimeString('ru-RU')}] ${esc(l[1])}</div>`).join('') || 'Лог пуст';
-    renderTargets(G.targets, cur);
-    renderWatches(G.watches, cur);
-  }
-  function renderTargets(list, cur) {
-    const box = $('targetsList');
-    if (!list || !list.length) { box.innerHTML = '<div class="targets-empty">Нажми «Найти пампы» или «ультра-волатильные 1m»</div>'; return; }
-    box.innerHTML = list.map(t => { const chg = parseFloat(t.chg) || 0, vol = t.range1m != null ? '1m ±' + Number(t.range1m).toFixed(2) + '%' : (t.rsi != null ? 'RSI ' + Number(t.rsi).toFixed(0) : '—');
-      return `<div class="target-item${t.symbol === cur ? ' active' : ''}" data-sym="${esc(t.symbol)}" data-tf="${esc(t.tf || '')}"><span class="sym">${esc(t.symbol.replace(/USDT$/, ''))}</span><div class="meta"><span class="chg ${chg >= 0 ? 'up' : 'dn'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span><span class="rsi">${vol}</span></div></div>`; }).join('');
-    box.querySelectorAll('.target-item').forEach(el => el.onclick = () => pick(el.getAttribute('data-sym'), el.getAttribute('data-tf')));
-  }
-  function renderWatches(ws, cur) {
-    const grid = $('watchGrid');
-    if (!ws.length) { grid.innerHTML = '<div class="watch-empty">Нет активных. После ордеров/позиций или «Синхр. с биржи» появятся карточки. При старте бота всё подтягивается автоматически.</div>'; return; }
-    const sig = JSON.stringify(ws.map(w => [w.symbol, w.symbol === cur, w.isSpike, w.pos && w.pos.size, w.ourOrders, w.orders, w.status, w.mid && +w.mid.toPrecision(6), w.rsi && Math.round(w.rsi), w.pos && w.pos.unrealisedPnl && +w.pos.unrealisedPnl.toFixed(2)]));
-    if (grid.dataset.sig === sig) return; grid.dataset.sig = sig;
-    grid.innerHTML = ws.map(w => {
-      let badge = '<span class="wc-badge">idle</span>';
-      if (w.pos && w.pos.size > 0) badge = w.pos.side === 'Sell' ? '<span class="wc-badge pos">SHORT</span>' : '<span class="wc-badge ok">LONG</span>'; else if (w.ourOrders > 0) badge = `<span class="wc-badge ord">${w.ourOrders} ord</span>`; else if (w.orders > 0) badge = `<span class="wc-badge">${w.orders} ord</span>`;
-      if (w.isSpike) badge += ' <span class="wc-badge warn">SPIKE</span>';
-      const up = w.pos && w.pos.size ? w.pos.unrealisedPnl : null;
-      return `<div class="watch-card${w.symbol === cur ? ' active' : ''}${w.isSpike ? ' spike' : ''}" data-sym="${esc(w.symbol)}"><div class="wc-top"><span class="wc-sym">${esc(w.symbol.replace(/USDT$/, ''))}</span><span>${badge}</span></div>
-        <div class="wc-mini">${spark(w.spark)}</div>
-        <div class="wc-meta"><span>Mid <b>${w.mid ? fmt(w.mid) : '—'}</b></span><span>uPnL <b class="${up == null ? '' : up >= 0 ? 'up' : 'dn'}">${up == null ? '—' : (up >= 0 ? '+' : '') + up.toFixed(2)}</b></span><span>RSI <b>${w.rsi != null ? w.rsi.toFixed(0) : '—'}</b></span><span>${esc(w.status || '—')}</span></div></div>`; }).join('');
-    grid.querySelectorAll('.watch-card').forEach(el => el.onclick = () => { chartPin = el.getAttribute('data-sym'); $('symbol').value = chartPin; $('interval').value = '1'; loadChart(true); });
-  }
-  function spark(a) {
-    if (!a || a.length < 2) return '';
-    const mn = Math.min(...a), mx = Math.max(...a), W = 200, H = 72, X = (i) => i / (a.length - 1) * W, Y = (v) => H - 4 - (mx > mn ? (v - mn) / (mx - mn) : 0.5) * (H - 8);
-    const d = a.map((v, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ');
-    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%"><path d="${d} L${W} ${H} L0 ${H} Z" fill="rgba(246,70,93,0.15)"/><path d="${d}" fill="none" stroke="#f6465d" stroke-width="1.5"/></svg>`;
-  }
-  async function pick(sym, tf) {
-    if (!sym) return; $('symbol').value = sym; if (tf) $('interval').value = tf;
-    await act('save'); loadChart(true);
-  }
-
-  async function load() {
-    try { S = await fetch('/api/state', { cache: 'no-store' }).then(r => r.json()); render(); }
-    catch (e) { setConn(false, 'нет связи с сервером'); }
-  }
-
-  // ---------- wire ----------
-  initChart();
-  $('saveKeysBtn').onclick = () => act('save').then(() => toast('Сохранено', 'Настройки на сервере', true));
-  $('testConnBtn').onclick = () => act('test');
-  $('clearTargetsBtn').onclick = () => act('clearTargets');
-  $('scanBtn').onclick = async () => { const b = $('scanBtn'); b.disabled = true; b.textContent = '⏳ Поиск…'; await act('scan'); b.disabled = false; b.textContent = '🔍 Найти пампы под Short'; loadChart(true); };
-  $('ultraVolBtn').onclick = async () => { const b = $('ultraVolBtn'); b.disabled = true; b.textContent = '⏳ 1m скан…'; await act('ultra'); b.disabled = false; b.textContent = '⚡ Найти ультра-волатильные (1m сейчас)'; loadChart(true); };
-  $('shukinBtn').onclick = () => act('shukin');
-  $('aiBtn').onclick = async () => { const b = $('aiBtn'); b.disabled = true; b.textContent = '🧠 Учусь… (секунды)'; await act('ai'); b.disabled = false; b.textContent = '🧠 AI: молниеносное обучение и оптимизация'; };
-  $('syncWatchBtn').onclick = () => act('sync');
-  $('symbol').addEventListener('change', () => { $('symbol').value = ($('symbol').value || '').toUpperCase().trim(); act('save').then(() => loadChart(true)); });
-  $('symbol').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('symbol').blur(); } });
-  $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
-  $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
-  $('stopBtn').onclick = () => act('stop');
-  $('shukinFilterBtn').onclick = () => act('shukinFilter', null, (S && S.sg && S.sg.params.shukinOn !== false) ? 'Выключить фильтр Щукина? SELL-сетки будут ставиться на все найденные пампы без проверки падения OI и CVD.' : null);
-  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить автопилот с РЕАЛЬНЫМИ ордерами? Управление полностью у AI (fal.ai): монета, стратегия, все настройки, плечо до x10, размер лота — только лимитками, 24/7. Ваш единственный лимит — стоп-лимит убытка за день.').then(() => loadChart(true));
-  $('onceBtn').onclick = () => act('once');
-  $('refreshPosBtn').onclick = () => act('position');
-  $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
-  // ---------- 🧠 the decision chart ----------
-  let aiC = null, aiCum, aiReal, aiEq, aiRate, aiBar, aiN = -1;
-  function aiInit() {
-    if (aiC || !window.LightweightCharts) return;
-    const el = $('aiChart');
-    aiC = LightweightCharts.createChart(el, { width: el.clientWidth, height: 260, layout: { background: { color: '#0d1117' }, textColor: '#848e9c' },
-      grid: { vertLines: { color: 'rgba(255,255,255,.04)' }, horzLines: { color: 'rgba(255,255,255,.04)' } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b3139' }, rightPriceScale: { borderColor: '#2b3139' }, leftPriceScale: { visible: true, borderColor: '#2b3139' },
-      localization: { timeFormatter: t => new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) } });
-    aiBar = aiC.addHistogramSeries({ priceScaleId: 'res', priceFormat: { type: 'price', precision: 3, minMove: 0.001 }, title: 'решение' });
-    aiC.priceScale('res').applyOptions({ scaleMargins: { top: 0.72, bottom: 0 } });
-    aiRate = aiC.addLineSeries({ priceScaleId: 'rate', color: '#2ea6ff', lineWidth: 2, title: '% удачных', lastValueVisible: true, priceLineVisible: false, priceFormat: { type: 'custom', formatter: v => Math.round(v) + '%' }, autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
-    aiC.priceScale('rate').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.72 } });
-    aiEq = aiC.addLineSeries({ priceScaleId: 'left', color: '#f0b90b', lineWidth: 1, title: 'баланс', priceLineVisible: false });
-    aiReal = aiC.addLineSeries({ color: '#0ecb81', lineWidth: 1, lineStyle: 2, title: 'сделки', priceLineVisible: false, priceFormat: { type: 'price', precision: 3, minMove: 0.001 } });
-    aiCum = aiC.addLineSeries({ color: '#a855f7', lineWidth: 3, title: 'итог AI', priceFormat: { type: 'price', precision: 3, minMove: 0.001 } });
-    new ResizeObserver(() => aiC.applyOptions({ width: el.clientWidth })).observe(el);
-  }
-  const fmtS = (v) => (v >= 0 ? '+' : '') + Number(v).toFixed(3);
-  async function loadAi() {
-    let r; try { r = await fetch('/api/ai', { cache: 'no-store' }).then(r => r.json()); } catch (e) { return; }
-    const J = (r && r.journal) || []; aiInit(); if (!aiC) return;
-    $('aiUpd').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
-    if (!J.length) { $('aiStats').textContent = 'решений ещё нет — появятся после запуска автопилота'; $('aiList').innerHTML = ''; return; }
-    let t0 = 0, cum = 0, real = 0, cumD = [], realD = [], eqD = [], rateD = [], barD = [], mk = [], win = [];
-    J.forEach(x => {
-      let t = Math.floor(x.at / 1000); if (t <= t0) t = t0 + 1; t0 = t;
-      const res = x.res || 0; cum += res; real += x.real || 0;
-      cumD.push({ time: t, value: +cum.toFixed(4) }); realD.push({ time: t, value: +real.toFixed(4) });
-      if (x.eq != null) eqD.push({ time: t, value: x.eq });
-      barD.push({ time: t, value: res, color: res > 0 ? 'rgba(14,203,129,.6)' : res < 0 ? 'rgba(246,70,93,.6)' : 'rgba(132,142,156,.4)' });
-      if (!x.live) { win.push(res > 0 ? 1 : 0); if (win.length > 10) win.shift(); rateD.push({ time: t, value: Math.round(win.reduce((a, b) => a + b, 0) / win.length * 100) }); }
-      mk.push({ time: t, position: 'inBar', shape: 'circle', size: x.sw ? 1.4 : 0.8, color: x.live ? '#c4b5fd' : res > 0 ? '#0ecb81' : res < 0 ? '#f6465d' : '#848e9c', text: x.sw ? '→' + String(x.sym || '').replace(/USDT$/, '') : '' });
-    });
-    aiCum.setData(cumD); aiReal.setData(realD); aiEq.setData(eqD); aiRate.setData(rateD); aiBar.setData(barD); aiCum.setMarkers(mk);
-    if (aiN !== J.length) { aiN = J.length; aiC.timeScale().fitContent(); }   // a new decision -> the whole history fits the width
-    // the summary
-    const done = J.filter(x => !x.live), ok = done.filter(x => x.res > 0), bad = done.filter(x => x.res < 0);
-    const grp = (f) => { const g = done.filter(f); return g.length ? `${g.length} · ${Math.round(g.filter(x => x.res > 0).length / g.length * 100)}% в +, ${fmtS(g.reduce((a, x) => a + x.res, 0))}` : '—'; };
-    const best = done.reduce((a, x) => !a || x.res > a.res ? x : a, null), worst = done.reduce((a, x) => !a || x.res < a.res ? x : a, null);
-    $('aiStats').innerHTML = `<span>решений <b>${J.length}</b></span><span>удачных <b style="color:var(--green)">${done.length ? Math.round(ok.length / done.length * 100) : 0}%</b> (${ok.length} / ${bad.length} в −)</span>`
-      + `<span>итог <b style="color:${cum >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtS(cum)} USDT</b></span><span>в среднем <b>${done.length ? fmtS(done.reduce((a, x) => a + x.res, 0) / done.length) : '—'}</b> за решение</span>`
-      + `<span>смена монеты: <b>${grp(x => x.sw)}</b></span><span>остался: <b>${grp(x => !x.sw)}</b></span>`
-      + `<span>AI: <b>${grp(x => x.by === 'ai')}</b></span><span>алгоритм: <b>${grp(x => x.by !== 'ai')}</b></span>`
-      + (best ? `<span>лучшее <b style="color:var(--green)">${fmtS(best.res)}</b> (${esc(String(best.sym).replace(/USDT$/, ''))})</span>` : '') + (worst && worst.res < 0 ? `<span>худшее <b style="color:var(--red)">${fmtS(worst.res)}</b> (${esc(String(worst.sym).replace(/USDT$/, ''))})</span>` : '');
-    $('aiList').innerHTML = J.slice(-30).reverse().map(x => `<div class="ai-row"><span>${new Date(x.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>`
-      + `<span>${x.sw ? '→ ' : '= '}<b>${esc(String(x.sym || '').replace(/USDT$/, ''))}</b>${x.by === 'ai' ? '' : ' <span style="color:var(--muted)">(алг.)</span>'}<br><span style="color:var(--muted)">x${x.lev ?? '—'} · ${x.lot ?? '—'}$</span></span>`
-      + `<span class="r" style="color:${x.res > 0 ? 'var(--green)' : x.res < 0 ? 'var(--red)' : 'var(--muted)'}">${fmtS(x.res || 0)}${x.live ? '<br><span style="font-weight:400;color:#c4b5fd">идёт…</span>' : `<br><span style="font-weight:400;color:var(--muted)">${x.n || 0} сд.</span>`}</span>`
-      + `<span class="w">${esc(x.why || '')}${x.ch && x.ch.length ? `<br><span style="color:#c4b5fd">${esc(x.ch.join(' · '))}</span>` : ''}</span></div>`).join('');
-  }
-  setInterval(loadAi, 15000);
-  load().then(() => { loadChart(true); loadAi(); });
-  setInterval(load, 2000);
-  setInterval(liveChart, 5000);
-  setInterval(() => { if (S) { wsConnect(); wsSub(); } }, 3000);
-  setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { if (chartPin && !(S.sg.watches || []).some(x => x.symbol === chartPin)) chartPin = ''; const s2 = (chartPin || S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
-})();
-
+document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
+$("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
+$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nДо ${c.coins} монет × ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, БЕЗ СТОПА: выход только в плюс, на росте добор каждые ${c.addStep}% (до ${c.maxPos} заявок), плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
+$("stopBtn").onclick = () => act("stop", "Остановить бота? Сетки и доборы снимутся, открытые шорты останутся с тейком на бирже.");
+$("testBtn").onclick = () => act("test");
+$("resetBtn").onclick = () => act("reset", "Сбросить статистику?");
+load(); setInterval(load, 2000);
 </script>
 </body>
 </html>

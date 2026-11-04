@@ -6,18 +6,20 @@
 //  • только лимитные ордера; Live выкл — симуляция по живым ценам.
 "use strict";
 
-const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, addStep: 3, maxPos: 20, live: false };
-const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
+const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 3, maxPos: 20, live: false };
+const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxPos"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
   const now = () => Date.now(), sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
-  const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0 }, lsGet("vg.stat", {}));
+  const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
   const saveStat = () => lsSet("vg.stat", STAT);
   const OURS = new Set(lsGet("vg.syms", []));          // coins this bot traded: their shorts get the take and the adds
   const saveOurs = () => lsSet("vg.syms", [...OURS]);
+  const TRAIL = lsGet("vg.trail", {});                 // symbol -> the trailing take of the short { avg, on, best, level, orderId }
+  const saveTrail = () => lsSet("vg.trail", TRAIL);
   const LAST_ADD = lsGet("vg.lastAdd", {});            // symbol -> the price of the last SELL fill (the base of the adds)
   const saveLastAdd = () => lsSet("vg.lastAdd", LAST_ADD);
   let running = !!lsGet("vg.running", false);
@@ -215,6 +217,50 @@ function create(host) {
       log(`${sym}: тейк: ${e.message}`, "err");
     }
   }
+  // the trailing take: the price reached −take % from the average -> it follows the lowest price; a bounce of trailGap % from
+  // the low -> out. The exit is a CONDITIONAL LIMIT on the exchange (trigger = the trail level, rising), never worse than −take %
+  // from the average - always in profit, never market. While the move goes on the level goes down after it (the whole move).
+  async function syncExit(sym, c, i) {
+    if (!CFG.trailOn) return syncTake(sym, c, i);
+    if (c.takeKey !== "trail") {   // a plain take would close at the take level at once - it goes
+      const open = ((await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym })).list || []).filter(o => (o.orderLinkId || "").startsWith("vg_t"));
+      for (const o of open) await cancelOrder(sym, o);
+      c.takeKey = "trail";
+    }
+    const avg = c.pos.avg, act = avg * (1 - CFG.take / 100), p = c.lp || c.last, tick = +i.tick;
+    let t = TRAIL[sym];
+    if (!t || Math.abs(t.avg - avg) > tick / 2) {   // a new short, or an add moved the average: the trailing starts again
+      if (t && t.orderId) await cancelOrder(sym, { orderId: t.orderId });
+      if (t && t.exitId) await cancelOrder(sym, { orderId: t.exitId });
+      t = TRAIL[sym] = { avg, on: false, best: 0, level: 0, orderId: null, exitId: null, qty: 0 }; saveTrail();
+    }
+    if (!p) return;
+    if (!t.on) {
+      if (p > act) return;
+      t.on = true; t.best = p; log(`${sym}: 🎯 трейлинг тейка включён: цена ${fmt(p)} ≤ −${CFG.take}% от средней ${fmt(avg)} — веду за минимумом, откат ${CFG.trailGap}% → выход`, "ok");
+    }
+    if (p < t.best) t.best = p;
+    const level = +rnd(Math.min(t.best * (1 + CFG.trailGap / 100), act), i.tick, "down");
+    const lim = rnd(Math.min(level * 1.001, avg * (1 - CFG.take / 200)), i.tick, "up");   // the limit after the trigger: still in profit
+    const qty = rnd(c.pos.size, i.step, "down");
+    try {
+      if (t.exitId) return;   // the exit limit is already on the book (in profit) - nothing more to do
+      if (p >= level && !t.orderId) {   // bounced before the conditional order was set: one plain limit, in profit (rests at lim)
+        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side: "Buy", orderType: "Limit", qty, price: lim, timeInForce: "GTC", reduceOnly: true, positionIdx: c.pos.idx, orderLinkId: "vg_t" + now() + Math.floor(Math.random() * 1e4) });
+        t.exitId = r.orderId; log(`${sym}: 💰 трейлинг: отскок от минимума ${fmt(t.best)} — выход лимиткой BUY ${qty} @ ${lim} (средняя ${fmt(avg)}, в плюс)`, "ok");
+      } else if (p >= level) {
+        /* the conditional order on the exchange triggers by itself at the level */
+      } else if (!t.orderId) {
+        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side: "Buy", orderType: "Limit", qty, price: lim, triggerPrice: String(level), triggerDirection: 1, triggerBy: "LastPrice", timeInForce: "GTC", reduceOnly: true, positionIdx: c.pos.idx, orderLinkId: "vg_t" + now() + Math.floor(Math.random() * 1e4) });
+        t.orderId = r.orderId; t.level = level; t.qty = qty;
+        log(`${sym}: трейлинг-выход на бирже: при отскоке до ${level} → BUY ${qty} лимитом @ ${lim}`, "info");
+      } else if (level < t.level - tick / 2 || qty !== t.qty) {   // the level only goes down, after the price
+        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: t.orderId, triggerPrice: String(level), price: lim, qty }); t.level = level; t.qty = qty; }
+        catch (e) { t.orderId = null; }   // triggered / gone - set again on the next tick
+      }
+    } catch (e) { log(`${sym}: трейлинг-выход: ${e.message}`, "err"); }
+    saveTrail();
+  }
   async function clearStops(sym, idx) {
     try { const t = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym, orderFilter: "tpslOrder" })).list || [];
       for (const o of t) if (/StopLoss|TrailingStop/i.test(o.stopOrderType || "")) await cancelOrder(sym, o); } catch (e) { /* none */ }
@@ -231,12 +277,14 @@ function create(host) {
       if (p.side !== "Sell" || !OURS.has(sym)) continue;
       const i = await inst(sym);
       if (!c.anchor) c.anchor = c.pos.avg;
-      await syncTake(sym, c, i);
+      await syncExit(sym, c, i);
       if (c.stopKey !== "none") { await clearStops(sym, c.pos.idx); c.stopKey = "none"; log(`${sym}: стопа нет — в минус не выхожу; на росте добор каждые ${CFG.addStep}%, выход только тейком в плюс`, "info"); }
     }
     for (const s of Object.keys(C)) if (!seen.has(s) && C[s].pos) {
       if (C[s].pos.side === "Sell" && C[s].pos.size > 0 && OURS.has(s)) log(`${s}: позиция закрыта`, "info");
-      C[s].pos = null; C[s].stopKey = ""; C[s].takeKey = ""; C[s].lastAdd = 0; delete LAST_ADD[s]; saveLastAdd();
+      if (TRAIL[s] && TRAIL[s].orderId) await cancelOrder(s, { orderId: TRAIL[s].orderId });
+      if (TRAIL[s] && TRAIL[s].exitId) await cancelOrder(s, { orderId: TRAIL[s].exitId });
+      C[s].pos = null; C[s].stopKey = ""; C[s].takeKey = ""; C[s].lastAdd = 0; delete LAST_ADD[s]; saveLastAdd(); delete TRAIL[s]; saveTrail();
       if (!ACTIVE.includes(s)) await dropGrid(s);   // it was kept only for the adds
     }
   }
@@ -246,7 +294,7 @@ function create(host) {
     const t = await pub("/v5/market/tickers", { category: "linear" });
     const px = {}; for (const x of t.list || []) px[x.symbol] = +x.lastPrice;
     for (const s of Object.keys(C)) {
-      const c = C[s], p = px[s]; if (!p) continue; c.last = p;
+      const c = C[s], p = px[s]; if (!p) continue; c.last = p; c.lp = p;
       const i = INST[s]; if (!i) continue;
       const fills = c.sim.fills;
       if (!fills.length) {
@@ -259,18 +307,74 @@ function create(host) {
       if (fills.length) {
         const size = fills.reduce((a, o) => a + o.qty, 0), avg = fills.reduce((a, o) => a + o.px * o.qty, 0) / size, take = avg * (1 - CFG.take / 100);
         c.pos = { side: "Sell", size, avg, upnl: (avg - p) * size, sim: true };
-        if (p <= take) { const pnl = (avg - take) * size - (avg + take) * size * 0.0004; STAT.simPnl += pnl; STAT.takes++; c.takes++; c.sim.fills = []; c.pos = null; log(`[СИМ] ${s}: ✅ тейк @ ${rnd(take, i.tick)} на всю позицию (${fills.length} заявок) PnL +${pnl.toFixed(4)}`, "ok"); }
+        const close = (px, how) => { const pnl = (avg - px) * size - (avg + px) * size * 0.0004; STAT.simPnl += pnl; STAT.takes++; c.takes++; c.sim.fills = []; c.sim.trail = null; c.pos = null; log(`[СИМ] ${s}: ✅ ${how} @ ${rnd(px, i.tick)} на всю позицию (${fills.length} заявок, средняя ${fmt(avg)}) PnL +${pnl.toFixed(4)}`, "ok"); };
+        if (!CFG.trailOn) { if (p <= take) close(take, "тейк"); }
+        else {
+          let t = c.sim.trail; if (!t || Math.abs(t.avg - avg) > +i.tick / 2) t = c.sim.trail = { avg, on: false, best: 0 };
+          if (!t.on && p <= take) { t.on = true; t.best = p; log(`[СИМ] ${s}: 🎯 трейлинг тейка включён @ ${fmt(p)}`, "info"); }
+          if (t.on) {
+            t.best = Math.min(t.best, p); const level = Math.min(t.best * (1 + CFG.trailGap / 100), take); c.pos.trail = level;
+            if (p >= level) close(level, `трейлинг-тейк (минимум ${fmt(t.best)}, откат ${CFG.trailGap}%)`);
+          }
+        }
       } else c.pos = null;
     }
     saveStat();
+  }
+
+  async function lastPrices() {
+    const t = await pub("/v5/market/tickers", { category: "linear" });
+    for (const x of t.list || []) if (C[x.symbol]) C[x.symbol].lp = +x.lastPrice;
+  }
+  // the trailing grid: the price went down from the entry grid -> it follows the price down at once (up only with the 1-min delay)
+  async function trailGrids() {
+    if (!(CFG.gridTrail > 0)) return;
+    for (const s of ACTIVE) {
+      const c = C[s]; if (!c || hasShort(s) || (c.sim && c.sim.fills.length) || !c.anchor) continue;
+      const p = c.lp || c.last; if (!p) continue;
+      if (p < c.anchor * (1 - CFG.gridTrail / 100)) {
+        c.anchor = p;
+        try { await gridFor(s); } catch (e) { log(`${s}: трейлинг сетки: ${e.message}`, "err"); }
+      }
+    }
+  }
+
+  // ---------------- earned since the launch: the closed PnL from Bybit (net of fees) of the bot's coins ----------------
+  let realAt = 0;
+  async function refreshRealized() {
+    if (!STAT.since || now() - realAt < 30000) return; realAt = now();
+    const W = 7 * 864e5 - 60000;
+    if (!STAT.doneUntil) STAT.doneUntil = STAT.since;
+    const sumWin = async (from, to) => {
+      let sum = 0, n = 0, cursor;
+      for (let page = 0; page < 20; page++) {
+        const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", startTime: from, endTime: to, limit: 100, cursor });
+        for (const x of r.list || []) if (OURS.has(x.symbol)) { sum += +x.closedPnl || 0; n++; }
+        cursor = r.nextPageCursor; if (!cursor) break;
+      }
+      return { sum, n };
+    };
+    try {
+      while (now() - STAT.doneUntil > W + 3600e3) {   // whole past windows are summed once
+        const w = await sumWin(STAT.doneUntil, STAT.doneUntil + W);
+        STAT.realDone += w.sum; STAT.closedDone = (STAT.closedDone || 0) + w.n; STAT.doneUntil += W;
+      }
+      const cur = await sumWin(STAT.doneUntil, now());
+      STAT.realized = +(STAT.realDone + cur.sum).toFixed(4); STAT.closed = (STAT.closedDone || 0) + cur.n; saveStat();
+    } catch (e) { log("PnL с запуска: " + e.message, "err"); }
   }
 
   // ---------------- the loops ----------------
   async function fast() {
     if (!running || fastBusy) return; fastBusy = true;
     try {
-      if (isLive()) { const touched = await pollFills(); await pollPositions(); for (const s of touched) { try { await gridFor(s); } catch (e) { log(`${s}: доборы: ${e.message}`, "err"); } } }
-      else await simTick();
+      if (isLive()) {
+        await lastPrices();
+        const touched = await pollFills(); await pollPositions();
+        for (const s of touched) { try { await gridFor(s); } catch (e) { log(`${s}: доборы: ${e.message}`, "err"); } }
+        await trailGrids();
+        await refreshRealized();
+      } else { await simTick(); await trailGrids(); }
     } catch (e) { log("Опрос: " + e.message, "err"); }
     finally { fastBusy = false; }
   }
@@ -287,6 +391,8 @@ function create(host) {
     for (const k of NUMS) if (o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
     CFG.addStep = Math.max(0.5, CFG.addStep || 3); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
+    CFG.trailGap = Math.max(0.05, CFG.trailGap); CFG.gridTrail = Math.max(0, CFG.gridTrail);
+    if (typeof o.trailOn === "boolean" && o.trailOn !== CFG.trailOn) { CFG.trailOn = o.trailOn; ch.push("trailOn"); for (const c of Object.values(C)) c.takeKey = ""; log(CFG.trailOn ? `Трейлинг тейка ВКЛ: от −${CFG.take}% ведётся за минимумом, откат ${CFG.trailGap}% → выход` : `Трейлинг тейка ВЫКЛ: тейк лимиткой −${CFG.take}% от средней`, "info"); }
     CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.usdt = Math.max(1, CFG.usdt);
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: симуляция", CFG.live ? "err" : "info"); for (const c of Object.values(C)) { c.sim.fills = []; c.pos = null; c.lev = false; } }
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
@@ -297,6 +403,7 @@ function create(host) {
   async function start() {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("vg.running", true); execFrom = now() - 60000;
+    if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
     log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: лимитки на ${CFG.budgetPct}% депозита — сетки на столько самых волатильных за 1 мин монет, сколько помещается (до ${CFG.maxCoins}) · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · без стопа (только плюс) · добор каждые ${CFG.addStep}% до ${CFG.maxPos} заявок · плечо x${CFG.lev}`, "ok");
     schedule(); scan().catch(() => {});
     return "Бот запущен — торгует на сервере 24/7";
@@ -310,7 +417,7 @@ function create(host) {
     log("СТОП: сетки и доборы сняты. Открытые шорты остаются с тейком на бирже.", "info");
     return "Остановлен";
   }
-  function resetStats() { Object.assign(STAT, { scans: 0, fills: 0, takes: 0, simPnl: 0 }); saveStat(); return "Статистика сброшена"; }
+  function resetStats() { Object.assign(STAT, { scans: 0, fills: 0, takes: 0, simPnl: 0, since: running ? now() : 0, realized: 0, closed: 0, realDone: 0, closedDone: 0, doneUntil: running ? now() : 0 }); realAt = 0; saveStat(); return "Статистика сброшена — счёт заработка с этого момента"; }
   // one-time: positions / orders of the previous bot of this project are taken over (its orders removed, its shorts get the take and the adds)
   async function adoptOld() {
     if (!keys() || lsGet("vg.adopted", false)) return;
@@ -328,10 +435,13 @@ function create(host) {
   function view() {
     const rows = [...new Set([...ACTIVE, ...Object.keys(C).filter(s => C[s].pos)])].map(s => {
       const c = coin(s);
-      return { sym: s, active: ACTIVE.includes(s), held: hasShort(s), range: c.range, last: c.last, anchor: c.anchor, grid: c.grid, pos: c.pos, take: c.pos ? c.pos.avg * (1 - CFG.take / 100) : null, takes: c.takes };
+      return { sym: s, active: ACTIVE.includes(s), held: hasShort(s), range: c.range, last: c.lp || c.last, anchor: c.anchor, grid: c.grid, pos: c.pos, trail: (TRAIL[s] && TRAIL[s].on) ? { best: TRAIL[s].best, level: TRAIL[s].level } : (c.sim && c.sim.trail && c.sim.trail.on) ? { best: c.sim.trail.best, level: c.pos && c.pos.trail } : null, take: c.pos ? c.pos.avg * (1 - CFG.take / 100) : null, takes: c.takes };
     });
     const upnl = rows.reduce((a, r) => a + (r.pos ? r.pos.upnl : 0), 0);
-    return { bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    const unreal = Object.keys(C).filter(hasShort).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);
+    const realized = isLive() ? STAT.realized || 0 : STAT.simPnl || 0;
+    const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: isLive() ? STAT.closed || 0 : STAT.takes };
+    return { pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();

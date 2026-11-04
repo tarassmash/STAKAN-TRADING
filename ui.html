@@ -38,6 +38,14 @@
   .log { height:300px; overflow-y:auto; font:12px/1.5 ui-monospace,Menlo,monospace; background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:8px; }
   .log .ok { color:var(--green); } .log .err { color:var(--red); } .log .info { color:var(--muted); }
   .grid { font-size:.72rem; color:var(--muted); }
+  .pnl { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  @media (max-width:640px) { .pnl { grid-template-columns:1fr; } }
+  .pnl .box { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .pnl .box.pos { border-color:rgba(14,203,129,.55); background:rgba(14,203,129,.07); }
+  .pnl .box.neg { border-color:rgba(246,70,93,.55); background:rgba(246,70,93,.07); }
+  .pnl .k { font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .pnl .v { font-size:1.9rem; font-weight:800; font-variant-numeric:tabular-nums; line-height:1.2; margin-top:4px; }
+  .pnl .s { font-size:.75rem; color:var(--muted); margin-top:2px; }
   .main { display:flex; flex-direction:column; gap:16px; min-width:0; }
 </style>
 </head>
@@ -72,20 +80,28 @@
     <div class="row"><label>Опоздание сетки, мин</label><input type="number" id="delay" min="1" max="10" step="1" /></div>
 
     <h2>Выход</h2>
-    <div class="row"><label>Тейк (движение в плюс), %</label><input type="number" id="take" min="0.1" step="0.1" /></div>
+    <div class="row"><label>Трейлинг тейка</label><input type="checkbox" id="trailOn" /></div>
+    <div class="row"><label>Откат от минимума → выход, %</label><input type="number" id="trailGap" min="0.05" step="0.05" /></div>
+    <div class="row"><label>Трейлинг сетки вниз, % (0 = выкл)</label><input type="number" id="gridTrail" min="0" step="0.1" /></div>
+    <div class="row"><label>Тейк / старт трейлинга, %</label><input type="number" id="take" min="0.1" step="0.1" /></div>
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять сетки и доборы)</button>
-    <div class="note">Только лимитные заявки. <b>Выход только в плюс</b>: одна лимитка BUY reduce-only на всю позицию на −тейк% от средней. <b>В минус не выходит никогда</b> — стопа нет. Пока позиции нет — сетка SELL с шагом «шаг сетки» за ценой (с опозданием). Шорт открыт — сетка входа снимается, вместо неё доборы каждые «добор, %» выше последнего исполненного SELL; после каждого добора тейк переставляется от новой средней.</div>
+    <div class="note">Только лимитные заявки. <b>Выход только в плюс</b>: на −тейк% от средней включается трейлинг — выход ведётся за минимумом цены и срабатывает на откате (условная лимитка BUY reduce-only на бирже), никогда не хуже −тейк% от средней. <b>В минус не выходит никогда</b> — стопа нет. Пока позиции нет — сетка SELL с шагом «шаг сетки» за ценой (с опозданием). Шорт открыт — сетка входа снимается, вместо неё доборы каждые «добор, %» выше последнего исполненного SELL; после каждого добора тейк переставляется от новой средней.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD. После перезапуска сервера бот продолжает сам.</div>
   </aside>
 
   <section class="main">
+    <div class="pnl">
+      <div class="box" id="pnlRealBox"><div class="k">Заработано с запуска</div><div class="v" id="pnlReal">—</div><div class="s" id="pnlSince">—</div></div>
+      <div class="box" id="pnlUnBox"><div class="k">Нереализованный PnL (открытые шорты)</div><div class="v" id="pnlUn">—</div><div class="s" id="pnlUnSub">—</div></div>
+      <div class="box" id="pnlTotBox"><div class="k">Итого</div><div class="v" id="pnlTot">—</div><div class="s">заработано + нереализованный</div></div>
+    </div>
     <div class="panel">
       <div class="stats" id="stats"></div>
       <div class="tbl"><table>
-        <thead><tr><th>Монета</th><th>Диап. 1m</th><th>Цена</th><th>Якорь (−1 мин)</th><th>Сетка SELL / доборы</th><th>Позиция</th><th>Средняя → тейк</th><th>uPnL</th><th>Тейков</th></tr></thead>
+        <thead><tr><th>Монета</th><th>Диап. 1m</th><th>Цена</th><th>Якорь (−1 мин)</th><th>Сетка SELL / доборы</th><th>Позиция</th><th>Средняя → выход</th><th>uPnL</th><th>Тейков</th></tr></thead>
         <tbody id="coinsBody"><tr><td colspan="9" class="mut">Нажмите «СТАРТ»</td></tr></tbody>
       </table></div>
     </div>
@@ -106,17 +122,17 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
+const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxPos"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
 let S = null, BUSY = false, DIRTY = false;
 
-function readCfg() { const o = {}; for (const k of NUMS) { const v = parseFloat($(k).value); if (Number.isFinite(v)) o[k] = v; } o.live = $("live").checked; return o; }
+function readCfg() { const o = {}; for (const k of NUMS) { const v = parseFloat($(k).value); if (Number.isFinite(v)) o[k] = v; } o.live = $("live").checked; o.trailOn = $("trailOn").checked; return o; }
 function fillCfg(c) {
   if (DIRTY || BUSY) return;
   const a = document.activeElement;
   for (const k of NUMS) if ($(k) !== a) $(k).value = c[k];
-  $("live").checked = !!c.live;
+  $("live").checked = !!c.live; $("trailOn").checked = c.trailOn !== false;
 }
 async function act(what, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
@@ -143,9 +159,14 @@ function render() {
     const p = r.pos;
     return `<tr><td><b>${esc(r.sym.replace(/USDT$/, ""))}</b>${r.active ? "" : r.held ? ' <span class="mut">(доборы)</span>' : ' <span class="mut">(без сетки)</span>'}</td><td>${r.range ? r.range.toFixed(2) + "%" : "—"}</td><td>${f(r.last)}</td><td>${f(r.anchor)}</td>`
       + `<td class="grid">${(r.active || r.held) && r.grid.length ? r.grid.map(f).join(" · ") : "—"}</td>`
-      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side === "Sell" ? ' → <span class="up">' + f(r.take) + "</span>" : "") : "—"}</td>`
+      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side !== "Sell" ? "" : r.trail ? ' → <span class="up">🎯 трейл: мин ' + f(r.trail.best) + ", выход ≤ " + f(r.trail.level) + "</span>" : ' → <span class="up">' + (c.trailOn ? "трейлинг с " : "") + f(r.take) + "</span>") : "—"}</td>`
       + `<td class="${!p ? "mut" : p.upnl >= 0 ? "up" : "dn"}">${p ? (p.upnl >= 0 ? "+" : "") + (+p.upnl).toFixed(3) : "—"}</td><td>${r.takes}</td></tr>`;
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу самые волатильные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
+  { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";
+    const set = (id, v) => { $(id).textContent = money(v); $(id).style.color = v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--text)"; $(id + "Box").className = "box" + (v > 0 ? " pos" : v < 0 ? " neg" : ""); };
+    set("pnlReal", P.realized); set("pnlUn", P.unreal); set("pnlTot", P.total);
+    $("pnlSince").textContent = P.since ? `с ${new Date(P.since).toLocaleString("ru-RU")} · закрыто сделок: ${P.closed}${B.live ? "" : " (симуляция)"}` : "бот ещё не запускался";
+    $("pnlUnSub").textContent = `шортов открыто: ${B.rows.filter(r => r.held).length}`; }
   const st = B.stat;
   $("stats").innerHTML = `<span>сканов <b>${st.scans}</b></span><span>исполнено SELL <b>${st.fills}</b></span><span>тейков <b class="up">${st.takes}</b></span>`
     + (B.live ? "" : `<span>PnL симуляции <b class="${st.simPnl >= 0 ? "up" : "dn"}">${st.simPnl >= 0 ? "+" : ""}${(+st.simPnl).toFixed(3)} USDT</b></span>`)
@@ -159,6 +180,7 @@ function render() {
 async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); render(); } catch (e) { /* next tick */ } }
 
 document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
+$("trailOn").addEventListener("change", () => act("save"));
 $("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
 $("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nЛимитки на ${c.budgetPct}% депозита: сетки на столько монет, сколько помещается (до ${c.maxCoins}), на каждой ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, БЕЗ СТОПА: выход только в плюс, на росте добор каждые ${c.addStep}% (до ${c.maxPos} заявок), плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
 $("stopBtn").onclick = () => act("stop", "Остановить бота? Сетки и доборы снимутся, открытые шорты останутся с тейком на бирже.");

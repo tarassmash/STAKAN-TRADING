@@ -42,10 +42,13 @@ const DEFAULTS = {
   bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
   fullAuto: false,         // 🚀 one button: the grid only on the most volatile coin of the last 1 minute, re-picked every faEveryMin minutes
   faEveryMin: 3,
+  hunt: false,             // 🎯 the impulse hunter (order books + tape of ~25 coins, entries seconds before a pump / dump)
+  hUniverse: 25, hBand: 0.25, hSpeed: 3, hScore: 5, hLate: 0.8, hMaxSpread: 0.12, hSlipTicks: 1,
+  hAct: 0.3, hGap: 0.25, hStop: 0.6, hTimeSec: 30, hChaseSec: 2, hCoolSec: 120, hMax: 2,
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["hUniverse", "hBand", "hSpeed", "hScore", "hLate", "hMaxSpread", "hSlipTicks", "hAct", "hGap", "hStop", "hTimeSec", "hChaseSec", "hCoolSec", "hMax", "chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -166,12 +169,12 @@ function create(host) {
   // (it fills at once at that price, but never worse: it is still a limit), re-placed after the price until the position is 0
   const CH = {};   // symbol -> { why, since, d, onDone }
   const chasing = (symbol) => !!CH[symbol];
-  async function closeChase(symbol, category, why) {
+  async function closeChase(symbol, category, why, opt) {
     symbol = symbol.toUpperCase();
     if (CH[symbol]) return;
     const pos = await getPosition(symbol, category);
     if (!pos.size) return;
-    CH[symbol] = { why: why || "выход", since: now(), side: pos.side };
+    CH[symbol] = { why: why || "выход", since: now(), side: pos.side, aggrSec: opt && opt.aggrSec };
     const w = ensureWatch(symbol); w.closingByBot = true;
     log(`${symbol}: ⏩ выход лимиткой с догонкой (${CH[symbol].why}) — ${pos.side === "Buy" ? "SELL" : "BUY"} ${pos.size} по лучшей цене, без маркета`, "ok");
     await chaseStep(symbol);
@@ -191,10 +194,10 @@ function create(host) {
       }
       const inst = await getInstrument(symbol, category), book = await getOrderBook(symbol, category);
       if (!book.bids.length || !book.asks.length) return;
-      const sell = pos.side === "Buy", aggr = now() - c.since >= Math.max(3, P.chaseAggrSec || 20) * 1000;
+      const sell = pos.side === "Buy", aggr = now() - c.since >= Math.max(c.aggrSec ? 0.5 : 3, c.aggrSec || P.chaseAggrSec || 20) * 1000;
       const px = roundToStep(sell ? (aggr ? book.bids[0] : book.asks[0]) : (aggr ? book.asks[0] : book.bids[0]), inst.tickSize);
       const tif = aggr ? "GTC" : "PostOnly", tick = parseFloat(inst.tickSize);
-      if (aggr && !c.aggrLogged) { c.aggrLogged = true; log(`${symbol}: ⏩ ${P.chaseAggrSec || 20} с без исполнения — лимитка по встречной лучшей цене (всё равно лимит, не маркет)`, "info"); }
+      if (aggr && !c.aggrLogged) { c.aggrLogged = true; log(`${symbol}: ⏩ ${c.aggrSec || P.chaseAggrSec || 20} с без исполнения — лимитка по встречной лучшей цене (всё равно лимит, не маркет)`, "info"); }
       const mine = open.filter(o => o.side === (sell ? "Sell" : "Buy"));
       for (const o of mine.slice(1)) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
       const o = mine[0];
@@ -527,6 +530,7 @@ function create(host) {
     if (P.liveEnabled) { try { const open = await getOpenOrders(symbol, category); w.orders = open.length; w.ourOrders = open.filter(o => (o.orderLinkId || "").startsWith("sg_")).length; w.open = openForChart(open); w.openAt = now(); } catch (e) { /* keep */ } }
     else w.open = null;
     if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
+    if (P.strategy === "impulse") { w.status = HUNT.has(symbol) ? "🎯 импульс" : "🎯 охота"; return; }
     if (P.strategy === "follow") await runFollowCycle(symbol, mid, inst, volOk, isSpike, candles, w);
     else await runSellGridCycle(symbol, mid, inst, volOk, isSpike, candles, w);
   }
@@ -566,7 +570,7 @@ function create(host) {
       results.forEach((r, i) => { if (r.status === "rejected") log(list[i] + ": " + (r.reason && r.reason.message || r.reason), "err"); });
       S.cycles++;
       if (P.running) { const posN = list.filter(s => W[s] && W[s].pos && W[s].pos.size > 0).length, spikes = list.filter(s => W[s] && W[s].isSpike).length;
-        status = (P.fullAuto ? "🚀 ПОЛНЫЙ АВТОПИЛОТ" : P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
+        status = (P.strategy === "impulse" ? "🎯 ОХОТНИК" : P.fullAuto ? "🚀 ПОЛНЫЙ АВТОПИЛОТ" : P.strategy === "follow" ? "RUN АВТОПИЛОТ" : P.shukinMode ? "RUN ЩУКИН" : "RUN GRID") + " · " + list.length + " пар" + (posN ? " · POS×" + posN : "") + (spikes ? " · SPIKE×" + spikes : ""); }
       else status = "ВЫКЛ";
       conn = { ok: true, text: "OK" };
       if (S.cycles % 20 === 0) saveS();
@@ -618,6 +622,23 @@ function create(host) {
     P.symbol = found[0].symbol; save();
     log(`⚡ Ультра 1m: ${found.length} пар. Топ ${found[0].symbol} · 15m-диап ${found[0].range1m.toFixed(2)}% · 5m ${found[0].chg >= 0 ? "+" : ""}${found[0].chg.toFixed(2)}% · ATR ${found[0].atrPct.toFixed(2)}%`, "ok");
     return found.length + " горячих пар";
+  }
+
+  // ---------- 🎯 the impulse hunter ----------
+  const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
+    getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, cancelOurOrders, recordTrade,
+    closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
+    posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },
+    dayStopped: () => (P.maxDailyLoss || 0) > 0 && S.dayPnl <= -Math.abs(P.maxDailyLoss),
+    hasPosition: (s2) => { const w = W[s2]; return !!(w && ((w.pos && w.pos.size > 0) || (w.posEx && w.posEx.size > 0))); } });
+  async function hunt() {
+    if (P.hunt && HUNT.isOn()) { P.hunt = false; HUNT.stop(); P.strategy = "follow"; save(); return await stop(false); }
+    if (P.liveEnabled && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
+    Object.assign(P, { hunt: true, strategy: "impulse", fullAuto: false, autopilot: false, shukinMode: false }); save();
+    if (P.liveEnabled) { const s0 = (P.symbol || "").toUpperCase(); if (s0 && !(W[s0] && W[s0].pos && W[s0].pos.size > 0)) await cancelOurOrders(s0, P.category).catch(() => {}); }
+    HUNT.start();
+    const r = P.running ? "бот уже работает" : await start();
+    return `🎯 Охотник за импульсом запущен${P.liveEnabled ? "" : " (СИМУЛЯЦИЯ — Live выкл)"} — ${r}`;
   }
 
   // ---------- 🚀 full autopilot: the most volatile coin of the LAST 1 MINUTE ----------
@@ -743,6 +764,7 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
   setInterval(() => { faTick().catch(() => {}); }, 5000);
   async function fullAuto() {
     if (!keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
+    if (HUNT.isOn()) { HUNT.stop(); P.hunt = false; }
     Object.assign(P, { fullAuto: true, strategy: "follow", autopilot: false, liveEnabled: true, interval: "1", shukinMode: false, aiAuto: !!host.fal });
     save(); faState().since = 0;
     log(host.fal ? "🧠 Управление отдано AI (fal.ai): монета и все настройки стратегии — каждые " + Math.max(1, P.faEveryMin || 3) + " мин; размер ордера, плечо и дневной лимит убытка — ваши" : "⚠ Нет FAL_KEY в Railway → Variables — автопилот работает без AI (алгоритм: топ-1 по волатильности)", host.fal ? "ok" : "err");
@@ -879,7 +901,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     return "Бот запущен — все позиции под контролем";
   }
   async function stop(cancel) {
-    P.running = false; P.fullAuto = false; save(); schedule(); status = "ВЫКЛ";
+    P.running = false; P.fullAuto = false; if (HUNT.isOn()) HUNT.stop(); P.hunt = false; save(); schedule(); status = "ВЫКЛ";
     if (cancel && P.liveEnabled && keys()) await cancelOurOrders((P.symbol || "").toUpperCase().trim(), P.category);
     log("STOP", "info"); return "Остановлен";
   }
@@ -890,7 +912,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     if (typeof o.symbol === "string" && o.symbol.trim()) { const s = o.symbol.trim().toUpperCase(); if (s !== P.symbol) { P.symbol = s; ch.push("symbol"); } }
     if (["1", "3", "5", "15"].includes(String(o.interval)) && String(o.interval) !== P.interval) { P.interval = String(o.interval); ch.push("interval"); }
     if (["linear", "inverse"].includes(o.category) && o.category !== P.category) { P.category = o.category; ch.push("category"); }
-    if (["sell", "follow"].includes(o.strategy) && o.strategy !== P.strategy) { P.strategy = o.strategy; ch.push("strategy"); }
+    if (["sell", "follow", "impulse"].includes(o.strategy) && o.strategy !== P.strategy) { P.strategy = o.strategy; ch.push("strategy"); }
     if (["pump", "ultra"].includes(o.autoScanMode) && o.autoScanMode !== P.autoScanMode) { P.autoScanMode = o.autoScanMode; ch.push("autoScanMode"); }
     save(); if (ch.includes("intervalSec")) schedule();
     if (ch.includes("liveEnabled")) log(P.liveEnabled ? "⚠ LIVE включён: реальные ордера" : "Live выключен: только симуляция", P.liveEnabled ? "err" : "info");
@@ -910,11 +932,11 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
   function view() {
     ensureDayKey();
     const fa = S.fa || {};
-    return { fa: P.fullAuto && P.running ? { ai: S.faAi || null, sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    return { hunt: HUNT.view(), fa: P.fullAuto && P.running ? { ai: S.faAi || null, sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, hl: HUNT.levels(w.symbol), open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
-  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); }, 3000);
-  return { fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (P.hunt && P.strategy === "impulse") HUNT.start(); }, 3000);
+  return { hunt, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

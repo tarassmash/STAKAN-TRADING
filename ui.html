@@ -79,6 +79,12 @@
   }
   .btn-full { background: linear-gradient(135deg, #0ecb81, #f0b90b); color: #000; font-size: 15px; font-weight: 800; padding: 14px 10px; box-shadow: 0 0 14px rgba(14,203,129,.35); }
   .btn-full.on { background: linear-gradient(135deg, #f6465d, #a855f7); color: #fff; }
+  .btn-hunt { background: linear-gradient(135deg, #f6465d, #f0b90b); color: #000; font-size: 14px; font-weight: 800; padding: 12px 10px; margin-top: 2px; }
+  .btn-hunt.on { background: linear-gradient(135deg, #2b3139, #f6465d); color: #fff; box-shadow: 0 0 14px rgba(246,70,93,.45); }
+  .hunt-box { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; margin: -4px 0 12px; font-size: 11px; }
+  .hunt-box .hrow { display: flex; justify-content: space-between; gap: 6px; padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,.06); cursor: pointer; }
+  .hunt-box .hrow:last-child { border-bottom: 0; }
+  .hunt-box .hwhy { color: var(--muted); font-size: 10px; }
   .fa-note { font-size: 11px; color: var(--muted); margin: -4px 0 12px; text-align: center; }
   .btn-start { background: var(--green); color: #000; }
   .btn-stop { background: #2b3139; color: var(--text); }
@@ -263,6 +269,8 @@
   <aside class="sidebar">
     <button class="btn btn-full" id="fullAutoBtn" title="AI (fal.ai) управляет всем: каждые 3 мин выбирает монету среди самых волатильных за последнюю минуту и настраивает стратегию. Сетка лимиток за последнюю 1 минуту монете. Каждые 3 минуты — новый скан: цели, график и сетка переходят на новый топ">🚀 ЗАПУСК · 100% АВТОПИЛОТ</button>
     <div class="fa-note" id="faText">сетка на самой волатильной монете за 1 мин · каждые 3 мин — новый скан и переход</div>
+    <button class="btn btn-hunt" id="huntBtn" title="Стаканы и лента ~25 монет в реальном времени: ищет признаки пампа/дампа за секунды до взрыва, входит лимиткой и сразу ведёт трейлинг-выход лимиткой. Без перерыва.">🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА</button>
+    <div class="hunt-box" id="huntBox"><span class="hwhy">поиск в стаканах наступающего пампа / дампа → вход лимиткой → трейлинг-выход лимиткой</span></div>
     <h2>Bybit API</h2>
     <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
     <div class="row">
@@ -406,6 +414,15 @@
       <input type="number" id="maxAtrPct" value="4" min="0.5" step="0.1" />
     </div>
 
+    <h2>🎯 Охотник за импульсом</h2>
+    <div class="row"><label title="Сумма баллов сигнала для входа: стакан до 2, сняли ликвидность до 2, лента до 3, цена пошла 1">Оценка для входа (из 8)</label><input type="number" id="hScore" step="1" min="3" max="8" /></div>
+    <div class="row"><label>Трейлинг включается, %</label><input type="number" id="hAct" step="0.05" min="0.1" /></div>
+    <div class="row"><label>Откат от лучшей → выход, %</label><input type="number" id="hGap" step="0.05" min="0.05" /></div>
+    <div class="row"><label>Стоп, %</label><input type="number" id="hStop" step="0.1" min="0.2" /></div>
+    <div class="row"><label>Импульс не пошёл → выход, с</label><input type="number" id="hTimeSec" step="5" min="5" /></div>
+    <div class="row"><label>Сделок одновременно</label><input type="number" id="hMax" step="1" min="1" max="5" /></div>
+    <div class="row"><label>Монет в наблюдении</label><input type="number" id="hUniverse" step="1" min="6" max="40" /></div>
+
     <h2>Автопилот 24/7</h2>
     <div class="row">
       <label>Автопилот (сам ищет цели)</label>
@@ -498,7 +515,7 @@
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries;
   const minis = {};
-  const NUMS = ['fastK', 'fastMinPct', 'fastAggr', 'fastSpeed', 'momCap', 'momAdds', 'aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
+  const NUMS = ['hScore', 'hAct', 'hGap', 'hStop', 'hTimeSec', 'hMax', 'hUniverse', 'fastK', 'fastMinPct', 'fastAggr', 'fastSpeed', 'momCap', 'momAdds', 'aiEveryMin', 'pulsePct', 'pulseSec', 'momSl', 'momHoldMin', 'leverage', 'feeX', 'bandLevels', 'bandTrailGap', 'bandPct', 'bandTp', 'bandSl', 'bandAdds', 'bandRef', 'autoScanMin', 'gridStepPct', 'gridLevels', 'tpPct', 'slPct', 'orderUsdt', 'maxDailyLoss', 'intervalSec', 'maxSpikePct', 'minAtrPct', 'maxAtrPct'];
   const BOOLS = ['smartOn', 'momIoc', 'aiAuto', 'pulseOn', 'autoStep', 'bandTrail', 'autopilot', 'liveEnabled', 'makerExit', 'superSpikeProtect', 'volFilter'];
 
   function fmt(n) { if (n == null || isNaN(n)) return '—'; const a = Math.abs(n); return a >= 1000 ? n.toFixed(2) : a >= 1 ? n.toFixed(4) : a >= 0.01 ? n.toFixed(6) : n.toFixed(8); }
@@ -661,6 +678,7 @@
       src.forEach(o => { if (!(o.px > 0)) return; const buy = o.side > 0;
         L.push({ px: o.px, color: o.kind === 'sl' ? '#ff9800' : o.kind === 'close' ? '#a855f7' : o.kind === 'tp' ? '#2ea6ff' : buy ? '#0ecb81' : '#f6465d', style: o.kind === 'plan' ? 3 : 2, title: (KIND[o.kind] || '') + (buy ? 'Buy' : 'Sell') + (o.kind === 'plan' ? ' (план)' : '') }); });
       if (w.sl && !src.some(o => o.kind === 'sl')) L.push({ px: w.sl, color: '#ff9800', style: 2, title: 'Стоп (лимит)' });
+      if (w.hl) { if (w.hl.trail) L.push({ px: w.hl.trail, color: '#a855f7', style: 2, title: '🎯 трейл-выход' }); else L.push({ px: w.hl.act, color: '#2ea6ff', style: 3, title: '🎯 трейлинг с' }); L.push({ px: w.hl.stop, color: '#ff9800', style: 3, title: '🎯 стоп' }); }
       if (w.pos && w.pos.size > 0 && w.pos.avgPrice) L.push({ px: w.pos.avgPrice, color: '#f0b90b', style: 0, title: 'Средняя ' + (w.pos.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ') });
     }
     const key = JSON.stringify(L);
@@ -692,6 +710,12 @@
     const rb = $('runBadge'); rb.textContent = P.running ? 'RUN' : 'Стоп'; rb.className = 'badge ' + (P.running ? 'on' : '');
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
+    { const Hn = G.hunt || {}, hon = !!(P.hunt && Hn.on), hb = $('huntBtn'); hb.classList.toggle('on', hon); hb.textContent = hon ? '■ СТОП ОХОТНИК' : '🎯 ОХОТНИК: ИМПУЛЬС ИЗ СТАКАНА'; hb.disabled = BUSY;
+      const st = Hn.stats || {};
+      $('huntBox').innerHTML = !hon ? '<span class="hwhy">поиск в стаканах наступающего пампа / дампа → вход лимиткой → трейлинг-выход лимиткой</span>'
+        : `<div class="hwhy">${Hn.up ? '🟢' : '🟡 подключаюсь…'} стаканы ${Hn.coins} монет · сделок ${st.n || 0} (${st.wins || 0}/${st.losses || 0}) · PnL ${(st.pnl || 0) >= 0 ? '+' : ''}${Number(st.pnl || 0).toFixed(3)}${P.liveEnabled ? '' : ' · СИМУЛЯЦИЯ'}</div>`
+        + (Hn.hunts || []).map(x => `<div class="hrow" data-sym="${esc(x.sym)}"><span><b style="color:${x.d > 0 ? 'var(--green)' : 'var(--red)'}">${x.d > 0 ? '▲' : '▼'} ${esc(x.sym.replace(/USDT$/, ''))}</b> ${x.state === 'entering' ? 'вход…' : x.state === 'exiting' ? 'выход ⏩' : x.act ? 'трейлинг' : 'жду импульс'}</span><span style="color:${x.prof >= 0 ? 'var(--green)' : 'var(--red)'}">${x.prof >= 0 ? '+' : ''}${Number(x.prof).toFixed(2)}% · ${x.sec}с</span></div>`).join('')
+        + (Hn.top || []).slice(0, 6).map(a => `<div class="hrow" data-sym="${esc(a.sym)}" title="${esc(a.why)}"><span>${a.d > 0 ? '▲' : '▼'} ${esc(a.sym.replace(/USDT$/, ''))} <span class="hwhy">${esc(a.why || 'тихо')}</span></span><span style="color:${a.score >= (P.hScore || 5) && a.ok ? 'var(--green)' : a.score >= 3 ? 'var(--yellow)' : 'var(--muted)'}"><b>${a.score}</b>/8</span></div>`).join(''); }
     const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🚀 ЗАПУСК · 100% АВТОПИЛОТ'; fb.disabled = BUSY;
     $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🚀 работает (без AI: нет FAL_KEY)'} · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'решение через ' + G.fa.left + ' с' : 'выбираю монету…'}`
       + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'сетка на самой волатильной монете за 1 мин · каждые ' + (P.faEveryMin || 3) + ' мин — новый скан и переход';
@@ -791,6 +815,8 @@
   $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
   $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
   $('stopBtn').onclick = () => act('stop');
+  $('huntBtn').onclick = () => (S && S.sg && S.sg.params.hunt && S.sg.hunt && S.sg.hunt.on) ? act('hunt', null, 'Остановить охотника? Открытые позиции бот доведёт до выхода.') : act('hunt', null, $('liveEnabled').checked ? 'Запустить ОХОТНИКА с РЕАЛЬНЫМИ ордерами? Бот сам ищет в стаканах ~25 монет наступающий памп/дамп, входит лимиткой и ведёт трейлинг-выход лимиткой, без перерыва. Сетки/автопилот выключаются.' : 'Live выключен — охотник запустится в СИМУЛЯЦИИ (без ордеров, только лог и статистика). Запустить?');
+  $('huntBox').addEventListener('click', e => { const r = e.target.closest('[data-sym]'); if (r) pick(r.getAttribute('data-sym'), '1'); });
   $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить 100% автопилот с РЕАЛЬНЫМИ ордерами? Управление отдаётся AI (fal.ai): он сам выбирает монету и настройки стратегии; размер ордера, плечо и дневной лимит убытка остаются вашими. Бот сам выберет самую волатильную за последнюю минуту монету, поставит сетку лимиток и каждые 3 минуты будет пересканировать и переносить сетку на новую самую волатильную. Торгует сервер 24/7.').then(() => loadChart(true));
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');

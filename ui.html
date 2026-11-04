@@ -261,7 +261,7 @@
 
 <div class="layout">
   <aside class="sidebar">
-    <button class="btn btn-full" id="fullAutoBtn" title="Сетка лимиток только на самой волатильной за последнюю 1 минуту монете. Каждые 3 минуты — новый скан: цели, график и сетка переходят на новый топ">🚀 ЗАПУСК · 100% АВТОПИЛОТ</button>
+    <button class="btn btn-full" id="fullAutoBtn" title="AI (fal.ai) управляет всем: каждые 3 мин выбирает монету среди самых волатильных за последнюю минуту и настраивает стратегию. Сетка лимиток за последнюю 1 минуту монете. Каждые 3 минуты — новый скан: цели, график и сетка переходят на новый топ">🚀 ЗАПУСК · 100% АВТОПИЛОТ</button>
     <div class="fa-note" id="faText">сетка на самой волатильной монете за 1 мин · каждые 3 мин — новый скан и переход</div>
     <h2>Bybit API</h2>
     <div class="info" id="keysInfo">Ключи берутся с сервера (Railway → Variables: BYBIT_API_KEY, BYBIT_API_SECRET). Бот работает 24/7 на сервере — страницу можно закрыть.</div>
@@ -693,7 +693,8 @@
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
     const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🚀 ЗАПУСК · 100% АВТОПИЛОТ'; fb.disabled = BUSY;
-    $('faText').innerHTML = fon && G.fa ? `🚀 работает · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'новый скан через ' + G.fa.left + ' с' : 'выбираю монету…'}` : 'сетка на самой волатильной монете за 1 мин · каждые ' + (P.faEveryMin || 3) + ' мин — новый скан и переход';
+    $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🚀 работает (без AI: нет FAL_KEY)'} · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'решение через ' + G.fa.left + ' с' : 'выбираю монету…'}`
+      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'сетка на самой волатильной монете за 1 мин · каждые ' + (P.faEveryMin || 3) + ' мин — новый скан и переход';
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
     const info = document.querySelector('.main ~ .info, .sidebar .info:not(#keysInfo)');
@@ -790,7 +791,7 @@
   $('interval').addEventListener('change', () => act('save').then(() => loadChart(true)));
   $('startBtn').onclick = () => act('start', null, $('liveEnabled').checked ? 'Запустить с РЕАЛЬНЫМИ ордерами (Live)? Бот будет торговать на сервере 24/7, даже если закрыть страницу.' : null);
   $('stopBtn').onclick = () => act('stop');
-  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить 100% автопилот с РЕАЛЬНЫМИ ордерами? Бот сам выберет самую волатильную за последнюю минуту монету, поставит сетку лимиток и каждые 3 минуты будет пересканировать и переносить сетку на новую самую волатильную. Торгует сервер 24/7.').then(() => loadChart(true));
+  $('fullAutoBtn').onclick = () => (S && S.sg && S.sg.params.fullAuto && S.sg.params.running) ? act('stop', null, 'Остановить полный автопилот и снять лимитки?') : act('fullauto', null, 'Запустить 100% автопилот с РЕАЛЬНЫМИ ордерами? Управление отдаётся AI (fal.ai): он сам выбирает монету и настройки стратегии; размер ордера, плечо и дневной лимит убытка остаются вашими. Бот сам выберет самую волатильную за последнюю минуту монету, поставит сетку лимиток и каждые 3 минуты будет пересканировать и переносить сетку на новую самую волатильную. Торгует сервер 24/7.').then(() => loadChart(true));
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');

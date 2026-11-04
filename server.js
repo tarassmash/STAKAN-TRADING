@@ -106,7 +106,7 @@ const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
 const FAL_URL = (process.env.TEST_FAL_URL || process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
 async function fal(prompt) {
   const r = await fetch(FAL_URL, { method: "POST", headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: FAL_MODEL, system_prompt: "You optimise a crypto trading bot. Answer only with one JSON object.", prompt, temperature: 0.2, max_tokens: 400 }), signal: AbortSignal.timeout(60000) });
+    body: JSON.stringify({ model: FAL_MODEL, system_prompt: "You optimise a crypto trading bot. Answer only with one JSON object.", prompt, temperature: 0.2, max_tokens: 900 }), signal: AbortSignal.timeout(60000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || "ошибка"}`);
   const m = String(j.output || "").match(/\{[\s\S]*\}/); if (!m) throw new Error("AI не вернул JSON");

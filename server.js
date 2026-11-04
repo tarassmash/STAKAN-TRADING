@@ -195,7 +195,8 @@ async function retireSqueeze() {
       if (p.state === "open") {
         const r = await bx("/v5/position/list", { query: { category: "linear", symbol: sym }, auth: true });
         for (const x of r.list || []) if (Number(x.size) > 0 && (x.side === "Buy" ? 1 : -1) === p.d)
-          await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: x.side === "Buy" ? "Sell" : "Buy", orderType: "Market", qty: String(x.size), reduceOnly: true, positionIdx: Number(x.positionIdx || 0), timeInForce: "IOC" } });
+          { const ob = await bx("/v5/market/orderbook", { query: { category: "linear", symbol: sym, limit: 1 } }), px = x.side === "Buy" ? (ob.b || [])[0] : (ob.a || [])[0];
+            if (px) await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side: x.side === "Buy" ? "Sell" : "Buy", orderType: "Limit", price: String(px[0]), qty: String(x.size), reduceOnly: true, positionIdx: Number(x.positionIdx || 0), timeInForce: "GTC" } }); }
       }
       log(`retired squeeze bot on ${sym}`);
     } catch (e) { log(`retire ${sym}: ${e.message}`); }

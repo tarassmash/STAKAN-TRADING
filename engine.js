@@ -19,7 +19,9 @@ const DEFAULTS = {
   fastMinPct: 0.35,        // ... and at least this %
   fastAggr: 0.65,          // ... with this share of the volume hitting in one direction
   fastSpeed: 2,            // ... and the tape this many times faster than usual
-  momIoc: true,            // enter with the move at once: an IOC limit no worse than momCap % past the best price
+  momIoc: false,           // NO market / IOC: entries with the move are limits at the best price, chased after the price
+  chaseAggrSec: 20,        // an exit limit (maker, at the own best price) not filled in this many s -> a limit at the opposite best price (still a limit, chased)
+  slLimitPct: 1,           // the stop on the exchange is a LIMIT: it fills no worse than this % past the stop price
   momCap: 0.15,
   momAdds: 2,              // adds while the move goes on
   aiAuto: false,           // 🧠 learn again by itself every aiEveryMin minutes
@@ -43,7 +45,7 @@ const DEFAULTS = {
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -52,6 +54,7 @@ function create(host) {
   const save = () => lsSet("sg.p", P);
   if (!lsGet("sg.v2", false)) { Object.assign(P, { leverage: 10, autoStep: true, feeX: 10, slPct: 10, bandSl: 10, bandPct: 3, bandLevels: 3, bandAdds: 5, gridLevels: 8 }); save(); lsSet("sg.v2", true); }
   if (!lsGet("sg.v3", false)) { P.leverage = 3; Object.assign(P, { pulseOn: true, pulsePct: 1.5, pulseSec: 60, momHoldMin: 10, momSl: 1.5 }); save(); lsSet("sg.v3", true); }
+  if (!lsGet("sg.v5", false)) { P.momIoc = false; save(); lsSet("sg.v5", true); }   // no market / IOC orders anywhere: limits with chasing
   if (!lsGet("sg.v4", false)) { P.faEveryMin = 3; save(); lsSet("sg.v4", true); }   // the full autopilot re-picks the coin every 3 min (was 1)
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
   const saveS = () => lsSet("sg.s", { fa: S.fa, ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
@@ -158,11 +161,69 @@ function create(host) {
       return ours.length;
     } catch (e) { return 0; }
   }
-  async function closeMarket(symbol, category) {
+  // ---------- exits: NO market. A fast limit at the best price, chased after the price every second ----------
+  // first a maker limit (PostOnly) at the own best price; not filled in chaseAggrSec -> a limit at the opposite best price
+  // (it fills at once at that price, but never worse: it is still a limit), re-placed after the price until the position is 0
+  const CH = {};   // symbol -> { why, since, d, onDone }
+  const chasing = (symbol) => !!CH[symbol];
+  async function closeChase(symbol, category, why) {
+    symbol = symbol.toUpperCase();
+    if (CH[symbol]) return;
     const pos = await getPosition(symbol, category);
     if (!pos.size) return;
-    await priv("POST", "/v5/order/create", { category, symbol, side: pos.side === "Buy" ? "Sell" : "Buy", orderType: "Market", qty: String(pos.size), reduceOnly: true, positionIdx: pos.positionIdx, orderLinkId: "sg_close_" + now() });
-    log(`${symbol}: закрыта market`, "ok");
+    CH[symbol] = { why: why || "выход", since: now(), side: pos.side };
+    const w = ensureWatch(symbol); w.closingByBot = true;
+    log(`${symbol}: ⏩ выход лимиткой с догонкой (${CH[symbol].why}) — ${pos.side === "Buy" ? "SELL" : "BUY"} ${pos.size} по лучшей цене, без маркета`, "ok");
+    await chaseStep(symbol);
+  }
+  const closeMarket = (symbol, category, why) => closeChase(symbol, category, why);   // the old name: it is a chased limit now
+  async function chaseStep(symbol) {
+    const c = CH[symbol]; if (!c || c.busy) return; c.busy = true;
+    const category = P.category;
+    try {
+      const pos = await getPosition(symbol, category);
+      const open = (await getOpenOrders(symbol, category)).filter(o => (o.orderLinkId || "").startsWith("sg_cl_"));
+      if (!pos.size || pos.side !== c.side) {
+        for (const o of open) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
+        log(`${symbol}: ✅ закрыто лимиткой (${c.why}) за ${Math.round((now() - c.since) / 1000)} с`, "ok");
+        delete CH[symbol]; const w = W[symbol]; if (w) { w.pos = { side: null, size: 0, avgPrice: 0, unrealisedPnl: 0 }; w.slSet = 0; w.trailSet = null; w.trOn = false; }
+        return;
+      }
+      const inst = await getInstrument(symbol, category), book = await getOrderBook(symbol, category);
+      if (!book.bids.length || !book.asks.length) return;
+      const sell = pos.side === "Buy", aggr = now() - c.since >= Math.max(3, P.chaseAggrSec || 20) * 1000;
+      const px = roundToStep(sell ? (aggr ? book.bids[0] : book.asks[0]) : (aggr ? book.asks[0] : book.bids[0]), inst.tickSize);
+      const tif = aggr ? "GTC" : "PostOnly", tick = parseFloat(inst.tickSize);
+      if (aggr && !c.aggrLogged) { c.aggrLogged = true; log(`${symbol}: ⏩ ${P.chaseAggrSec || 20} с без исполнения — лимитка по встречной лучшей цене (всё равно лимит, не маркет)`, "info"); }
+      const mine = open.filter(o => o.side === (sell ? "Sell" : "Buy"));
+      for (const o of mine.slice(1)) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
+      const o = mine[0];
+      if (o && o.timeInForce === tif && Math.abs(parseFloat(o.price) - px) < tick / 2) return;   // it stands at the best price
+      if (o && o.timeInForce === tif) {
+        try { await priv("POST", "/v5/order/amend", { category, symbol, orderId: o.orderId, price: String(px), qty: String(pos.size) }); return; } catch (e) { /* re-place below */ }
+      }
+      if (o) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
+      await priv("POST", "/v5/order/create", { category, symbol, side: sell ? "Sell" : "Buy", orderType: "Limit", qty: String(pos.size), price: String(px), timeInForce: tif, reduceOnly: true, positionIdx: pos.positionIdx, orderLinkId: "sg_cl_" + now() + "_" + Math.floor(Math.random() * 999) });
+    } catch (e) { log(`${symbol}: догонка выхода: ${e.message}`, "err"); }
+    finally { c.busy = false; }
+  }
+  setInterval(() => { for (const s2 of Object.keys(CH)) chaseStep(s2).catch(() => {}); }, 1000);
+
+  // a stop on the exchange as a LIMIT (Partial TP/SL with slOrderType Limit): it works with the server down, never as market
+  const slLim = (slPx, d, inst) => roundToStep(slPx * (1 - d * (P.slLimitPct || 1) / 100), inst.tickSize);
+  async function clearPosStops(symbol, category, positionIdx) {
+    try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: "0", trailingStop: "0", positionIdx }); } catch (e) { /* none */ }
+    try { const t = (await priv("GET", "/v5/order/realtime", { category, symbol, orderFilter: "tpslOrder", limit: 50 })).list || [];
+      for (const o of t) if (/StopLoss|TrailingStop/i.test(o.stopOrderType || "")) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } } } catch (e) { /* none */ }
+  }
+  async function setLimitStop(symbol, category, pos, slPx, inst) {
+    const d = pos.side === "Buy" ? 1 : -1;
+    await clearPosStops(symbol, category, pos.positionIdx);
+    await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Partial", slSize: String(pos.size), stopLoss: String(slPx), slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: String(slLim(slPx, d, inst)), positionIdx: pos.positionIdx });
+  }
+  // the stop attached to an entry limit: also a limit
+  function attachLimitSl(body, stopPx, d, inst) {
+    Object.assign(body, { tpslMode: "Partial", stopLoss: String(stopPx), slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: String(slLim(stopPx, d, inst)) });
   }
   async function placeMakerExit(symbol, category, pos, tpPrice, inst) {
     if (!pos.size) return;
@@ -174,8 +235,8 @@ function create(host) {
   async function placeSellLimit(symbol, category, qty, price, tp, sl, inst) {
     const limitPrice = roundToStep(price, inst.tickSize);
     const body = { category, symbol, side: "Sell", orderType: "Limit", qty: String(qty), price: String(limitPrice), timeInForce: "GTC", positionIdx: await shortIdx(symbol, category), orderLinkId: "sg_s_" + now() + "_" + Math.floor(Math.random() * 999) };
-    if (sl) { body.stopLoss = String(sl); body.slTriggerBy = "LastPrice"; }
-    if (tp && !P.makerExit) { body.takeProfit = String(tp); body.tpTriggerBy = "LastPrice"; }
+    if (sl) attachLimitSl(body, sl, -1, inst);
+    if (tp && !P.makerExit) Object.assign(body, { tpslMode: "Partial", takeProfit: String(tp), tpTriggerBy: "LastPrice", tpOrderType: "Limit", tpLimitPrice: String(tp) });
     log(`${symbol}: → Sell limit ${qty} @ ${limitPrice}`, "info");
     try { const r = await priv("POST", "/v5/order/create", body); log(`${symbol}: ✅ Sell #${r.orderId}`, "ok"); }
     catch (e) { log(`${symbol}: ❌ Sell: ${e.message}`, "err"); }
@@ -249,8 +310,8 @@ function create(host) {
 
     if (pos.size > 0 && pos.side === "Sell") {
       const entry = pos.avgPrice || mid, movePct = (entry - mid) / entry;
-      if (movePct >= tpPct) { const pnl = pos.unrealisedPnl || 0; log(`${symbol}: 🎯 TP ${(movePct * 100).toFixed(2)}%${shukin ? " (Щукин short take)" : ""}`, "ok"); w.closingByBot = true; await closeMarket(symbol, category); await cancelOurOrders(symbol, category); recordTrade(pnl, symbol, "TP"); w.pos = { size: 0 }; return; }
-      if (movePct <= -slPct) { const pnl = pos.unrealisedPnl || 0; log(`${symbol}: 🚨 SL ${(movePct * 100).toFixed(2)}%`, "err"); w.closingByBot = true; await closeMarket(symbol, category); await cancelOurOrders(symbol, category); recordTrade(pnl, symbol, "SL"); w.pos = { size: 0 }; return; }
+      if (movePct >= tpPct) { const pnl = pos.unrealisedPnl || 0; log(`${symbol}: 🎯 TP ${(movePct * 100).toFixed(2)}%${shukin ? " (Щукин short take)" : ""}`, "ok"); w.closingByBot = true; await cancelOurOrders(symbol, category); await closeChase(symbol, category, "TP"); recordTrade(pnl, symbol, "TP"); w.pos = { size: 0 }; return; }
+      if (movePct <= -slPct) { const pnl = pos.unrealisedPnl || 0; log(`${symbol}: 🚨 SL ${(movePct * 100).toFixed(2)}%`, "err"); w.closingByBot = true; await cancelOurOrders(symbol, category); await closeChase(symbol, category, "SL"); recordTrade(pnl, symbol, "SL"); w.pos = { size: 0 }; return; }
       if (P.makerExit) { const open = await getOpenOrders(symbol, category); if (!open.some(o => (o.orderLinkId || "").startsWith("sg_tp_"))) await placeMakerExit(symbol, category, pos, entry * (1 - tpPct), inst); }
       if (!shukin) return;   // normal mode: no new entries while in a position; Shukin: keep adding above (averaging)
     }
@@ -327,7 +388,7 @@ function create(host) {
     if (live && pd && w.exitNow) {
       const pnl = pos.unrealisedPnl || 0, why = w.exitNow.why;
       log(`${symbol}: 💰 ${why} — фиксирую ${pd > 0 ? "лонг" : "шорт"} сразу (+${w.exitNow.prof}%, ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} USDT)`, "ok");
-      w.exitNow = null; w.closingByBot = true; await cancelOurOrders(symbol, category); await closeMarket(symbol, category); recordTrade(pnl, symbol, "выход на развороте ленты");
+      w.exitNow = null; w.closingByBot = true; await cancelOurOrders(symbol, category); await closeChase(symbol, category, "разворот ленты"); recordTrade(pnl, symbol, "выход на развороте ленты");
       w.pos = { size: 0 }; w.slSet = 0; w.trailSet = null; w.mom = null; return;
     }
     if (!pd) w.exitNow = null;
@@ -335,7 +396,7 @@ function create(host) {
     if (live && pd && md && pd === -md) {
       const pnl = pos.unrealisedPnl || 0;
       log(`${symbol}: ⚡ ${md > 0 ? "памп" : "дамп"} против ${pd > 0 ? "лонга" : "шорта"} — закрываю сразу (${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)}), дальше по движению`, pnl >= 0 ? "ok" : "err");
-      w.closingByBot = true; await cancelOurOrders(symbol, category); await closeMarket(symbol, category); recordTrade(pnl, symbol, "адаптация к " + (md > 0 ? "пампу" : "дампу")); w.pos = { size: 0 }; w.slSet = 0; w.trailSet = null; return;
+      w.closingByBot = true; await cancelOurOrders(symbol, category); await closeChase(symbol, category, (md > 0 ? "памп" : "дамп") + " против позиции"); recordTrade(pnl, symbol, "адаптация к " + (md > 0 ? "пампу" : "дампу")); w.pos = { size: 0 }; w.slSet = 0; w.trailSet = null; return;
     }
     await shortIdx(symbol, category);
     const idxOf = (d) => (HEDGE[symbol] ? (d > 0 ? 1 : 2) : 0);
@@ -351,7 +412,8 @@ function create(host) {
       const tp0 = w.tape, typ = typical1m(w), go = tp0 && Math.sign(tp0.mv15) === pd && (pd > 0 ? tp0.buy : 1 - tp0.buy) >= P.fastAggr;
       if (!w.lastAddPx) w.lastAddPx = pos.avgPrice;
       if (w.posMom && go && (w.momAddN || 0) < (P.momAdds || 0) && (mid / w.lastAddPx - 1) * 100 * pd >= Math.max(step * 100, typ) && now() - (w.lastIoc || 0) > 1500)
-        want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: iocPx(pd), mom: true, ioc: true, add: true, momAdd: true });
+        want.push(P.momIoc ? { side: pd > 0 ? "Buy" : "Sell", d: pd, px: iocPx(pd), mom: true, ioc: true, add: true, momAdd: true }
+          : { side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pd > 0 ? (w.bid || mid) : (w.ask || mid), inst.tickSize), mom: true, add: true, momAdd: true });   // a limit at the best price, chased
     }
     else if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
     else if (pre && pre === -pd) { /* the price is starting to run against the position: no adds against it */ }
@@ -369,13 +431,19 @@ function create(host) {
       const tpUse = w.posMom ? Math.max(ST.mkt, gapUse + ST.mkt * 0.5) / 100 : Math.max(tp, ((gapUse || 0) + ST.mkt * 0.5) / 100);
       const tpPx = roundToStep(pos.avgPrice * (1 + pd * tpUse), inst.tickSize);
       if (P.bandTrail) {
-        // trailing take on the exchange: activates at the take level, then follows the best price at bandTrailGap % (works with the server down)
+        // trailing take by the bot (the exchange trailing stop would close by market): it activates at the take level,
+        // follows the best price, and a pull-back of gapUse % from the best -> exit by a fast limit chased after the price
         for (const o of tps) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
-        const dist = roundToStep(pos.avgPrice * (gapUse || 0.5) / 100, inst.tickSize), key = tpPx + "|" + dist;
-        if (w.trailSet !== key) { w.trailGap = gapUse;
-          try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", trailingStop: String(dist), activePrice: String(tpPx), positionIdx: pos.positionIdx });
-            w.trailSet = key; log(`${symbol}: 🎯 трейлинг-тейк: включится на ${tpPx} (+${(tpUse * 100).toFixed(2)}% от средней), дальше едет за лучшей ценой на ${gapUse}%${w.posMom ? " (по волатильности монеты — чтобы взять всё движение)" : ""}`, "ok"); }
-          catch (e) { if (String(e.code) === "34040") w.trailSet = key; else log(`${symbol}: трейлинг-тейк: ${e.message}`, "err"); }
+        w.trailGap = gapUse;
+        if (!w.trOn && (pd > 0 ? mid >= tpPx : mid <= tpPx)) { w.trOn = true; w.trBest = mid; log(`${symbol}: 🎯 трейлинг-тейк включён на ${fmt(mid)} (+${(tpUse * 100).toFixed(2)}% от средней), еду за лучшей ценой, откат ${gapUse}% → выход лимиткой`, "ok"); }
+        if (w.trOn) {
+          w.trBest = pd > 0 ? Math.max(w.trBest, mid) : Math.min(w.trBest, mid);
+          const back = (pd > 0 ? (w.trBest - mid) / w.trBest : (mid - w.trBest) / w.trBest) * 100;
+          if (back >= gapUse) {
+            const pnl = pos.unrealisedPnl || 0;
+            log(`${symbol}: 💰 трейлинг-тейк: откат ${back.toFixed(2)}% от лучшей ${fmt(w.trBest)} — выхожу лимиткой`, "ok");
+            await cancelOurOrders(symbol, category); await closeChase(symbol, category, "трейлинг-тейк"); recordTrade(pnl, symbol, "трейлинг-тейк"); return;
+          }
         }
       } else {
         // the take: one reduce-only limit for the whole position (re-placed when the size or the average changed)
@@ -385,11 +453,17 @@ function create(host) {
       // the stop of the whole position on the exchange (from the average)
       const slUse = w.posMom ? (P.momSl || 1.5) / 100 : sl;
       const slPx = roundToStep(pos.avgPrice * (1 - pd * slUse), inst.tickSize);
-      if (Math.abs((w.slSet || 0) - slPx) > parseFloat(inst.tickSize) / 2) {
-        try { await priv("POST", "/v5/position/trading-stop", { category, symbol, tpslMode: "Full", stopLoss: String(slPx), slTriggerBy: "LastPrice", positionIdx: pos.positionIdx }); w.slSet = slPx; log(`${symbol}: стоп позиции ${slPx} (−${w.posMom ? P.momSl : P.bandSl}% от средней${w.posMom ? ", вход по движению" : ""}, плечо x${P.leverage})`, "info"); }
-        catch (e) { if (String(e.code) === "34040") w.slSet = slPx; else log(`${symbol}: стоп: ${e.message}`, "err"); }
+      if (pd > 0 ? mid <= slPx : mid >= slPx) {
+        const pnl = pos.unrealisedPnl || 0;
+        log(`${symbol}: 🚨 стоп ${slPx} пройден — выхожу лимиткой с догонкой`, "err");
+        await cancelOurOrders(symbol, category); await closeChase(symbol, category, "стоп"); recordTrade(pnl, symbol, "стоп"); return;
       }
-    } else { w.slSet = 0; w.trailSet = null; w.trailGap = 0; }
+      const slKey = slPx + "|" + pos.size;
+      if (w.slSet !== slKey) {
+        try { await setLimitStop(symbol, category, pos, slPx, inst); w.slSet = slKey; log(`${symbol}: стоп позиции ${slPx} ЛИМИТКОЙ (не хуже ${slLim(slPx, pd, inst)}; −${w.posMom ? P.momSl : P.bandSl}% от средней, плечо x${P.leverage})`, "info"); }
+        catch (e) { if (String(e.code) === "34040") w.slSet = slKey; else log(`${symbol}: стоп: ${e.message}`, "err"); }
+      }
+    } else { w.slSet = 0; w.trailSet = null; w.trailGap = 0; w.trOn = false; w.trBest = 0; }
     if (isSpike && !pd) { w.status = "SPIKE — лимиты держу"; }
     // sync the entry limits: the opposite side goes, the others follow the price behind it
     const tol = md && !pd ? mid * 0.0005 : ref * Math.min(off * 0.15, step * 0.4), keep = new Set(), freeze = isSpike && !md;
@@ -408,8 +482,8 @@ function create(host) {
       const x = want[k], stopPx = roundToStep(x.px * (1 - x.d * sl), inst.tickSize);
       const body = { category, symbol, side: x.side, orderType: "Limit", qty: String(qty), price: String(x.px), timeInForce: x.ioc ? "IOC" : "PostOnly", positionIdx: idxOf(x.d), orderLinkId: "sg_b_" + now() + "_" + Math.floor(Math.random() * 999) };
       if (x.ioc) { w.lastIoc = now(); if (x.momAdd) { w.momAddN = (w.momAddN || 0) + 1; w.lastAddPx = mid; } }
-      if (!pd) { body.stopLoss = String(stopPx); body.slTriggerBy = "LastPrice"; }
-      try { await priv("POST", "/v5/order/create", body); log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
+      if (!pd) attachLimitSl(body, stopPx, x.d, inst);
+      try { await priv("POST", "/v5/order/create", body); log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc || x.mom ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
       catch (e) { log(`${symbol}: ❌ ${x.side} limit: ${e.message}`, "err"); }
     }
     w.status = md ? `⚡ ${md > 0 ? "ПАМП" : "ДАМП"} · ${pd ? "по движению" : "вход лимиткой"}` : pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
@@ -423,6 +497,7 @@ function create(host) {
   }
   async function processSymbol0(symbol) {
     const category = P.category, w = ensureWatch(symbol);
+    if (chasing(symbol)) { w.status = "⏩ выход лимиткой (догонка)"; return; }
     const book = await getOrderBook(symbol, category);
     if (!book.bids.length || !book.asks.length) throw new Error(symbol + ": пустой стакан");
     const mid = (book.bids[0] + book.asks[0]) / 2; w.mid = mid; w.bid = book.bids[0]; w.ask = book.asks[0];
@@ -747,7 +822,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     else { shukinSig = null; log("Режим Щукина ВЫКЛ", "info"); }
     save(); schedule(); return P.shukinMode ? "Режим Щукина ВКЛ" : "Режим Щукина ВЫКЛ";
   }
-  async function closePos(symbol) { symbol = (symbol || P.symbol).toUpperCase(); const pos = await getPosition(symbol, P.category); const w = ensureWatch(symbol); w.closingByBot = true; await closeMarket(symbol, P.category); if (pos && pos.size > 0) recordTrade(pos.unrealisedPnl || 0, symbol, "ручное закрытие"); return pos.size ? "Закрыто" : "Позиции нет"; }
+  async function closePos(symbol) { symbol = (symbol || P.symbol).toUpperCase(); const pos = await getPosition(symbol, P.category); const w = ensureWatch(symbol); w.closingByBot = true; await cancelOurOrders(symbol, P.category); await closeChase(symbol, P.category, "ручное закрытие"); if (pos && pos.size > 0) recordTrade(pos.unrealisedPnl || 0, symbol, "ручное закрытие"); return pos.size ? "Закрываю лимиткой с догонкой (без маркета)" : "Позиции нет"; }
   async function position(symbol) { return getPosition((symbol || P.symbol).toUpperCase(), P.category); }
   function clearTargets() { S.targets = []; saveS(); log("Список целей очищен", "info"); return "Очищено"; }
   async function sync() { await refreshOpenUniverse(); for (const s of Object.keys(W)) { try { const w = W[s]; w.candles = await getKlines(s, P.category, P.interval, 40); if (w.candles.length) { w.mid = w.candles[w.candles.length - 1].close; w.rsi = calculateRSI(w.candles, 14); } if (w.posEx) w.pos = w.posEx; } catch (e) { /* skip */ } } log("Синхр биржи: " + Object.keys(W).length + " монет", "ok"); return Object.keys(W).length + " активных монет"; }

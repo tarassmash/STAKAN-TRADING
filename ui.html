@@ -285,7 +285,7 @@
       <label title="Единственное, что AI менять не может: при таком убытке за день бот снимает ордера и ждёт следующего дня">Стоп-лимит убытка за день, USDT</label>
       <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
     </div>
-    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Вход по Щукину</b>: SELL только когда открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
+    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Скан всего рынка раз в минуту</b>: SELL-сетки сразу на всех пампах, где по Щукину открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
     <div class="stats">
       <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
@@ -530,6 +530,7 @@
 (function () {
   'use strict';
   const $ = id => document.getElementById(id);
+  let chartPin = '';
   let S = null, BUSY = false, DIRTY = false, chartSym = '', chartIv = '', loadId = 0;
   let chart, candleSeries, midSeries, volChart, volSeries, oiChart, oiSeries, cvdChart, cvdSeries;
   const minis = {};
@@ -725,9 +726,10 @@
     if (G.conn) setConn(G.conn.ok, G.conn.text);
     $('statusText').textContent = G.status;
     const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ'; fb.disabled = BUSY;
-    $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🚀 работает (без AI: нет FAL_KEY)'} · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'решение через ' + G.fa.left + ' с' : 'выбираю монету…'}`
-      + (() => { const w0 = (G.watches || []).find(x => x.symbol === (P.symbol || '').toUpperCase()), g = w0 && w0.shukin; return g ? `<br><span style="color:${g.ok ? 'var(--green)' : 'var(--yellow)'}">${g.ok ? '✅ вход в SELL разрешён' : '⏸ жду вход в SELL'} (Щукин): ${esc(g.why)}</span>` : (w0 && w0.pos && w0.pos.size ? '<br><span style="color:var(--muted)">шорт открыт — веду до тейка</span>' : ''); })()
-      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
+    $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🔥 работает (без AI: нет FAL_KEY)'} · SELL-сетки: <b>${esc((G.fa.syms || []).map(x => x.replace(/USDT$/, '')).join(', ') || 'нет — жду памп с открытым входом')}</b>`
+      + `<br><span style="font-size:10px">скан рынка через ${G.fa.scan ?? '—'} с${G.aiFal ? ' · решение AI через ' + (G.fa.left ?? '—') + ' с' : ''} · до ${P.maxCoins} монет · памп от ${P.pumpMin}%</span>`
+      + ((G.targets || []).filter(t => t.isPump).length ? '<div style="text-align:left;margin-top:4px">' + (G.targets || []).filter(t => t.isPump).slice(0, 8).map(t => `<div style="display:flex;justify-content:space-between;gap:6px;font-size:10.5px" title="${esc(t.why || '')}"><span>${(G.fa.syms || []).includes(t.symbol) ? '🔥' : '·'} <b>${esc(t.symbol.replace(/USDT$/, ''))}</b> памп +${Number(t.pump).toFixed(1)}%, откат ${Number(t.pull).toFixed(1)}%</span><span style="color:${t.gate ? 'var(--green)' : 'var(--muted)'}">${t.gate ? 'OI↓ CVD↓ ✓' : 'OI ' + (t.oiChg ?? '—') + '% · CVD ' + (t.cvdPct ?? '—') + '%'}</span></div>`).join('') + '</div>' : '<br><span style="color:var(--muted)">пампов от ' + P.pumpMin + '% сейчас нет</span>')
+      + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.skip && G.fa.ai.skip.length ? `<br><span style="font-size:10px">не шортить: ${esc(G.fa.ai.skip.join(', '))}</span>` : '') + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';
     const info = document.querySelector('#legacy .info:not(#keysInfo)');
@@ -791,7 +793,7 @@
       return `<div class="watch-card${w.symbol === cur ? ' active' : ''}${w.isSpike ? ' spike' : ''}" data-sym="${esc(w.symbol)}"><div class="wc-top"><span class="wc-sym">${esc(w.symbol.replace(/USDT$/, ''))}</span><span>${badge}</span></div>
         <div class="wc-mini">${spark(w.spark)}</div>
         <div class="wc-meta"><span>Mid <b>${w.mid ? fmt(w.mid) : '—'}</b></span><span>uPnL <b class="${up == null ? '' : up >= 0 ? 'up' : 'dn'}">${up == null ? '—' : (up >= 0 ? '+' : '') + up.toFixed(2)}</b></span><span>RSI <b>${w.rsi != null ? w.rsi.toFixed(0) : '—'}</b></span><span>${esc(w.status || '—')}</span></div></div>`; }).join('');
-    grid.querySelectorAll('.watch-card').forEach(el => el.onclick = () => pick(el.getAttribute('data-sym')));
+    grid.querySelectorAll('.watch-card').forEach(el => el.onclick = () => { chartPin = el.getAttribute('data-sym'); $('symbol').value = chartPin; $('interval').value = '1'; loadChart(true); });
   }
   function spark(a) {
     if (!a || a.length < 2) return '';
@@ -883,7 +885,7 @@
   setInterval(load, 2000);
   setInterval(liveChart, 5000);
   setInterval(() => { if (S) { wsConnect(); wsSub(); } }, 3000);
-  setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { const s2 = (S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
+  setInterval(() => { if (S && S.sg && !DIRTY && document.activeElement !== $('symbol')) { if (chartPin && !(S.sg.watches || []).some(x => x.symbol === chartPin)) chartPin = ''; const s2 = (chartPin || S.sg.params.symbol || '').toUpperCase(); if (s2 && (s2 !== chartSym || S.sg.params.interval !== chartIv)) { $('symbol').value = s2; $('interval').value = S.sg.params.interval; loadChart(true); } } }, 3000);
 })();
 
 </script>

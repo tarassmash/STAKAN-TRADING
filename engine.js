@@ -42,10 +42,12 @@ const DEFAULTS = {
   bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
   fullAuto: false,         // 🚀 one button: the grid only on the most volatile coin of the last 1 minute, re-picked every faEveryMin minutes
   faEveryMin: 3,
+  shOiPct: 0.3,            // Shukin entry: OI fell at least this % over the last 3 five-minute points (and the last one is lower) ...
+  shCvdPct: 10,            // ... and the CVD falls: the sellers outweigh the buyers by at least this % of the volume of the last 10 one-minute candles
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["shOiPct", "shCvdPct", "chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -298,6 +300,19 @@ function create(host) {
   }
   function buildCvd(c) { let cum = 0; return c.map(x => { cum += x.close >= x.open ? (x.volume || 0) : -(x.volume || 0); return { time: x.time, value: cum }; }); }
   // the Shukin filter (exactly as on the page): OI + CVD -> may we short
+  // ⚡ Shukin entry gate (strict): a SELL is entered only when the open interest has started to fall AND the CVD falls
+  async function shukinGate(symbol, w) {
+    if (!w.oi || now() - (w.oiAt || 0) > 60000) { try { w.oi = await getOpenInterest(symbol, P.category, "5", 12); w.oiAt = now(); } catch (e) { /* keep */ } }
+    const oi = w.oi || [], c = (w.candles || []).slice(-10);
+    if (oi.length < 4 || c.length < 10) return { ok: false, why: "мало данных OI / свечей" };
+    const o0 = oi[oi.length - 4].value, o2 = oi[oi.length - 2].value, o3 = oi[oi.length - 1].value;
+    const oiChg = o0 > 0 ? (o3 / o0 - 1) * 100 : 0, oiDown = o3 < o2 && oiChg <= -(P.shOiPct || 0.3);
+    const dv = (k) => (k.close >= k.open ? 1 : -1) * (k.volume || 0);
+    const vol = c.reduce((a, k) => a + (k.volume || 0), 0) || 1, d10 = c.reduce((a, k) => a + dv(k), 0), d5 = c.slice(-5).reduce((a, k) => a + dv(k), 0);
+    const cvdPct = d10 / vol * 100, cvdDown = cvdPct <= -(P.shCvdPct || 10) && d5 < 0;
+    const txt = `OI ${oiChg >= 0 ? "+" : ""}${oiChg.toFixed(2)}% за 15 мин ${oiDown ? "падает ✓" : "не падает ✗"} · CVD ${cvdPct >= 0 ? "+" : ""}${cvdPct.toFixed(0)}% за 10 мин ${cvdDown ? "падает ✓" : "не падает ✗"}`;
+    return { ok: oiDown && cvdDown, why: txt, oiChg: +oiChg.toFixed(3), cvdPct: +cvdPct.toFixed(1) };
+  }
   function analyzeShukinContext(candles, oiData) {
     const res = { allowShort: true, reason: "OK", oiTrend: "—", cvdTrend: "—", oiChangePct: 0, cvdSlope: 0 };
     if (!candles || candles.length < 10) return Object.assign(res, { allowShort: false, reason: "мало данных" });
@@ -462,6 +477,12 @@ function create(host) {
     else if (!pd) for (let k = 0; k < nL; k++) { want.push({ side: "Sell", d: -1, px: roundToStep(ref * (1 + off + step * k), inst.tickSize) }); want.push({ side: "Buy", d: 1, px: roundToStep(ref * (1 - off - step * k), inst.tickSize) }); }
     else if (pre && pre === -pd) { /* the price is starting to run against the position: no adds against it */ }
     else for (let k = 1; k <= Math.max(0, Math.round(P.bandAdds)); k++) want.push({ side: pd > 0 ? "Buy" : "Sell", d: pd, px: roundToStep(pos.avgPrice * (1 - pd * step * k), inst.tickSize), add: true });   // dense adds beyond the average
+    // ⚡ Shukin: with no position a SELL is entered ONLY when OI has started to fall and the CVD falls; else the entry limits are removed
+    if (!pd) {
+      const g = await shukinGate(symbol, w); w.shukin = g;
+      if (!g.ok) { want = []; if (w.gateOk !== false) log(`${symbol}: ⏸ Щукин — жду входа в SELL: ${g.why}`, "info"); w.gateOk = false; }
+      else { if (w.gateOk !== true) log(`${symbol}: ✅ Щукин — OI начал падать и CVD падает (${g.why}) — ставлю SELL`, "ok"); w.gateOk = true; }
+    } else w.gateOk = null;
     // SHORT ONLY: the bot never opens a long - every opening BUY is dropped (a BUY only closes a short, reduce-only)
     want = want.filter(x => x.d < 0);
     w.levels = want.map(x => ({ px: x.px, side: x.d })); w.targets = want.map(x => x.px); w.side = pd || 0;
@@ -523,6 +544,7 @@ function create(host) {
       try { if (!(await placeEntry(body, inst, share))) continue; log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc || x.mom ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${body.qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
       catch (e) { log(`${symbol}: ❌ ${x.side} limit: ${e.message}`, "err"); }
     }
+    if (!pd && w.shukin && !w.shukin.ok) { w.status = "⏸ Щукин: жду (OI↓ + CVD↓)"; return; }
     w.status = md ? `⚡ ${md > 0 ? "ПАМП" : "ДАМП"} · ${pd ? "по движению" : "вход лимиткой"}` : pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
   }
 
@@ -700,7 +722,7 @@ function create(host) {
     bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandTp: [0.3, 3], bandTrailGap: [0.1, 2], bandRef: [1, 20],
     pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
     fastK: [1.5, 5], fastAggr: [0.55, 0.85], fastSpeed: [1.2, 4], chaseAggrSec: [5, 60], faEveryMin: [1, 10],
-    leverage: [1, 10], orderUsdt: [5, 5000],
+    leverage: [1, 10], orderUsdt: [5, 5000], shOiPct: [0.1, 2], shCvdPct: [3, 50],
     pulseOn: "bool", smartOn: "bool", bandTrail: "bool", autoStep: "bool",
   };
   function aiApply(params) {
@@ -726,6 +748,7 @@ function create(host) {
     await availUsdt(true);
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
+SHUKIN ENTRY RULE (fixed, you cannot switch it off): with no position a SELL is entered only when the open interest has started to fall (the last 5-min OI point lower than the previous and OI down >= shOiPct% over 15 min) AND the CVD falls (sellers outweigh buyers by >= shCvdPct% of the volume of the last 10 one-minute candles, and of the last 5 too); otherwise the entry limits are removed and the bot waits. Prefer coins where money is leaving (OI falling) after a pump. Gate of the current coin now: ${JSON.stringify(cw && cw.shukin || null)}.
 SHORT ONLY: the bot only SELLS to open (shorts); it never opens a long - BUY orders only close shorts. Pick coins and settings for shorting (pumps that fade, tops, downtrends). ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
 How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; no stop-loss. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move, back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
@@ -971,7 +994,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
     const fa = S.fa || {};
     return { fa: P.fullAuto && P.running ? { ai: S.faAi || null, sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 3) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
-      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
+      watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, shukin: w.shukin || null, open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.strategy === "impulse") { P.strategy = "follow"; save(); }   // the impulse hunter is gone
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } }, 3000);

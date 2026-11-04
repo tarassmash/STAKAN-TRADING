@@ -285,7 +285,7 @@
       <label title="Единственное, что AI менять не может: при таком убытке за день бот снимает ордера и ждёт следующего дня">Стоп-лимит убытка за день, USDT</label>
       <input type="number" id="maxDailyLoss" value="15" min="0" step="1" />
     </div>
-    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
+    <div class="info" style="font-size:.75rem">Бот торгует <b>только SELL (шорт)</b> — лонг не открывает никогда, BUY только закрывает шорт. <b>Вход по Щукину</b>: SELL только когда открытый интерес начал падать и CVD падает. Всем остальным управляет AI (fal.ai): монета, все настройки, плечо (до x10), размер лота. Только лимитные ордера — никакого маркета. Работает 24/7 на сервере.</div>
     <div class="stats">
       <div class="row"><span>Статус</span><span class="val" id="statusText">ВЫКЛ</span></div>
       <div class="row"><span>Сделок</span><span class="val" id="tradesText">0</span></div>
@@ -726,6 +726,7 @@
     $('statusText').textContent = G.status;
     const fon = !!(P.fullAuto && P.running), fb = $('fullAutoBtn'); fb.classList.toggle('on', fon); fb.textContent = fon ? '■ СТОП АВТОПИЛОТ' : '🧠 АВТОПИЛОТ · AI УПРАВЛЯЕТ ВСЕМ'; fb.disabled = BUSY;
     $('faText').innerHTML = fon && G.fa ? `${G.aiFal ? '🧠 управляет AI' : '🚀 работает (без AI: нет FAL_KEY)'} · лимитки на <b>${esc(G.fa.sym || '—')}</b> · ${G.fa.left != null ? 'решение через ' + G.fa.left + ' с' : 'выбираю монету…'}`
+      + (() => { const w0 = (G.watches || []).find(x => x.symbol === (P.symbol || '').toUpperCase()), g = w0 && w0.shukin; return g ? `<br><span style="color:${g.ok ? 'var(--green)' : 'var(--yellow)'}">${g.ok ? '✅ вход в SELL разрешён' : '⏸ жду вход в SELL'} (Щукин): ${esc(g.why)}</span>` : (w0 && w0.pos && w0.pos.size ? '<br><span style="color:var(--muted)">шорт открыт — веду до тейка</span>' : ''); })()
       + (G.fa.ai && G.fa.ai.reason ? `<br><span style="color:#c4b5fd">🧠 ${esc(G.fa.ai.reason)}</span>` + (G.fa.ai.changes && G.fa.ai.changes.length ? `<br><span style="font-size:10px">${esc(G.fa.ai.changes.join(' · '))}</span>` : '') : '') : 'AI сам анализирует рынок, выбирает монету и стратегию, оптимизирует и торгует лимитками 24/7' + (G.aiFal ? '' : '<br><span style="color:var(--red)">⚠ нет FAL_KEY в Railway → Variables — без него AI не работает</span>');
     const sb = $('shukinBtn'); sb.classList.toggle('active', !!P.shukinMode); sb.textContent = P.shukinMode ? '⚡ Режим Щукина ВКЛ' : '⚡ Режим Щукина';
     $('modeStatusText').textContent = P.shukinMode ? 'Щукин' : 'Обычный'; $('modeStatusText').style.color = P.shukinMode ? '#c4b5fd' : 'var(--muted)';

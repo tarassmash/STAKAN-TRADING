@@ -228,6 +228,49 @@ function create(host) {
   function attachLimitSl(body, stopPx, d, inst) {
     Object.assign(body, { tpslMode: "Partial", stopLoss: String(stopPx), slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: String(slLim(stopPx, d, inst)) });
   }
+  // ---------- the order size from the money on the account: never "not enough", the lot is fitted to what is free ----------
+  let AV = { v: null, at: 0 }, noMoneyAt = 0;
+  async function availUsdt(force) {
+    if (!force && AV.v != null && now() - AV.at < 2000) return AV.v;
+    try { const r = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (r.list || [])[0] || {};
+      AV = { v: Number(a.totalAvailableBalance || 0), at: now() }; } catch (e) { /* keep the last */ }
+    return AV.v;
+  }
+  const isNoMoney = (e) => /^(110004|110007|110012|110044|110045|110052|110014)$/.test(String(e && e.code)) || /not enough|insufficient|ab not enough/i.test(String(e && e.message));
+  function noMoney(symbol, av, minN) {
+    if (now() - noMoneyAt < 60000) return; noMoneyAt = now();
+    log(`${symbol}: на счёте свободно ${av != null ? av.toFixed(2) : "?"} USDT — не хватает даже на минимальный ордер Bybit (${minN} USDT позиции = ~${(minN / Math.max(1, P.leverage || 1)).toFixed(2)} USDT при плече x${P.leverage}), пропускаю (жду, пока освободятся деньги)`, "info");
+  }
+  // an opening (not reduce-only) limit: its qty is cut to the free balance × leverage; "not enough" from Bybit -> half the lot, again
+  // share: how many orders still to place this cycle - the free money is split evenly between them (the nearest first)
+  async function placeEntry(body, inst, share) {
+    const symbol = body.symbol, px = Number(body.price), step = inst.qtyStep, stepN = parseFloat(step), lev = Math.max(1, Number(P.leverage) || 1);
+    const minQty = Math.max(parseFloat(inst.minQty), Math.ceil(inst.minNotional * 1.02 / px / stepN - 1e-9) * stepN);
+    const want = Number(body.qty);
+    const av = keys() ? await availUsdt() : null;
+    if (av != null) {
+      const all = floorToStep(av * lev * 0.95 / px, step);
+      let maxQty = floorToStep(av * lev * 0.95 / Math.max(1, share || 1) / px, step);
+      if (maxQty < minQty - 1e-12 && all >= minQty - 1e-12) maxQty = Math.min(all, roundToStep(minQty, step));   // not enough for an even split: the minimum lot
+      if (maxQty < minQty - 1e-12) { noMoney(symbol, av, inst.minNotional); return null; }
+      if (maxQty < want) body.qty = String(maxQty);
+    }
+    for (let i = 0; i < 4; i++) {
+      try {
+        const r = await priv("POST", "/v5/order/create", body);
+        if (Number(body.qty) < want) log(`${symbol}: лот уменьшен под свободные деньги: ${body.qty} вместо ${want} (свободно ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT, плечо x${lev})`, "info");
+        if (AV.v != null) AV.v = Math.max(0, AV.v - Number(body.qty) * px / lev);
+        return r;
+      } catch (e) {
+        if (!isNoMoney(e)) throw e;
+        AV.at = 0;
+        const q = floorToStep(Number(body.qty) / 2, step);
+        if (q < minQty - 1e-12) { noMoney(symbol, AV.v, inst.minNotional); return null; }
+        body.qty = String(q);
+      }
+    }
+    return null;
+  }
   async function placeMakerExit(symbol, category, pos, tpPrice, inst) {
     if (!pos.size) return;
     const price = roundToStep(tpPrice, inst.tickSize);
@@ -235,13 +278,13 @@ function create(host) {
     try { await priv("POST", "/v5/order/create", body); log(`${symbol}: Maker TP @ ${price}`, "ok"); }
     catch (e) { body.timeInForce = "GTC"; body.orderLinkId = "sg_tp_" + now() + "_g"; try { await priv("POST", "/v5/order/create", body); log(`${symbol}: TP @ ${price} (GTC)`, "ok"); } catch (e2) { log(`${symbol}: Maker TP fail: ${e2.message}`, "err"); } }
   }
-  async function placeSellLimit(symbol, category, qty, price, tp, sl, inst) {
+  async function placeSellLimit(symbol, category, qty, price, tp, sl, inst, share) {
     const limitPrice = roundToStep(price, inst.tickSize);
     const body = { category, symbol, side: "Sell", orderType: "Limit", qty: String(qty), price: String(limitPrice), timeInForce: "GTC", positionIdx: await shortIdx(symbol, category), orderLinkId: "sg_s_" + now() + "_" + Math.floor(Math.random() * 999) };
     if (sl) attachLimitSl(body, sl, -1, inst);
     if (tp && !P.makerExit) Object.assign(body, { tpslMode: "Partial", takeProfit: String(tp), tpTriggerBy: "LastPrice", tpOrderType: "Limit", tpLimitPrice: String(tp) });
     log(`${symbol}: → Sell limit ${qty} @ ${limitPrice}`, "info");
-    try { const r = await priv("POST", "/v5/order/create", body); log(`${symbol}: ✅ Sell #${r.orderId}`, "ok"); }
+    try { const r = await placeEntry(body, inst, share); if (r) log(`${symbol}: ✅ Sell ${body.qty} #${r.orderId}`, "ok"); }
     catch (e) { log(`${symbol}: ❌ Sell: ${e.message}`, "err"); }
   }
 
@@ -336,10 +379,11 @@ function create(host) {
     for (const o of ourSells) { const px = parseFloat(o.price); if (!px || isNaN(px)) { toCancel.push(o); continue; } let found = null; for (const t of targets) if (Math.abs(px - t) <= tol) { found = t; break; } if (found != null && !matched.has(found)) matched.add(found); else toCancel.push(o); }
     if (toCancel.length && ourSells.length) log(`${symbol}: ↕ трейлинг сетки за ценой ${fmt(mid)} — переставляю ${toCancel.length} ур.`, "info");
     for (const o of toCancel) { try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ } }
+    let left = targets.filter(px => !matched.has(px)).length;
     for (const px of targets) {
       if (matched.has(px)) continue;
       const tp = roundToStep(px * (1 - tpPct), inst.tickSize), sl = (!shukin || pos.size === 0) ? roundToStep(px * (1 + slPct), inst.tickSize) : null;
-      await placeSellLimit(symbol, category, qty, px, tp, sl, inst);
+      await placeSellLimit(symbol, category, qty, px, tp, sl, inst, left--);
     }
   }
 
@@ -480,13 +524,15 @@ function create(host) {
       if (same >= 0 && freeze) { keep.add(same); continue; }   // during a spike the limits stay where they are (that is when they fill)
       try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ }
     }
+    let left = want.length - keep.size;
     for (let k = 0; k < want.length; k++) {
       if (keep.has(k)) continue;
+      const share = left--;
       const x = want[k], stopPx = roundToStep(x.px * (1 - x.d * sl), inst.tickSize);
       const body = { category, symbol, side: x.side, orderType: "Limit", qty: String(qty), price: String(x.px), timeInForce: x.ioc ? "IOC" : "PostOnly", positionIdx: idxOf(x.d), orderLinkId: "sg_b_" + now() + "_" + Math.floor(Math.random() * 999) };
       if (x.ioc) { w.lastIoc = now(); if (x.momAdd) { w.momAddN = (w.momAddN || 0) + 1; w.lastAddPx = mid; } }
       if (!pd) attachLimitSl(body, stopPx, x.d, inst);
-      try { await priv("POST", "/v5/order/create", body); log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc || x.mom ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
+      try { if (!(await placeEntry(body, inst, share))) continue; log(`${symbol}: ${x.momAdd ? "⚡ добор по движению " : x.ioc || x.mom ? "⚡ вход по движению " : x.add ? "добор " : ""}${x.side} ${x.ioc ? "IOC-лимит (не хуже " + x.px + ")" : "limit"} ${body.qty}${x.ioc ? "" : " @ " + x.px}`, x.ioc ? "ok" : "info"); }
       catch (e) { log(`${symbol}: ❌ ${x.side} limit: ${e.message}`, "err"); }
     }
     w.status = md ? `⚡ ${md > 0 ? "ПАМП" : "ДАМП"} · ${pd ? "по движению" : "вход лимиткой"}` : pd ? (pd > 0 ? "ЛОНГ" : "ШОРТ") + (P.bandTrail ? " · трейлинг-тейк" : " · тейк лимитом") : (isSpike ? "SPIKE — лимиты держу" : `±${P.bandPct}% лимитки`);
@@ -625,7 +671,7 @@ function create(host) {
   }
 
   // ---------- 🎯 the impulse hunter ----------
-  const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
+  const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, placeEntry: (b, i) => placeEntry(b, i), wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
     getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, cancelOurOrders, recordTrade,
     closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
     posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },

@@ -151,8 +151,10 @@ function create(h) {
     if (!live) { hunt.state = "in"; hunt.entry = px; hunt.best = px; hunt.stop = px * (1 - d * (P.hStop || 0.6) / 100); return; }
     await h.ensureLev(sym, P.category);
     const idx = await h.posIdx(sym, d);
-    const r = await h.priv("POST", "/v5/order/create", { category: P.category, symbol: sym, side: d > 0 ? "Buy" : "Sell", orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: idx, orderLinkId: "sg_h_" + now() });
-    hunt.orderId = r.orderId;
+    const body = { category: P.category, symbol: sym, side: d > 0 ? "Buy" : "Sell", orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: idx, orderLinkId: "sg_h_" + now() };
+    const r = await h.placeEntry(body, inst);   // the lot is fitted to the free money on the account
+    if (!r) { delete H[sym]; COOL[sym] = now() + 30000; return; }
+    hunt.orderId = r.orderId; hunt.qty = Number(body.qty);
   }
 
   // ---------- the position: every price tick from the WebSocket ----------

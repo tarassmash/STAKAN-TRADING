@@ -38,12 +38,12 @@ const DEFAULTS = {
   bandTrail: true,         // trailing take: reaching the take activates a trailing exit on the exchange instead of closing at once
   bandTrailGap: 0.5,       // the trailing exit follows the best price at this %
   bandAdds: 5,             // extra adding limits in the position's direction, each bandPct further
-  fullAuto: false,         // 🚀 one button: limits only on the most volatile coin of the last 1 minute, no fill in faIdleMin -> next coin
-  faIdleMin: 30,
+  fullAuto: false,         // 🚀 one button: the grid only on the most volatile coin of the last 1 minute, re-picked every faEveryMin minutes
+  faEveryMin: 1,
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["faIdleMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -555,13 +555,13 @@ function create(host) {
     return found;
   }
   function faState() { if (!S.fa) S.fa = { sym: "", since: 0, lastPos: 0 }; return S.fa; }
-  async function faPick(why, exclude) {
-    const found = await scanLast1m(exclude);
+  async function faPick(why, exclude, ready) {
+    const found = ready || await scanLast1m(exclude);
     if (!found.length) { log("🚀 Автопилот: нет ликвидных пар с движением за 1 мин — повторю через минуту", "err"); return null; }
     const old = (P.symbol || "").toUpperCase(), neu = found[0].symbol, wo = W[old], hasPos = wo && wo.pos && wo.pos.size > 0;
     if (old && old !== neu && !hasPos && P.liveEnabled && keys()) { try { await cancelOurOrders(old, P.category); } catch (e) { log(`${old}: снять лимитки: ${e.message}`, "err"); } }
     P.symbol = neu; P.interval = "1"; save();
-    const fa = faState(); fa.sym = neu; fa.since = now(); saveS();
+    const fa = faState(); fa.sym = neu; fa.since = now(); fa.at = now(); saveS();
     log(`🚀 Автопилот (${why}): лимитки → ${neu} · за 1 мин диапазон ${found[0].range1m.toFixed(2)}%, ход ${found[0].chg >= 0 ? "+" : ""}${found[0].chg.toFixed(2)}%${old && old !== neu ? (hasPos ? ` · по ${old} позиция — веду её до выхода` : ` · с ${old} лимитки сняты`) : ""}`, "ok");
     ensureWatch(neu); react(neu);
     return neu;
@@ -569,23 +569,28 @@ function create(host) {
   let faBusy = false;
   async function faTick() {
     if (!P.running || !P.fullAuto || faBusy) return;
+    const fa = faState(), every = Math.max(1, P.faEveryMin || 1) * 60000;
+    if (fa.sym && fa.since && now() - (fa.at || fa.since) < every - 2000) return;
     faBusy = true;
     try {
-      const fa = faState(), sym = (P.symbol || "").toUpperCase();
+      const sym = (P.symbol || "").toUpperCase();
+      fa.at = now();
       if (!fa.sym || fa.sym !== sym || !fa.since) { await faPick("старт"); return; }
-      const w = W[sym], pos = w && ((w.pos && w.pos.size > 0) || (w.posEx && w.posEx.size > 0));
-      if (pos) { fa.since = now(); fa.lastPos = now(); return; }   // the limits worked: a position is open - the 30 min count again after it closes
-      const idle = (now() - fa.since) / 60000;
-      if (idle >= Math.max(1, P.faIdleMin || 30)) await faPick(`${Math.round(idle)} мин без исполнения на ${sym}`, [sym]);
+      // every minute: a fresh scan of the last 1 minute -> the grid moves to the new top-1
+      // (the old coin's limits are removed; a position there is still led to its exit)
+      const found = await scanLast1m();
+      if (!found.length) return;
+      if (found[0].symbol === sym) { log(`🚀 Автопилот: ${sym} всё ещё самая волатильная за 1 мин (${found[0].range1m.toFixed(2)}%) — сетка остаётся`, "info"); return; }
+      await faPick("смена каждую " + Math.max(1, P.faEveryMin || 1) + " мин", null, found);
     } catch (e) { log("🚀 Автопилот: " + e.message, "err"); }
-    finally { faBusy = false; }
+    finally { faBusy = false; saveS(); }
   }
-  setInterval(() => { faTick().catch(() => {}); }, 20000);
+  setInterval(() => { faTick().catch(() => {}); }, 5000);
   async function fullAuto() {
     if (!keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     Object.assign(P, { fullAuto: true, strategy: "follow", autopilot: false, liveEnabled: true, interval: "1", shukinMode: false });
     save(); faState().since = 0;
-    log(`🚀 ПОЛНЫЙ АВТОПИЛОТ: только лимитки на самой волатильной за последнюю 1 мин монете; ${P.faIdleMin || 30} мин без исполнения → лимитки снимаю и ставлю на следующую`, "ok");
+    log(`🚀 ПОЛНЫЙ АВТОПИЛОТ: сетка лимиток только на самой волатильной за последнюю 1 мин монете; каждые ${Math.max(1, P.faEveryMin || 1)} мин — новый скан и перенос сетки на новый топ`, "ok");
     const sym = await faPick("старт");
     if (P.running) { runCycle(); return "Полный автопилот включён" + (sym ? " · " + sym : ""); }
     const r = await start();
@@ -749,7 +754,7 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
   function view() {
     ensureDayKey();
     const fa = S.fa || {};
-    return { fa: P.fullAuto && P.running ? { sym: fa.sym, left: fa.since ? Math.max(0, Math.round(((P.faIdleMin || 30) * 60000 - (now() - fa.since)) / 60000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
+    return { fa: P.fullAuto && P.running ? { sym: fa.sym, left: fa.at ? Math.max(0, Math.round((Math.max(1, P.faEveryMin || 1) * 60000 - (now() - fa.at)) / 1000)) : null } : null, ai: S.ai || null, aiBusy, aiFal: !!host.fal, autoNext: P.running && P.autopilot ? Math.max(0, Math.round(((S.lastAuto || 0) + Math.max(1, P.autoScanMin) * 60000 - now()) / 60000)) : null, params: P, status, conn, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: +S.dayPnl.toFixed(4), targets: S.targets, history: S.history.slice(-50).reverse(),
       shukin: shukinSig, log: LOG.slice(0, 150),
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }

@@ -46,13 +46,14 @@ const DEFAULTS = {
   pumpMin: 3,              // a pump = the rise from the low to the high of the last 3 h, % (at least this)
   scanN: 30,               // how many pumped candidates are checked every minute
   symbols: [],             // the coins with a SELL grid now (chosen by the scanner / the AI)
+  followDelayMin: 1,       // the entry limits follow the price with this delay: anchored to the price N min ago, moved at most once in N min
   shukinOn: true,          // the Shukin filter (the user's button; the AI cannot switch it)
   shOiPct: 0.3,            // Shukin entry: OI fell at least this % over the last 3 five-minute points (and the last one is lower) ...
   shCvdPct: 10,            // ... and the CVD falls: the sellers outweigh the buyers by at least this % of the volume of the last 10 one-minute candles
   bandRef: 5,              // the limits follow the average of this many last candles (a spike fills them instead of pushing them away)   // 24/7: re-scan and move the grid to the best target by itself
 };
 const SHUKIN = { gridStepPct: 1.00, gridLevels: 5, tpPct: 0.70, slPct: 10, orderUsdt: 12, intervalSec: 3, maxSpikePct: 0.50, minAtrPct: 0.20, maxAtrPct: 5, makerExit: true, superSpikeProtect: true, volFilter: true };
-const NUMS = ["maxCoins", "pumpMin", "scanN", "shOiPct", "shCvdPct", "chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
+const NUMS = ["followDelayMin", "maxCoins", "pumpMin", "scanN", "shOiPct", "shCvdPct", "chaseAggrSec", "slLimitPct", "faEveryMin", "fastK", "fastMinPct", "fastAggr", "fastSpeed", "momCap", "momAdds", "aiEveryMin", "pulsePct", "pulseSec", "momHoldMin", "momSl", "leverage", "feeX", "bandLevels", "bandTrailGap", "bandPct", "bandTp", "bandSl", "bandAdds", "bandRef", "followBand", "autoScanMin", "gridStepPct", "gridLevels", "tpPct", "slPct", "orderUsdt", "maxDailyLoss", "intervalSec", "maxSpikePct", "minAtrPct", "maxAtrPct"];
 const BOOLS = ["fullAuto", "smartOn", "momIoc", "aiAuto", "pulseOn", "autoStep", "bandTrail", "autopilot", "liveEnabled", "makerExit", "superSpikeProtect", "volFilter"];
 
 function create(host) {
@@ -425,7 +426,10 @@ function create(host) {
     let qty = floorToStep(usdt / mid, inst.qtyStep);
     if (qty < parseFloat(inst.minQty)) qty = parseFloat(inst.minQty);
     if (qty * mid < inst.minNotional) qty = roundToStep(Math.ceil(inst.minNotional * 1.02 / mid / parseFloat(inst.qtyStep)) * parseFloat(inst.qtyStep), inst.qtyStep);
-    const n = Math.max(1, Math.round(P.bandRef) || 5), last = (candles || []).slice(-n), ref = last.length ? last.reduce((a, c) => a + c.close, 0) / last.length : mid;
+    // the entry limits are anchored to the price followDelayMin minutes ago (the close of that 1m candle), not to the price now:
+    // they follow the price with a delay, so a fast run fills them instead of pushing them away
+    const dly = Math.max(1, Math.round(P.followDelayMin) || 1), cc = candles || [], n = dly;
+    const ref = cc.length > dly ? cc[cc.length - 1 - dly].close : mid;
     const live = P.liveEnabled;
     let pos = { side: null, size: 0, avgPrice: 0, unrealisedPnl: 0, positionIdx: 0 };
     if (live) pos = await getPosition(symbol, category);
@@ -492,7 +496,7 @@ function create(host) {
     // SHORT ONLY: the bot never opens a long - every opening BUY is dropped (a BUY only closes a short, reduce-only)
     want = want.filter(x => x.d < 0);
     w.levels = want.map(x => ({ px: x.px, side: x.d })); w.targets = want.map(x => x.px); w.side = pd || 0;
-    w.dir = md ? { d: pd || md, why: `⚡ ${md > 0 ? "памп" : "дамп"} ${w.mom.mv}% — ${pd ? `еду по движению, трейлинг-тейк, стоп ${P.momSl}%` : "вход по движению лимиткой по лучшей цене"}` } : { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (средняя ${n} свечей ${fmt(ref)})` };
+    w.dir = md ? { d: pd || md, why: `⚡ ${md > 0 ? "памп" : "дамп"} ${w.mom.mv}% — ${pd ? `еду по движению, трейлинг-тейк, стоп ${P.momSl}%` : "вход по движению лимиткой по лучшей цене"}` } : { d: pd, why: pd ? `${pd > 0 ? "лонг" : "шорт"} открыт — ${P.bandTrail ? `трейлинг-тейк с +${tpP.toFixed(2)}%, отступ ${gapP}%` : `тейк лимитом ${tpP.toFixed(2)}%`} от средней, доборы каждые ${ST.lim}%` : `жду: SELL от +${P.bandPct}% / BUY от −${P.bandPct}%, по ${nL} ур. каждые ${ST.lim}% (цена ${n} мин назад ${fmt(ref)}, подтягиваю раз в ${n} мин)` };
     if (!live) { log(`[SIM АВТОПИЛОТ] ${symbol}: ${md ? `⚡ ${md > 0 ? "памп" : "дамп"} → ` : ""}${want.map(x => `${x.side} @ ${x.px}`).join(" · ")}${pd ? "" : ` (цена ${fmt(mid)})`}`, "info"); return; }
     if (!isActive(symbol) && !pd) { if (w.ourOrders > 0) { await cancelOurOrders(symbol, category); w.ourOrders = 0; } w.status = "свободна"; return; }
     const open = await getOpenOrders(symbol, category), ours = open.filter(o => (o.orderLinkId || "").startsWith("sg_b_")), tps = open.filter(o => (o.orderLinkId || "").startsWith("sg_tp_"));
@@ -529,7 +533,10 @@ function create(host) {
     } else { w.slSet = 0; w.trailSet = null; w.trailGap = 0; w.trOn = false; w.trBest = 0; w.stopsCleared = false; }
     if (isSpike && !pd) { w.status = "SPIKE — лимиты держу"; }
     // sync the entry limits: the opposite side goes, the others follow the price behind it
-    const tol = md && !pd ? mid * 0.0005 : ref * Math.min(off * 0.15, step * 0.4), keep = new Set(), freeze = isSpike && !md;
+    // with no position the entry limits are moved after the price at most once in followDelayMin minutes
+    const hold = !pd && !md && now() - (w.followAt || 0) < dly * 60000;
+    const tol = md && !pd ? mid * 0.0005 : ref * Math.min(off * 0.15, step * 0.4), keep = new Set(), freeze = (isSpike && !md) || hold;
+    if (!hold && !pd && !md) w.followAt = now();
     for (const o of ours) {
       const m = want.find((x, i2) => !keep.has(i2) && x.side === o.side && Math.abs(parseFloat(o.price) - x.px) <= tol);
       if (m) { keep.add(want.indexOf(m)); continue; }
@@ -537,7 +544,7 @@ function create(host) {
       if (same >= 0 && !freeze) {   // move it after the price (amend keeps the order)
         try { await priv("POST", "/v5/order/amend", { category, symbol, orderId: o.orderId, price: String(want[same].px) }); keep.add(same); log(`${symbol}: ↕ ${o.side} ${o.price} → ${want[same].px}`, "info"); continue; } catch (e) { /* re-place below */ }
       }
-      if (same >= 0 && freeze) { keep.add(same); continue; }   // during a spike the limits stay where they are (that is when they fill)
+      if (same >= 0 && freeze) { keep.add(same); continue; }   // during a spike / until the next minute the limits stay where they are (that is when they fill)
       try { await priv("POST", "/v5/order/cancel", { category, symbol, orderId: o.orderId }); } catch (e) { /* gone */ }
     }
     let left = want.length - keep.size;
@@ -760,7 +767,7 @@ function create(host) {
   // ---------- 🧠 AI pilot (fal.ai): every faEveryMin minutes the AI gets the whole picture and decides
   // which coin to trade and how the strategy is tuned. Risk limits (order size, leverage, daily loss, live) stay the user's.
   const AI_KEYS = {   // what the AI may change, and the safe ranges
-    bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandTp: [0.3, 3], bandTrailGap: [0.1, 2], bandRef: [1, 20],
+    bandPct: [0.3, 5], bandLevels: [1, 6], bandAdds: [0, 8], bandTp: [0.3, 3], bandTrailGap: [0.1, 2],
     pulsePct: [0.5, 5], pulseSec: [20, 180], momHoldMin: [2, 30], momAdds: [0, 4],
     fastK: [1.5, 5], fastAggr: [0.55, 0.85], fastSpeed: [1.2, 4], chaseAggrSec: [5, 60], faEveryMin: [1, 10],
     leverage: [1, 10], orderUsdt: [5, 5000], maxCoins: [1, 10], pumpMin: [1.5, 20], shOiPct: [0.1, 2], shCvdPct: [3, 50],
@@ -792,7 +799,7 @@ Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != n
 STRATEGY: SHORT PUMPS ONLY. Every minute the bot scans the whole market for pumps (rise from the low to the high of the last 3 h >= pumpMin%, not fully retraced) and puts SELL limit grids on up to maxCoins of them AT ONCE (now ${P.maxCoins}).
 SHUKIN ENTRY RULE (the user's switch, you cannot change it; now ${P.shukinOn === false ? "OFF - the grids go on every pump without the OI / CVD check" : "ON"}): a SELL is entered only when the open interest has started to fall (the last 5-min OI point lower than the previous and OI down >= shOiPct% over 15 min) AND the CVD falls (sellers outweigh buyers by >= shCvdPct% of the volume of the last 10 one-minute candles, and of the last 5 too). Coins without it get no entry limits.
 SHORT ONLY: BUY orders only close shorts. ONLY limit orders (never market). Every take keeps at least 10x the round-trip Bybit fee (micro takes are impossible). NO STOP-LOSSES (the user's decision): a losing short is held until the take / trailing, the pulse cut or liquidation - choose the leverage, the lot, maxCoins and the adds so the account survives a 15-25% pump against the shorts.
-On each grid coin: SELL limits from +bandPct% above the average of the last bandRef 1m candles (bandLevels, each further by the fee step); a fill -> adds every step above the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take. Pulse: a pump of pulsePct% within pulseSec s -> the short is cut; a dump -> a short with the move. Exits are limits chased after the price. autoStep=true takes bandTp/bandTrailGap from the fees.
+On each grid coin: SELL limits from +bandPct% above the price of ${Math.max(1, Math.round(P.followDelayMin) || 1)} min ago (they follow the price with that delay and move at most once per that time, so a fast pump fills them; bandLevels, each further by the fee step); a fill -> adds every step above the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take. Pulse: a pump of pulsePct% within pulseSec s -> the short is cut; a dump -> a short with the move. Exits are limits chased after the price. autoStep=true takes bandTp/bandTrailGap from the fees.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT.
 Open positions: ${JSON.stringify(positions)}
 Last trades (newest last): ${JSON.stringify(trades)}

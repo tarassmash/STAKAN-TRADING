@@ -125,6 +125,19 @@
   }
   .log div { margin-bottom: 3px; }
 
+  .ai-panel { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 4px 0 14px; background: #0d1117; }
+  .ai-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .ai-head b { font-size: .9rem; }
+  .ai-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: .78rem; color: var(--muted); margin-bottom: 6px; }
+  .ai-stats span b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .ai-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .72rem; color: var(--muted); margin-bottom: 4px; }
+  .ai-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  #aiChart { height: 260px; width: 100%; }
+  .ai-list { margin-top: 8px; font-size: .74rem; max-height: 190px; overflow-y: auto; }
+  .ai-row { display: grid; grid-template-columns: 54px 108px 82px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,.06); align-items: start; }
+  .ai-row .r { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+  .ai-row .w { color: var(--muted); overflow-wrap: anywhere; }
+  @media (max-width: 640px) { .ai-row { grid-template-columns: 46px 1fr 70px; } .ai-row .w { grid-column: 1 / -1; } }
   #chart {
     flex: none; height: 460px; min-height: 320px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -481,6 +494,19 @@
       </div>
     </div>
 
+    <div class="ai-panel">
+      <div class="ai-head"><b>🧠 Как AI (fal) принимает решения</b><span id="aiUpd" style="font-size:.72rem;color:var(--muted)"></span></div>
+      <div class="ai-stats" id="aiStats">решений ещё нет — появятся после запуска автопилота</div>
+      <div class="ai-legend">
+        <span><i style="background:#a855f7"></i>итог решений AI, USDT (сделки + открытые позиции)</span>
+        <span><i style="background:#0ecb81"></i>закрытые сделки, USDT</span>
+        <span><i style="background:#f0b90b"></i>баланс счёта (левая шкала)</span>
+        <span><i style="background:#2ea6ff"></i>удачных из последних 10, %</span>
+        <span>▮ результат каждого решения · ● решение: <b style="color:#0ecb81">в плюс</b> / <b style="color:#f6465d">в минус</b> / <b style="color:#848e9c">0</b>; «→XXX» — смена монеты</span>
+      </div>
+      <div id="aiChart"></div>
+      <div class="ai-list" id="aiList"></div>
+    </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <span style="color:var(--muted);font-size:0.85rem;">Позиция (выбранная)</span>
       <button class="btn btn-sec" id="refreshPosBtn" style="width:auto;margin:0;padding:6px 12px;">Обновить</button>
@@ -825,7 +851,58 @@
   $('onceBtn').onclick = () => act('once');
   $('refreshPosBtn').onclick = () => act('position');
   $('closePosBtn').onclick = () => act('close', { symbol: ($('symbol').value || '').toUpperCase().trim() }, 'Закрыть позицию market?');
-  load().then(() => loadChart(true));
+  // ---------- 🧠 the decision chart ----------
+  let aiC = null, aiCum, aiReal, aiEq, aiRate, aiBar, aiN = -1;
+  function aiInit() {
+    if (aiC || !window.LightweightCharts) return;
+    const el = $('aiChart');
+    aiC = LightweightCharts.createChart(el, { width: el.clientWidth, height: 260, layout: { background: { color: '#0d1117' }, textColor: '#848e9c' },
+      grid: { vertLines: { color: 'rgba(255,255,255,.04)' }, horzLines: { color: 'rgba(255,255,255,.04)' } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b3139' }, rightPriceScale: { borderColor: '#2b3139' }, leftPriceScale: { visible: true, borderColor: '#2b3139' },
+      localization: { timeFormatter: t => new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) } });
+    aiBar = aiC.addHistogramSeries({ priceScaleId: 'res', priceFormat: { type: 'price', precision: 3, minMove: 0.001 }, title: 'решение' });
+    aiC.priceScale('res').applyOptions({ scaleMargins: { top: 0.72, bottom: 0 } });
+    aiRate = aiC.addLineSeries({ priceScaleId: 'rate', color: '#2ea6ff', lineWidth: 2, title: '% удачных', lastValueVisible: true, priceLineVisible: false, priceFormat: { type: 'custom', formatter: v => Math.round(v) + '%' }, autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
+    aiC.priceScale('rate').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.72 } });
+    aiEq = aiC.addLineSeries({ priceScaleId: 'left', color: '#f0b90b', lineWidth: 1, title: 'баланс', priceLineVisible: false });
+    aiReal = aiC.addLineSeries({ color: '#0ecb81', lineWidth: 1, lineStyle: 2, title: 'сделки', priceLineVisible: false, priceFormat: { type: 'price', precision: 3, minMove: 0.001 } });
+    aiCum = aiC.addLineSeries({ color: '#a855f7', lineWidth: 3, title: 'итог AI', priceFormat: { type: 'price', precision: 3, minMove: 0.001 } });
+    new ResizeObserver(() => aiC.applyOptions({ width: el.clientWidth })).observe(el);
+  }
+  const fmtS = (v) => (v >= 0 ? '+' : '') + Number(v).toFixed(3);
+  async function loadAi() {
+    let r; try { r = await fetch('/api/ai', { cache: 'no-store' }).then(r => r.json()); } catch (e) { return; }
+    const J = (r && r.journal) || []; aiInit(); if (!aiC) return;
+    $('aiUpd').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
+    if (!J.length) { $('aiStats').textContent = 'решений ещё нет — появятся после запуска автопилота'; $('aiList').innerHTML = ''; return; }
+    let t0 = 0, cum = 0, real = 0, cumD = [], realD = [], eqD = [], rateD = [], barD = [], mk = [], win = [];
+    J.forEach(x => {
+      let t = Math.floor(x.at / 1000); if (t <= t0) t = t0 + 1; t0 = t;
+      const res = x.res || 0; cum += res; real += x.real || 0;
+      cumD.push({ time: t, value: +cum.toFixed(4) }); realD.push({ time: t, value: +real.toFixed(4) });
+      if (x.eq != null) eqD.push({ time: t, value: x.eq });
+      barD.push({ time: t, value: res, color: res > 0 ? 'rgba(14,203,129,.6)' : res < 0 ? 'rgba(246,70,93,.6)' : 'rgba(132,142,156,.4)' });
+      if (!x.live) { win.push(res > 0 ? 1 : 0); if (win.length > 10) win.shift(); rateD.push({ time: t, value: Math.round(win.reduce((a, b) => a + b, 0) / win.length * 100) }); }
+      mk.push({ time: t, position: 'inBar', shape: 'circle', size: x.sw ? 1.4 : 0.8, color: x.live ? '#c4b5fd' : res > 0 ? '#0ecb81' : res < 0 ? '#f6465d' : '#848e9c', text: x.sw ? '→' + String(x.sym || '').replace(/USDT$/, '') : '' });
+    });
+    aiCum.setData(cumD); aiReal.setData(realD); aiEq.setData(eqD); aiRate.setData(rateD); aiBar.setData(barD); aiCum.setMarkers(mk);
+    if (aiN !== J.length) { aiN = J.length; aiC.timeScale().fitContent(); }   // a new decision -> the whole history fits the width
+    // the summary
+    const done = J.filter(x => !x.live), ok = done.filter(x => x.res > 0), bad = done.filter(x => x.res < 0);
+    const grp = (f) => { const g = done.filter(f); return g.length ? `${g.length} · ${Math.round(g.filter(x => x.res > 0).length / g.length * 100)}% в +, ${fmtS(g.reduce((a, x) => a + x.res, 0))}` : '—'; };
+    const best = done.reduce((a, x) => !a || x.res > a.res ? x : a, null), worst = done.reduce((a, x) => !a || x.res < a.res ? x : a, null);
+    $('aiStats').innerHTML = `<span>решений <b>${J.length}</b></span><span>удачных <b style="color:var(--green)">${done.length ? Math.round(ok.length / done.length * 100) : 0}%</b> (${ok.length} / ${bad.length} в −)</span>`
+      + `<span>итог <b style="color:${cum >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtS(cum)} USDT</b></span><span>в среднем <b>${done.length ? fmtS(done.reduce((a, x) => a + x.res, 0) / done.length) : '—'}</b> за решение</span>`
+      + `<span>смена монеты: <b>${grp(x => x.sw)}</b></span><span>остался: <b>${grp(x => !x.sw)}</b></span>`
+      + `<span>AI: <b>${grp(x => x.by === 'ai')}</b></span><span>алгоритм: <b>${grp(x => x.by !== 'ai')}</b></span>`
+      + (best ? `<span>лучшее <b style="color:var(--green)">${fmtS(best.res)}</b> (${esc(String(best.sym).replace(/USDT$/, ''))})</span>` : '') + (worst && worst.res < 0 ? `<span>худшее <b style="color:var(--red)">${fmtS(worst.res)}</b> (${esc(String(worst.sym).replace(/USDT$/, ''))})</span>` : '');
+    $('aiList').innerHTML = J.slice(-30).reverse().map(x => `<div class="ai-row"><span>${new Date(x.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>`
+      + `<span>${x.sw ? '→ ' : '= '}<b>${esc(String(x.sym || '').replace(/USDT$/, ''))}</b>${x.by === 'ai' ? '' : ' <span style="color:var(--muted)">(алг.)</span>'}<br><span style="color:var(--muted)">x${x.lev ?? '—'} · ${x.lot ?? '—'}$${x.hunt ? ' · 🎯' : ''}</span></span>`
+      + `<span class="r" style="color:${x.res > 0 ? 'var(--green)' : x.res < 0 ? 'var(--red)' : 'var(--muted)'}">${fmtS(x.res || 0)}${x.live ? '<br><span style="font-weight:400;color:#c4b5fd">идёт…</span>' : `<br><span style="font-weight:400;color:var(--muted)">${x.n || 0} сд.</span>`}</span>`
+      + `<span class="w">${esc(x.why || '')}${x.ch && x.ch.length ? `<br><span style="color:#c4b5fd">${esc(x.ch.join(' · '))}</span>` : ''}</span></div>`).join('');
+  }
+  setInterval(loadAi, 15000);
+  load().then(() => { loadChart(true); loadAi(); });
   setInterval(load, 2000);
   setInterval(liveChart, 5000);
   setInterval(() => { if (S) { wsConnect(); wsSub(); } }, 3000);

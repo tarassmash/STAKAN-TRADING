@@ -60,7 +60,7 @@ function create(host) {
   if (!lsGet("sg.v5", false)) { P.momIoc = false; save(); lsSet("sg.v5", true); }   // no market / IOC orders anywhere: limits with chasing
   if (!lsGet("sg.v4", false)) { P.faEveryMin = 3; save(); lsSet("sg.v4", true); }   // the full autopilot re-picks the coin every 3 min (was 1)
   const S = Object.assign({ lastAuto: 0, cycles: 0, trades: 0, wins: 0, losses: 0, dayPnl: 0, dayKey: "", targets: [], history: [] }, lsGet("sg.s", {}));
-  const saveS = () => lsSet("sg.s", { faAi: S.faAi, fa: S.fa, ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
+  const saveS = () => lsSet("sg.s", { pnlCum: S.pnlCum || 0, faAi: S.faAi, fa: S.fa, ai: S.ai, lastAuto: S.lastAuto, cycles: S.cycles, trades: S.trades, wins: S.wins, losses: S.losses, dayPnl: S.dayPnl, dayKey: S.dayKey, targets: S.targets, history: S.history.slice(-300) });
   const W = {};                               // watches: symbol -> state
   const LOG = lsGet("sg.log", []);
   let busy = false, timer = null, status = "ВЫКЛ", conn = { ok: null, text: "—" }, shukinSig = null, lastSave = 0;
@@ -77,7 +77,7 @@ function create(host) {
   }
   function recordTrade(pnl, sym, how) {
     ensureDayKey();
-    S.trades++; S.dayPnl += pnl; if (pnl >= 0) S.wins++; else S.losses++;
+    S.trades++; S.dayPnl += pnl; S.pnlCum = (S.pnlCum || 0) + pnl; if (pnl >= 0) S.wins++; else S.losses++;
     S.history.push({ at: now(), sym, pnl: +pnl.toFixed(5), how });
     saveS();
     log(`Сделка ${sym || ""} ${how || ""} PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)}`, pnl >= 0 ? "ok" : "err");
@@ -782,21 +782,39 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
     if (sym !== cur && !found.some(t => t.symbol === sym)) sym = "";
     return { symbol: sym, params: d.params || {}, reason: String(d.reason || "").slice(0, 300) };
   }
+  // ---------- 📈 the journal of the AI decisions: each one is judged by what happened until the next one ----------
+  // result = realized PnL of the trades closed in its window + the change of the open positions' uPnL
+  const AIJ = lsGet("ai.journal", []);
+  const uNow = () => Object.values(W).reduce((a, w) => a + Number((w.pos && w.pos.size > 0 ? w.pos.unrealisedPnl : w.posEx && w.posEx.size > 0 ? w.posEx.unrealisedPnl : 0) || 0), 0);
+  function journal(e) {
+    const t = now(), pc = S.pnlCum || 0, u = uNow(), last = AIJ[AIJ.length - 1];
+    if (last && last.res == null) { last.res = +((pc - last.pc) + (u - last.u)).toFixed(4); last.real = +(pc - last.pc).toFixed(4); last.n = S.trades - last.tr; last.end = t; }
+    AIJ.push(Object.assign({ at: t, pc, u: +u.toFixed(4), tr: S.trades, eq: AV.eq != null ? +AV.eq.toFixed(2) : null, res: null }, e));
+    while (AIJ.length > 500) AIJ.shift();
+    lsSet("ai.journal", AIJ);
+  }
+  function aiJournal() {
+    const pc = S.pnlCum || 0, u = uNow();
+    return AIJ.map(x => x.res != null ? x : Object.assign({}, x, { res: +((pc - x.pc) + (u - x.u)).toFixed(4), real: +(pc - x.pc).toFixed(4), n: S.trades - x.tr, live: true }));
+  }
+
   // the decision of one tick: the AI if fal is there, else the algorithm (the top-1)
   async function faDecide(why, exclude) {
     const cur = (P.symbol || "").toUpperCase(), fa = faState();
     const found = await scanLast1m(exclude);
     if (!found.length) { log("🚀 Автопилот: нет ликвидных пар с движением за 1 мин — повторю позже", "err"); return; }
-    let target = found[0].symbol, by = "алгоритм (топ-1)";
+    let target = found[0].symbol, by = "алгоритм (топ-1)", jr = { why: "самая волатильная за 1 мин", ch: [] };
     if (host.fal) {
       try {
         const d = await aiPilot(found, cur);
         const ch = aiApply(d.params);
         target = d.symbol || cur || target; by = "🧠 AI";   // a coin outside the list -> stay where it is
-        S.faAi = { at: now(), symbol: target, reason: d.reason, changes: ch }; saveS();
+        S.faAi = { at: now(), symbol: target, reason: d.reason, changes: ch }; saveS(); jr = { why: d.reason, ch };
         log(`🧠 AI-пилот: ${target === cur ? "остаюсь на " + cur : "монета → " + target}${ch.length ? " · настройки: " + ch.join(", ") : ""}${d.reason ? " — " + d.reason : ""}`, "ok");
       } catch (e) { log("🧠 AI-пилот (fal.ai) недоступен: " + e.message + " — решает алгоритм", "err"); }
     }
+    await availUsdt();
+    journal({ sym: target, prev: cur, sw: target !== cur, by: by === "🧠 AI" ? "ai" : "algo", why: String(jr.why || "").slice(0, 200), ch: jr.ch || [], top: found[0].symbol, lev: P.leverage, lot: P.orderUsdt, hunt: !!P.hunt });
     if (target === cur && fa.sym === cur && fa.since) { if (by !== "🧠 AI") log(`🚀 Автопилот: ${cur} всё ещё самая волатильная за 1 мин — сетка остаётся`, "info"); return; }
     const t = found.find(x => x.symbol === target);
     const list = t ? [t, ...found.filter(x => x !== t)] : found;
@@ -996,6 +1014,6 @@ Answer ONE JSON: {"choice": <index or -1>, "reason": "коротко по-рус
       watches: Object.values(W).map(w => ({ symbol: w.symbol, mid: w.mid, pos: w.pos && w.pos.size ? w.pos : (w.posEx || null), orders: w.orders, ourOrders: w.ourOrders, isSpike: w.isSpike, volOk: w.volOk, status: w.status, atrPct: w.atrPct, rsi: w.rsi, tape: w.tape || null, mom: w.mom || null, steps: w.steps || null, band: w.band || null, levels: w.levels || null, hl: HUNT.levels(w.symbol), open: w.open || null, sl: w.slSet ? parseFloat(String(w.slSet).split("|")[0]) : null, targets: w.targets || [], side: w.side || (P.strategy === "sell" ? -1 : 0), dir: w.dir || null, spark: (w.candles || []).slice(-40).map(c => c.close), sig: w.sig || null })) };
   }
   if (P.running) setTimeout(() => { log("Сервер перезапущен — бот продолжает работу", "ok"); runCycle(); schedule(); if (!P.fullAuto || P.strategy !== "follow") { log("Остался только полный автопилот под управлением AI — перевожу бота в него", "ok"); fullAuto().catch(e => log("Автопилот: " + e.message, "err")); } else syncHunt(); }, 3000);
-  return { hunt, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
+  return { aiJournal, hunt, fills, fullAuto, aiLearn, start, stop, runCycle, setParams, toggleShukin, scanPump, scanUltraVol1m, closePos, position, clearTargets, sync, view, params: P, analyzeShukinContext, getKlines, getOpenInterest };
 }
 module.exports = { create };

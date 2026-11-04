@@ -161,6 +161,7 @@ http.createServer(async (req, res) => {
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Sell Grid"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
     if (url.pathname === "/api/state") return json(200, state());
+    if (url.pathname === "/api/ai") return json(200, { journal: SG.aiJournal() });
     if (url.pathname === "/api/chart") { try { return json(200, await chart(url.searchParams)); } catch (e) { return json(200, { error: e.message }); } }
     if (req.method === "POST" && url.pathname.startsWith("/api/")) {
       if (!PASSWORD) return json(200, { error: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом зі сторінки" });

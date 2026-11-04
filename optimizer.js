@@ -80,7 +80,7 @@ async function optimize(c, P, steps, strategy) {
   if (strategy === "follow") {
     for (const bandPct of [1, 1.5, 2, 3, 4]) for (const levels of [1, 3, 5]) for (const adds of [0, 3, 5]) for (const tp of [mkt, 1, 1.5, 2.5].filter((v, i, a) => v >= mkt && a.indexOf(v) === i))
       for (const gr of [0.3, 0.5]) for (const sl of [1000]) for (const pulse of [0, 1, 1.5, 2.5])
-        grid.push({ bandPct, levels, adds, step: lim, tp: +tp.toFixed(3), gap: +(tp * gr).toFixed(3), sl, pulse, pulseSec: P.pulseSec, momSl: 1000, momHold: P.momHoldMin, bandRef: P.bandRef });
+        grid.push({ bandPct, levels, adds, step: lim, tp: +Math.max(tp, mkt / (1 - gr)).toFixed(3), gap: +(Math.max(tp, mkt / (1 - gr)) * gr).toFixed(3), sl, pulse, pulseSec: P.pulseSec, momSl: 1000, momHold: P.momHoldMin, bandRef: P.bandRef });
   } else {
     for (const step of [lim, 0.6, 1, 1.5, 2].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const levels of [3, 5, 8]) for (const tp of [lim, 0.6, 1, 1.5].filter((v, i, a) => v >= lim && a.indexOf(v) === i)) for (const sl of [1000])
       grid.push({ step: +step.toFixed(3), levels, tp: +tp.toFixed(3), sl, makerExit: P.makerExit });

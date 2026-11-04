@@ -148,7 +148,9 @@ function create(h) {
     let qty = h.floorToStep(usdt / px, inst.qtyStep);
     if (qty < parseFloat(inst.minQty)) qty = parseFloat(inst.minQty);
     if (qty * px < inst.minNotional) qty = h.roundToStep(Math.ceil(inst.minNotional * 1.02 / px / parseFloat(inst.qtyStep)) * parseFloat(inst.qtyStep), inst.qtyStep);
-    const hunt = H[sym] = { sym, d, state: "entering", at: now(), px, qty, score: a.score, why: a.why.join(", "), best: px, entry: px, act: false, live };
+    const fee = await h.feeOf(sym), minTake = +(Math.max(10, P.feeX || 10) * 2 * Math.max(fee.taker, fee.maker, 0.01)).toFixed(3);   // 10x (taker in + taker out)
+    const actP = +Math.max(P.hAct || 0.3, minTake + (P.hGap || 0.25)).toFixed(3);   // even the worst trailing exit keeps >= minTake
+    const hunt = H[sym] = { sym, d, state: "entering", at: now(), px, qty, score: a.score, why: a.why.join(", "), best: px, entry: px, act: false, live, minTake, actP };
     log(`🎯 ${sym}: ${d > 0 ? "▲ ПАМП" : "▼ ДАМП"} через секунды? (оценка ${a.score}: ${hunt.why}) — вход ${d > 0 ? "BUY" : "SELL"} лимиткой ${qty} @ ${px}${live ? "" : " [СИМУЛЯЦИЯ]"}`, "ok");
     if (!live) { hunt.state = "in"; hunt.entry = px; hunt.best = px; return; }
     await h.ensureLev(sym, P.category);
@@ -165,7 +167,7 @@ function create(h) {
     const d = x.d, prof = (px / x.entry - 1) * 100 * d;
     x.last = px; x.prof = +prof.toFixed(3);
     if (d > 0 ? px > x.best : px < x.best) x.best = px;
-    if (!x.act && prof >= (P.hAct || 0.3)) { x.act = true; log(`🎯 ${sym}: импульс пошёл +${prof.toFixed(2)}% — трейлинг-выход включён, откат ${P.hGap || 0.25}% → выход лимиткой`, "ok"); }
+    if (!x.act && prof >= (x.actP || P.hAct || 0.3)) { x.act = true; log(`🎯 ${sym}: импульс пошёл +${prof.toFixed(2)}% — трейлинг-выход включён, откат ${P.hGap || 0.25}% → выход лимиткой (не меньше +${x.minTake}% = 10× комиссии)`, "ok"); }
     const back = (d > 0 ? (x.best - px) / x.best : (px - x.best) / x.best) * 100;
     if (x.act && back >= (P.hGap || 0.25)) return exit(sym, `трейлинг: откат ${back.toFixed(2)}% от лучшей (+${((x.best / x.entry - 1) * 100 * d).toFixed(2)}%)`);
   }
@@ -196,7 +198,7 @@ function create(h) {
           if (x.state === "entering") {
             if (mine) {
               x.state = "in"; x.entry = pos.avgPrice; x.best = pos.avgPrice; x.size = pos.size;
-              log(`🎯 ${sym}: вошёл ${x.d > 0 ? "ЛОНГ" : "ШОРТ"} ${pos.size} @ ${pos.avgPrice} — трейлинг-выход лимиткой ждёт +${P.hAct || 0.3}%, без стоп-лосса`, "ok");
+              log(`🎯 ${sym}: вошёл ${x.d > 0 ? "ЛОНГ" : "ШОРТ"} ${pos.size} @ ${pos.avgPrice} — трейлинг-выход лимиткой ждёт +${x.actP}% (минимум 10× комиссии = +${x.minTake}% + откат), без стоп-лосса`, "ok");
             }
             if (now() - x.at > 3000) {   // the rest of the entry limit is cancelled: the impulse does not wait
               try { await h.priv("POST", "/v5/order/cancel", { category: P.category, symbol: sym, orderId: x.orderId }); } catch (e) { /* filled / gone */ }
@@ -258,7 +260,7 @@ function create(h) {
       hunts: Object.values(H).map(x => ({ sym: x.sym, d: x.d, state: x.state, entry: x.entry, best: x.best, prof: x.prof || 0, act: x.act, sec: Math.round((now() - x.at) / 1000), why: x.why, live: x.live })) };
   }
   const levels = (sym) => { const x = H[sym]; if (!x || x.state !== "in") return null; const d = x.d;
-    return { entry: x.entry, stop: null, act: x.entry * (1 + d * (P.hAct || 0.3) / 100), trail: x.act ? x.best * (1 - d * (P.hGap || 0.25) / 100) : null, d }; };
+    return { entry: x.entry, stop: null, act: x.entry * (1 + d * (x.actP || P.hAct || 0.3) / 100), trail: x.act ? x.best * (1 - d * (P.hGap || 0.25) / 100) : null, d }; };
   return { start, stop, view, levels, isOn: () => on, has: (s) => !!H[s], _analyse: analyse, _B: B, _H: H, _tick: tick, _manage: manage, _onMsg: onMsg, _subs: () => subs };
 }
 module.exports = { create };

@@ -142,7 +142,7 @@ function create(host) {
     return (FEES[symbol] = { maker, taker, at: now() });
   }
   async function stepsOf(symbol, category) {
-    const f = await feeOf(symbol, category), X = Math.max(1, P.feeX || 10);
+    const f = await feeOf(symbol, category), X = Math.max(10, P.feeX || 10);   // never less than 10x the fees (the fees must not eat the deposit)
     const lim = +(X * 2 * Math.max(f.maker, 0.01)).toFixed(3);            // limit in + limit out
     const mkt = +(X * (Math.max(f.maker, 0.01) + f.taker)).toFixed(3);   // limit in + market out (stop / trailing)
     return { maker: f.maker, taker: f.taker, lim, mkt };
@@ -474,7 +474,8 @@ function create(host) {
       // and the trailing starts only when even its distance still leaves a profit after fees
       let gapUse = w.posMom ? +Math.min(3, Math.max(gapP || 0.3, 1.2 * typical1m(w))).toFixed(3) : gapP;
       if (w.posMom && w.trailGap && Math.abs(gapUse / w.trailGap - 1) < 0.15) gapUse = w.trailGap;   // small changes do not move it (no re-setting every cycle)
-      const tpUse = w.posMom ? Math.max(ST.mkt, gapUse + ST.mkt * 0.5) / 100 : Math.max(tp, ((gapUse || 0) + ST.mkt * 0.5) / 100);
+      // the trailing starts so high that even an exit right after a full pull-back keeps >= 10x the round-trip fee (no micro takes)
+      const tpUse = w.posMom ? (ST.mkt + (gapUse || 0)) / 100 : Math.max(tp, ((gapUse || 0) + ST.mkt) / 100);
       const tpPx = roundToStep(pos.avgPrice * (1 + pd * tpUse), inst.tickSize);
       if (P.bandTrail) {
         // trailing take by the bot (the exchange trailing stop would close by market): it activates at the take level,
@@ -661,6 +662,7 @@ function create(host) {
   // ---------- 🎯 the impulse hunter ----------
   const HUNT = require("./hunter").create({ P, log, lsGet, lsSet, placeEntry: (b, i) => placeEntry(b, i), wsUrl: () => host.wsUrl ? host.wsUrl() : "", pub, priv, keys,
     getInstrument, getPosition, roundToStep, floorToStep, ensureLev, setLimitStop, clearPosStops, cancelOurOrders, recordTrade,
+    feeOf: (s2) => feeOf(s2, P.category),
     closeChase: (s2, c, why, opt) => closeChase(s2, c, why, opt), chasing: (s2) => chasing(s2),
     posIdx: async (s2, d) => { await shortIdx(s2, P.category); return HEDGE[s2] ? (d > 0 ? 1 : 2) : 0; },
     dayStopped: () => (P.maxDailyLoss || 0) > 0 && S.dayPnl <= -Math.abs(P.maxDailyLoss),
@@ -752,7 +754,7 @@ function create(host) {
     const hv = HUNT.view();
     const d = await host.fal(`You FULLY run a crypto futures bot on Bybit 24/7 (USDT perpetuals). Goal: the maximum profit; do not blow the account.
 Account: equity ${AV.eq != null ? AV.eq.toFixed(2) : "?"} USDT, free ${AV.v != null ? AV.v.toFixed(2) : "?"} USDT. You set the leverage (1-10, now x${P.leverage}) and orderUsdt = the position size of ONE order in USDT (now ${P.orderUsdt}); every opening order is cut to the free money anyway. The only hard limit you cannot change: the day loss limit ${P.maxDailyLoss} USDT (then all stops till the next day).
-ONLY limit orders are used (never market). There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
+ONLY limit orders are used (never market). Every take (limit take, trailing, tape exit, hunter exit) keeps at least 10x the round-trip Bybit fee - the bot raises any lower value itself, micro takes are impossible. There are NO STOP-LOSSES at all (the user's decision): a losing position is held until the take / trailing, the pulse cut or liquidation. So choose the leverage, the lot and the adds so the account survives a 15-20% move against a position.
 How the bot trades (only limit orders, never market): with no position it keeps SELL limits from +bandPct% above and BUY limits from -bandPct% below the average of the last bandRef 1m candles (bandLevels per side, each further by the fee step). A fill -> the other side is removed, adds every step beyond the average (bandAdds), a take: trailing from bandTp% with a pull-back of bandTrailGap% (bandTrail) or a limit take; no stop-loss. Pulse: a move of pulsePct% within pulseSec s -> the position against it is cut, the bot enters with the move, back to the limits after momHoldMin calm minutes. smartOn: the live tape catches a move at its start (fastK × usual move, fastAggr share of volume, fastSpeed × tape speed). Exits are limits chased after the price; after chaseAggrSec s a limit at the opposite best price. autoStep=true ignores bandTp/bandTrailGap and takes them from the fees.
 Parallel impulse hunter (hunt=true/false): watches the order books + tape of ~25 liquid coins, 4x a second scores an explosion seconds ahead (book imbalance up to 2, pulled liquidity up to 2, tape speed + aggression up to 3, an early move 1; out of 8), score >= hScore -> enters by a limit at the opposite best price, a trailing exit by a limit from +hAct% with a pull-back hGap% (no stop-loss), out after hTimeSec s without the impulse, up to hMax at once. Its stats: ${JSON.stringify(hv.stats)}, active: ${JSON.stringify(hv.hunts.map(x => ({ sym: x.sym, d: x.d, prof: x.prof, sec: x.sec })))}.
 Fees: ${JSON.stringify(steps)}. Day PnL ${S.dayPnl.toFixed(3)} USDT (daily loss limit ${P.maxDailyLoss}).
@@ -890,7 +892,7 @@ Answer ONE JSON: {"symbol": "XXXUSDT", "params": {...}, "reason": "коротк�
     if (w.pos && w.pos.size > 0 && w.posMom && !w.exitNow) {
       const pd = w.pos.side === "Buy" ? 1 : -1, f10 = TAPE.flow(sym, 10000);
       if (f10) { const against = pd > 0 ? 1 - f10.buyShare : f10.buyShare, prof = (f10.last / w.pos.avgPrice - 1) * 100 * pd;
-        if (against >= P.fastAggr && -pd * f10.mv >= typ * 0.3 && prof > 0.1) { w.exitNow = { why: `лента развернулась: ${Math.round(against * 100)}% объёма против, ${f10.mv}% за 10 с`, prof: +prof.toFixed(2) }; react(sym); } }
+        if (against >= P.fastAggr && -pd * f10.mv >= typ * 0.3 && prof >= (w.steps ? w.steps.mkt : 1.1)) { w.exitNow = { why: `лента развернулась: ${Math.round(against * 100)}% объёма против, ${f10.mv}% за 10 с`, prof: +prof.toFixed(2) }; react(sym); } }
     }
   }
 

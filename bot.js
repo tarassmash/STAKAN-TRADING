@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 0.7, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 3, maxPos: 20, live: false };
+const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 3, maxPos: 20, live: false };
 const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxPos"];
 
 function create(host) {
@@ -26,6 +26,7 @@ function create(host) {
   const now = () => Date.now(), sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
+  if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
   const saveStat = () => lsSet("vg.stat", STAT);
   const OURS = new Set(lsGet("vg.syms", []));          // coins this bot traded: their shorts get the take and the adds

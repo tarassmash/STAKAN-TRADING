@@ -102,6 +102,12 @@ function create(host) {
     return BTC;
   }
 
+  // how many add orders a short may still place (the same limits as the add ladder in gridFor)
+  function addsLeft(sym) {
+    const done = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1);
+    return Math.max(0, Math.min(CFG.levels, Math.round(CFG.maxAdds) - done));
+  }
+
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
   // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
   async function budget() {
@@ -110,9 +116,11 @@ function create(host) {
     if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); eq = +((w.list || [])[0] || {}).totalEquity || 0; } catch (e) { /* keep the last */ } }
     else eq = (CFG.simEq || 1000) + (STAT.simPnl || 0);
     const posIM = Object.values(C).filter(c => c.pos && c.pos.size > 0).reduce((a, c) => a + c.pos.size * c.pos.avg / lev, 0);
-    const held = Object.keys(C).filter(hasShort).length;
-    const cap = eq * CFG.budgetPct / 100, free = cap - posIM - held * perCoin;
-    BUD = Object.assign(BUD || {}, { eq, cap, posIM, held, perCoinBase: perCoin, free, at: now() });
+    const heldSyms = Object.keys(C).filter(hasShort), held = heldSyms.length;
+    // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
+    const addRes = heldSyms.reduce((a, s) => a + addsLeft(s) * lot() * 1.03 / lev, 0);
+    const cap = eq * CFG.budgetPct / 100, free = cap - posIM - addRes;
+    BUD = Object.assign(BUD || {}, { eq, cap, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
     return BUD;
   }
 
@@ -157,7 +165,7 @@ function create(host) {
       const keep = new Set(flat.slice(0, K + 1).map(x => x.sym));
       const next = flat.filter(x => ACTIVE.includes(x.sym) && keep.has(x.sym)).map(x => x.sym).slice(0, K);
       for (const x of flat.slice(0, K)) if (next.length < K && !next.includes(x.sym)) next.push(x.sym);
-      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${CFG.budgetPct}% = ${B.cap.toFixed(2)} · шорты ${B.posIM.toFixed(2)} + доборы ${(B.held * B.perCoin).toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
+      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${CFG.budgetPct}% = ${B.cap.toFixed(2)} · шорты ${B.posIM.toFixed(2)} + доборы ${B.addRes.toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
       BUD.prevK = K; BUD.prevLot = B.lot; BUD.kLogged = true;
       const added = next.filter(s => !ACTIVE.includes(s)), removed = ACTIVE.filter(s => !next.includes(s));
       ACTIVE = next;
@@ -237,7 +245,10 @@ function create(host) {
         c.lastAdd = Math.max(c.lastAdd || 0, +x.execPrice); LAST_ADD[x.symbol] = c.lastAdd; saveLastAdd(); touched.add(x.symbol);
         log(`${x.symbol}: SELL ${x.execQty} исполнен @ ${x.execPrice}${hasShort(x.symbol) ? " — добор" : ""} → следующий добор +${CFG.addStep}%`, "ok");
         const tr = TRADES[x.symbol] || (TRADES[x.symbol] = { sym: x.symbol, open: now(), first: +x.execPrice, fills: 0, qty: 0, maxPx: +x.execPrice, minPx: +x.execPrice, range: +(c.range || 0).toFixed(2), btcDown: BTC.down, lot: lot(), cfg: { step: CFG.step, addStep: CFG.addStep, take: CFG.take, trailGap: CFG.trailGap, lev: CFG.lev, levels: CFG.levels } });
-        tr.fills++; tr.qty += +x.execQty; saveTrades();
+        // one order filled in several parts is still ONE fill (otherwise partial fills eat the adds)
+        tr.ords = tr.ords || [];
+        if (!tr.ords.includes(x.orderId)) { tr.ords.push(x.orderId); tr.fills++; }
+        tr.qty += +x.execQty; saveTrades();
         jlog("fill", { sym: x.symbol, px: +x.execPrice, qty: +x.execQty, n: tr.fills, add: tr.fills > 1 });
       } else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — шорт закрыт в плюс`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; saveTrades(); } }
     }

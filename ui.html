@@ -108,7 +108,7 @@
     <div class="panel">
       <div class="stats" id="stats"></div>
       <div class="tbl"><table>
-        <thead><tr><th>Монета</th><th>Диап. 1m</th><th>Цена</th><th>Якорь (−1 мин)</th><th>Сетка SELL / доборы</th><th>Позиция</th><th>Средняя → выход · стоп</th><th>uPnL</th><th>Тейков</th></tr></thead>
+        <thead><tr><th>Монета</th><th>Диап. 1m</th><th>Цена</th><th>Якорь (−1 мин)</th><th>Сетка SELL / доборы</th><th>Позиция</th><th>Средняя → выход</th><th>uPnL</th><th>Тейков</th></tr></thead>
         <tbody id="coinsBody"><tr><td colspan="9" class="mut">Нажмите «СТАРТ»</td></tr></tbody>
       </table></div>
     </div>
@@ -178,7 +178,7 @@ function render() {
     const p = r.pos;
     return `<tr><td><b>${esc(r.sym.replace(/USDT$/, ""))}</b>${r.active ? "" : r.held ? ' <span class="mut">(доборы)</span>' : ' <span class="mut">(без сетки)</span>'}</td><td>${r.range ? r.range.toFixed(2) + "%" : "—"}</td><td>${f(r.last)}</td><td>${f(r.anchor)}</td>`
       + `<td class="grid">${(r.active || r.held) && r.grid.length ? r.grid.map(f).join(" · ") : "—"}</td>`
-      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side !== "Sell" ? "" : r.trail ? ' → <span class="up">🎯 трейл: мин ' + f(r.trail.best) + ", выход ≤ " + f(r.trail.level) + "</span>" : ' → <span class="up">' + (c.trailOn ? "трейлинг с " : "") + f(r.take) + "</span>") + (p.side === "Sell" && r.stop ? ' · <span class="dn">🛑 стоп ' + f(r.stop) + " (+" + ((r.stop / p.avg - 1) * 100).toFixed(2) + "%)</span>" : "") : "—"}</td>`
+      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side !== "Sell" ? "" : r.trail ? ' → <span class="up">🎯 трейл: мин ' + f(r.trail.best) + ", выход ≤ " + f(r.trail.level) + "</span>" : ' → <span class="up">' + (c.trailOn ? "трейлинг с " : "") + f(r.take) + "</span>") : "—"}</td>`
       + `<td class="${!p ? "mut" : p.upnl >= 0 ? "up" : "dn"}">${p ? (p.upnl >= 0 ? "+" : "") + (+p.upnl).toFixed(3) : "—"}</td><td>${r.takes}</td></tr>`;
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу самые волатильные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
   { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";

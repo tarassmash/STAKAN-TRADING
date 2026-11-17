@@ -624,7 +624,7 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
   function view() {
     const rows = [...new Set([...ACTIVE, ...Object.keys(C).filter(s => C[s].pos)])].map(s => {
       const c = coin(s);
-      return { sym: s, active: ACTIVE.includes(s), held: hasShort(s), range: c.range, last: c.lp || c.last, anchor: c.anchor, grid: c.grid, pos: c.pos, trail: (TRAIL[s] && TRAIL[s].on) ? { best: TRAIL[s].best, level: TRAIL[s].level } : (c.sim && c.sim.trail && c.sim.trail.on) ? { best: c.sim.trail.best, level: c.pos && c.pos.trail } : null, take: c.pos ? c.pos.avg * (1 - CFG.take / 100) : null, stop: c.pos ? ((STOPS[s] && STOPS[s].level) || c.pos.stop || null) : null, takes: c.takes };
+      return { sym: s, active: ACTIVE.includes(s), held: hasShort(s), range: c.range, last: c.lp || c.last, anchor: c.anchor, grid: c.grid, pos: c.pos, trail: (TRAIL[s] && TRAIL[s].on) ? { best: TRAIL[s].best, level: TRAIL[s].level } : (c.sim && c.sim.trail && c.sim.trail.on) ? { best: c.sim.trail.best, level: c.pos && c.pos.trail } : null, take: c.pos ? c.pos.avg * (1 - CFG.take / 100) : null, takes: c.takes };
     });
     const upnl = rows.reduce((a, r) => a + (r.pos ? r.pos.upnl : 0), 0);
     const unreal = Object.keys(C).filter(hasShort).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);

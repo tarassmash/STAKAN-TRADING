@@ -107,7 +107,14 @@ function create(host) {
   // how many add orders a short may still place (the same limits as the add ladder in gridFor)
   function addsLeft(sym) {
     const done = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1);
-    return Math.max(0, Math.min(CFG.levels, Math.round(CFG.maxAdds) - done));
+    let n = Math.max(0, Math.min(CFG.levels, Math.round(CFG.maxAdds) - done));
+    const c = C[sym], st = STOPS[sym];
+    if (n && c && c.pos && st && st.level) {   // adds at or above the stop never work - no orders, no reserve for them
+      const base = Math.max(c.lastAdd || 0, c.pos.avg);
+      let k = 0; while (k < n && base * (1 + CFG.addStep * (k + 1) / 100) < st.level) k++;
+      n = k;
+    }
+    return n;
   }
 
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
@@ -199,6 +206,8 @@ function create(host) {
       const base = Math.max(c.lastAdd || 0, c.pos.avg);
       const addsDone = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1), addsLeft = Math.max(0, Math.round(CFG.maxAdds) - addsDone);
       want = []; for (let k = 1; k <= Math.min(CFG.levels, room, addsLeft); k++) want.push(+rnd(base * (1 + CFG.addStep * k / 100), i.tick, "up"));
+      const stp = STOPS[sym] && STOPS[sym].level;
+      if (stp) { const n0 = want.length; want = want.filter(x => x < stp); if (want.length < n0 && !c.stopAddLogged) { c.stopAddLogged = true; log(`${sym}: доборы выше стопа ${fmt(stp)} не ставлю (${n0 - want.length} шт.) — деньги идут на новые монеты`, "info"); } }
       if (!addsLeft && !c.addsLogged) { c.addsLogged = true; log(`${sym}: сделано ${addsDone} доборов из ${CFG.maxAdds} — новых SELL нет, жду тейк`, "info"); } else if (addsLeft) c.addsLogged = false;
       c.grid = want;
     } else want = c.grid.slice(0, Math.min(CFG.levels, room));

@@ -89,10 +89,12 @@
     <div class="row"><label>Откат от минимума → выход, %</label><input type="number" id="trailGap" min="0.05" step="0.05" /></div>
     <div class="row"><label>Трейлинг сетки вниз, % (0 = выкл)</label><input type="number" id="gridTrail" min="0" step="0.1" /></div>
     <div class="row"><label>Тейк / старт трейлинга, %</label><input type="number" id="take" min="0.1" step="0.1" /></div>
+    <div class="row"><label title="Цена выросла на столько % выше средней цены шорта — позиция закрывается (стоп-лосс на бирже). 0 = выкл">Аварийный стоп, % выше средней (0 = выкл)</label><input type="number" id="stopPct" min="0" step="0.5" /></div>
+    <div class="row"><label title="Стоп идёт вниз за минимумом цены на это расстояние и только опускается. 0 = выкл">Трейлинг-стоп, % выше минимума (0 = выкл)</label><input type="number" id="trailStopPct" min="0" step="0.5" /></div>
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять сетки и доборы)</button>
-    <div class="note">Только лимитные заявки. <b>Выход только в плюс</b>: на −тейк% от средней включается трейлинг — выход ведётся за минимумом цены и срабатывает на откате (условная лимитка BUY reduce-only на бирже), никогда не хуже −тейк% от средней. <b>В минус не выходит никогда</b> — стопа нет. Пока позиции нет — сетка SELL с шагом «шаг сетки» за ценой (с опозданием). Шорт открыт — сетка входа снимается, вместо неё доборы каждые «добор, %» выше последнего исполненного SELL; после каждого добора тейк переставляется от новой средней.</div>
+    <div class="note">Только лимитные заявки. <b>Выход только в плюс</b>: на −тейк% от средней включается трейлинг — выход ведётся за минимумом цены и срабатывает на откате (условная лимитка BUY reduce-only на бирже), никогда не хуже −тейк% от средней. <b>Стоп на бирже</b> (стоп-лосс позиции, срабатывает даже если сервер лежит): аварийный — цена выше средней на «аварийный стоп %»; трейлинг — стоп идёт вниз за минимумом цены на «трейлинг-стоп %» и только опускается. Действует более близкий из двух. Пока позиции нет — сетка SELL с шагом «шаг сетки» за ценой (с опозданием). Шорт открыт — сетка входа снимается, вместо неё доборы каждые «добор, %» выше последнего исполненного SELL; после каждого добора тейк переставляется от новой средней.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD. После перезапуска сервера бот продолжает сам.</div>
   </aside>
@@ -136,7 +138,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos"];
+const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct", "trailStopPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
 let S = null, BUSY = false, DIRTY = false;
@@ -199,7 +201,7 @@ async function load() { try { S = await fetch("/api/state", { cache: "no-store" 
 document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
 $("trailOn").addEventListener("change", () => act("save"));
 $("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
-$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nЛимитки на ${c.budgetPct}% депозита: сетки на столько монет, сколько помещается (до ${c.maxCoins}), на каждой ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, БЕЗ СТОПА: выход только в плюс, на росте до ${c.maxAdds} доборов каждые ${c.addStep}%, плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
+$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nЛимитки на ${c.budgetPct}% депозита: сетки на столько монет, сколько помещается (до ${c.maxCoins}), на каждой ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, стоп: аварийный ${c.stopPct || 0}% выше средней, трейлинг ${c.trailStopPct || 0}% от минимума, на росте до ${c.maxAdds} доборов каждые ${c.addStep}%, плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
 $("stopBtn").onclick = () => act("stop", "Остановить бота? Сетки и доборы снимутся, открытые шорты останутся с тейком на бирже.");
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");

@@ -27,7 +27,7 @@ function create(host) {
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
   if (!lsGet("vg.adds35", false)) { if (CFG.addStep === 3) CFG.addStep = 5; if (CFG.maxAdds == null) CFG.maxAdds = 3; saveCfg(); lsSet("vg.adds35", true); }   // the default: 3 adds every 5 % (an own value stays)
-  if (!lsGet("vg.stop20", false)) { if (!(CFG.stopPct > 0)) CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20", true); }   // the emergency stop is on: 20 % against the short
+  if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
   const saveStat = () => lsSet("vg.stat", STAT);

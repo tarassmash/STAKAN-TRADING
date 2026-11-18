@@ -8,8 +8,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 20, live: false };
-const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct"];
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false };
+const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -28,6 +28,7 @@ function create(host) {
   const saveCfg = () => lsSet("vg.cfg", CFG);
   if (!lsGet("vg.adds35", false)) { if (CFG.addStep === 3) CFG.addStep = 5; if (CFG.maxAdds == null) CFG.maxAdds = 3; saveCfg(); lsSet("vg.adds35", true); }   // the default: 3 adds every 5 % (an own value stays)
   if (!lsGet("vg.split45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.split45", true); }   // the account is split 50/50 with gridbot-html: 45 % of the deposit here
+  if (!lsGet("vg.geo13", false)) { CFG.addMult = 1.3; CFG.stopPct = 5; saveCfg(); lsSet("vg.geo13", true); }   // adds ×1.3 each; the stop 5 % above the last planned add
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
@@ -71,8 +72,9 @@ function create(host) {
     return (f(v / s - (mode === "up" ? 1e-9 : -1e-9)) * s).toFixed(d);
   }
   const lot = () => Math.max(CFG.usdt, (BUD && BUD.lot) || 0);   // USDT per order: at least the setting, more when the money would lie idle
-  function qtyFor(i, px) {
-    let q = +rnd(lot() / px, i.step, "down");
+  const addK = (n) => Math.pow(Math.max(1, CFG.addMult || 1), Math.max(0, n));   // add №n = lot × addMult^n (geometric adds)
+  function qtyFor(i, px, mult) {
+    let q = +rnd(lot() * (mult || 1) / px, i.step, "down");
     if (q < i.minQty) q = i.minQty;
     if (q * px < i.minNot) q = +rnd(i.minNot * 1.02 / px, i.step, "up");
     return q;
@@ -142,7 +144,7 @@ function create(host) {
     }
     const heldSyms = Object.keys(C).filter(s => hasShort(s) && OURS.has(s)), held = heldSyms.length;
     // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
-    const addRes = heldSyms.reduce((a, s) => a + addsLeft(s) * lot() * 1.03 / lev, 0);
+    const addRes = heldSyms.reduce((a, s) => { const done = Math.max(0, ((TRADES[s] && TRADES[s].fills) || 1) - 1); let r = 0; for (let k = 1; k <= addsLeft(s); k++) r += lot() * addK(done + k) * 1.03 / lev; return a + r; }, 0);
     const capOwn = eq * CFG.budgetPct / 100;
     const cap = foreign == null ? capOwn : Math.max(capOwn, eq * CFG.fillPct / 100 - foreign), free = cap - posIM - addRes;
     BUD = Object.assign(BUD || {}, { eq, cap, capOwn, foreign, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
@@ -219,11 +221,11 @@ function create(host) {
     if (!c.lev) { try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: String(CFG.lev), sellLeverage: String(CFG.lev) }); } catch (e) { if (e.code !== 110043) log(`${sym}: плечо: ${e.message}`, "err"); } c.lev = true; }
     if (c.hedge == null) { try { const r = await priv("GET", "/v5/position/list", { category: "linear", symbol: sym }); c.hedge = (r.list || []).some(p => +p.positionIdx > 0); } catch (e) { c.hedge = false; } }
     const posQty = c.pos && c.pos.side === "Sell" ? c.pos.size : 0, room = Math.max(0, CFG.maxPos - Math.round(posQty / qty));
-    let want;
+    let want, wantQty = null;
     if (posQty > 0) {
       const base = Math.max(c.lastAdd || 0, c.pos.avg);
       const addsDone = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1), addsLeft = Math.max(0, Math.round(CFG.maxAdds) - addsDone);
-      want = []; for (let k = 1; k <= Math.min(CFG.levels, room, addsLeft); k++) want.push(+rnd(base * (1 + CFG.addStep * k / 100), i.tick, "up"));
+      want = []; wantQty = []; for (let k = 1; k <= Math.min(CFG.levels, room, addsLeft); k++) { const px = +rnd(base * (1 + CFG.addStep * k / 100), i.tick, "up"); want.push(px); wantQty.push(qtyFor(i, px, addK(addsDone + k))); }
       if (!addsLeft && !c.addsLogged) { c.addsLogged = true; log(`${sym}: сделано ${addsDone} доборов из ${CFG.maxAdds} — новых SELL нет, жду тейк`, "info"); } else if (addsLeft) c.addsLogged = false;
       c.grid = want;
     } else want = c.grid.slice(0, Math.min(CFG.levels, room));
@@ -231,13 +233,13 @@ function create(host) {
     const open = ((await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym })).list || []).filter(o => (o.orderLinkId || "").startsWith("vg_e")).sort((a, b) => +a.price - +b.price);
     const tick = +i.tick;
     for (let k = 0; k < Math.max(want.length, open.length); k++) {
-      const o = open[k], px = want[k];
+      const o = open[k], px = want[k], q = wantQty ? wantQty[k] : qty;
       if (o && px == null) { await cancelOrder(sym, o); continue; }
-      if (!o) { await placeEntry(sym, px, qty, c); continue; }
-      const qtyOff = Math.abs(+o.qty / qty - 1) > 0.1 && !(+o.cumExecQty > 0);   // the lot changed a lot -> the order follows it
+      if (!o) { await placeEntry(sym, px, q, c); continue; }
+      const qtyOff = Math.abs(+o.qty / q - 1) > 0.1 && !(+o.cumExecQty > 0);   // the lot changed a lot -> the order follows it
       if (Math.abs(+o.price - px) >= tick / 2 || qtyOff) {
-        try { await post("/v5/order/amend", Object.assign({ category: "linear", symbol: sym, orderId: o.orderId, price: String(px) }, qtyOff ? { qty: String(qty) } : {})); }
-        catch (e) { await cancelOrder(sym, o); await placeEntry(sym, px, qty, c); }
+        try { await post("/v5/order/amend", Object.assign({ category: "linear", symbol: sym, orderId: o.orderId, price: String(px) }, qtyOff ? { qty: String(q) } : {})); }
+        catch (e) { await cancelOrder(sym, o); await placeEntry(sym, px, q, c); }
       }
     }
   }
@@ -353,11 +355,15 @@ function create(host) {
       if (c.stopKey !== "none") { await clearStops(sym, c.pos.idx); c.stopKey = "none"; log(`${sym}: стопа нет — в минус не выхожу; на росте до ${CFG.maxAdds} доборов каждые ${CFG.addStep}%, выход только тейком в плюс`, "info"); }
       return;
     }
-    const sl = rnd(c.pos.avg * (1 + CFG.stopPct / 100), i.tick, "up");
+    // the stop sits stopPct % ABOVE THE LAST PLANNED ADD, so it never fires before all the adds are done
+    const base = Math.max(c.lastAdd || 0, c.pos.avg);
+    const done = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1), left = Math.max(0, Math.round(CFG.maxAdds) - done);
+    const lastAddPx = base * (1 + CFG.addStep * left / 100);
+    const sl = rnd(lastAddPx * (1 + CFG.stopPct / 100), i.tick, "up");
     if (c.stopKey === sl) return;
     try {
       await post("/v5/position/trading-stop", { category: "linear", symbol: sym, tpslMode: "Full", stopLoss: sl, slTriggerBy: "MarkPrice", slOrderType: "Market", positionIdx: c.pos.idx });
-      c.stopKey = sl; log(`${sym}: 🛑 аварийный стоп ${sl} (+${CFG.stopPct}% от средней ${fmt(c.pos.avg)}), маркет на бирже`, "info");
+      c.stopKey = sl; log(`${sym}: 🛑 стоп ${sl} — на ${CFG.stopPct}% выше ${left ? "последнего добора " + fmt(lastAddPx) + " (осталось доборов: " + left + ")" : "последнего добора " + fmt(base) + " (все доборы сделаны)"}, средняя ${fmt(c.pos.avg)}, маркет на бирже`, "info");
     } catch (e) {
       if (e.code === 34040) { c.stopKey = sl; return; }   // not modified: already there
       log(`${sym}: стоп: ${e.message}`, "err");
@@ -412,7 +418,7 @@ function create(host) {
           TRADES[s].fills++; TRADES[s].qty += fills[fills.length - 1].qty; jlog("fill", { sym: s, px: lv, n: TRADES[s].fills, add: false }); }
       } else {
         let top = Math.max(...fills.map(o => o.px));
-        while (fills.length < CFG.maxPos && fills.length - 1 < Math.round(CFG.maxAdds) && p >= top * (1 + CFG.addStep / 100)) { const lv = +rnd(top * (1 + CFG.addStep / 100), i.tick, "up"); fills.push({ px: lv, qty: qtyFor(i, lv) }); STAT.fills++; top = lv; log(`[СИМ] ${s}: добор №${fills.length - 1} SELL @ ${lv} (+${CFG.addStep}% от прошлого)`, "ok"); if (TRADES[s]) { TRADES[s].fills++; jlog("fill", { sym: s, px: lv, n: TRADES[s].fills, add: true }); } }
+        while (fills.length < CFG.maxPos && fills.length - 1 < Math.round(CFG.maxAdds) && p >= top * (1 + CFG.addStep / 100)) { const lv = +rnd(top * (1 + CFG.addStep / 100), i.tick, "up"); fills.push({ px: lv, qty: qtyFor(i, lv, addK(fills.length)) }); STAT.fills++; top = lv; log(`[СИМ] ${s}: добор №${fills.length - 1} SELL @ ${lv} (+${CFG.addStep}% от прошлого)`, "ok"); if (TRADES[s]) { TRADES[s].fills++; jlog("fill", { sym: s, px: lv, n: TRADES[s].fills, add: true }); } }
         c.grid = []; for (let k = 1; k <= Math.min(CFG.levels, CFG.maxPos - fills.length, Math.max(0, Math.round(CFG.maxAdds) - (fills.length - 1))); k++) c.grid.push(+rnd(top * (1 + CFG.addStep * k / 100), i.tick, "up"));
       }
       if (fills.length) {
@@ -502,7 +508,7 @@ function create(host) {
     const ch = [];
     for (const k of NUMS) if (o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.fillPct = Math.max(CFG.budgetPct, Math.min(95, CFG.fillPct || 90)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
-    CFG.addStep = Math.max(0.5, CFG.addStep || 5); CFG.maxAdds = Math.max(0, Math.min(50, Math.round(CFG.maxAdds))); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
+    CFG.addStep = Math.max(0.5, CFG.addStep || 5); CFG.addMult = Math.max(1, Math.min(3, +CFG.addMult || 1)); CFG.maxAdds = Math.max(0, Math.min(50, Math.round(CFG.maxAdds))); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
     CFG.trailGap = Math.max(0.05, CFG.trailGap); CFG.gridTrail = Math.max(0, CFG.gridTrail);
     if (typeof o.trailOn === "boolean" && o.trailOn !== CFG.trailOn) { CFG.trailOn = o.trailOn; ch.push("trailOn"); for (const c of Object.values(C)) c.takeKey = ""; log(CFG.trailOn ? `Трейлинг тейка ВКЛ: от −${CFG.take}% ведётся за минимумом, откат ${CFG.trailGap}% → выход` : `Трейлинг тейка ВЫКЛ: тейк лимиткой −${CFG.take}% от средней`, "info"); }
     CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.usdt = Math.max(1, CFG.usdt);
@@ -518,7 +524,7 @@ function create(host) {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("vg.running", true); execFrom = now() - 60000;
     if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
-    log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: лимитки на ${CFG.budgetPct}% депозита — сетки на столько самых волатильных за 1 мин монет, сколько помещается (до ${CFG.maxCoins}) · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · ${CFG.stopPct > 0 ? "аварийный стоп +" + CFG.stopPct + "% от средней" : "без стопа (только плюс)"} · до ${CFG.maxAdds} доборов каждые ${CFG.addStep}% · плечо x${CFG.lev}`, "ok");
+    log(`СТАРТ ${isLive() ? "LIVE" : "СИМУЛЯЦИЯ"} 24/7: лимитки на ${CFG.budgetPct}% депозита — сетки на столько самых волатильных за 1 мин монет, сколько помещается (до ${CFG.maxCoins}) · ${CFG.levels} SELL по ${CFG.usdt} USDT, шаг ${CFG.step}% · сетка за ценой с опозданием ${CFG.delay} мин · тейк −${CFG.take}% от средней · ${CFG.stopPct > 0 ? "стоп +" + CFG.stopPct + "% над последним добором" : "без стопа (только плюс)"} · доборы ×${CFG.addMult} · до ${CFG.maxAdds} доборов каждые ${CFG.addStep}% · плечо x${CFG.lev}`, "ok");
     jlog("start", { cfg: CFG });
     schedule(); scan().catch(() => {});
     return "Бот запущен — торгует на сервере 24/7";
@@ -574,7 +580,7 @@ function create(host) {
       const trades = d.trades.slice(-150).map(x => ({ sym: x.sym, holdMin: x.holdMin, fills: x.fills, range1m: x.range, btcDown: x.btcDown, adversePct: x.adverse, bestPct: x.best, pnl: x.pnl, lot: x.lot, cfg: x.cfg }));
       const open = Object.values(TRADES).map(x => ({ sym: x.sym, minOpen: Math.round((now() - x.open) / 60000), fills: x.fills, adversePct: +((x.maxPx / x.first - 1) * 100).toFixed(2) }));
       const prompt = `You analyse one UTC day (${day}) of a crypto bot on Bybit (USDT perpetuals). Goal: more profit next days, the account must survive.
-STRATEGY (SHORT ONLY, limit orders; emergency market stop-loss at +stopPct% above the average, 0 = none): every minute it picks the most volatile coins of the last 1m candle and keeps budgetPct% of the deposit in SELL limit grids on them (levels orders, step% apart, the grid follows the price with a delay of delay min, down at once by gridTrail%). A short open -> adds every addStep% above the last fill, at most maxAdds adds (and maxPos orders) per coin. Exit only in profit: at -take% from the average a trailing take starts and exits on a bounce of trailGap% from the low (never worse than -take%). btcOnly = new SELLs only while BTC is in a local downtrend (5m EMA9<EMA21).
+STRATEGY (SHORT ONLY, limit orders; adds grow ×addMult each; market stop-loss stopPct% above the last planned add, 0 = none): every minute it picks the most volatile coins of the last 1m candle and keeps budgetPct% of the deposit in SELL limit grids on them (levels orders, step% apart, the grid follows the price with a delay of delay min, down at once by gridTrail%). A short open -> adds every addStep% above the last fill, at most maxAdds adds (and maxPos orders) per coin. Exit only in profit: at -take% from the average a trailing take starts and exits on a bounce of trailGap% from the low (never worse than -take%). btcOnly = new SELLs only while BTC is in a local downtrend (5m EMA9<EMA21).
 Settings now: ${JSON.stringify(CFG)}
 Settings changes during the day: ${JSON.stringify(cfgs.slice(-10).map(x => ({ t: new Date(x.t).toISOString().slice(11, 16), changed: x.changed || "start", cfg: x.cfg })))}
 The day: ${d.n} closed trades, ${d.wins} in profit, PnL ${d.pnl} USDT. Scans: ${scans.length}, BTC was in a downtrend ${btcDown}% of them, average coins with a grid ${scans.length ? (scans.reduce((a, x) => a + (x.k || 0), 0) / scans.length).toFixed(1) : "—"}.

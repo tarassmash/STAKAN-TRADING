@@ -27,6 +27,7 @@ function create(host) {
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
   if (!lsGet("vg.adds35", false)) { if (CFG.addStep === 3) CFG.addStep = 5; if (CFG.maxAdds == null) CFG.maxAdds = 3; saveCfg(); lsSet("vg.adds35", true); }   // the default: 3 adds every 5 % (an own value stays)
+  if (!lsGet("vg.lev3", false)) { CFG.lev = Math.min(3, CFG.lev || 3); saveCfg(); lsSet("vg.lev3", true); }   // leverage 3x at most: a margin reserve
   if (!lsGet("vg.strict45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.strict45", true); }   // strictly 45 % / 45 % with gridbot-html
   if (!lsGet("vg.split45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.split45", true); }   // the account is split 50/50 with gridbot-html: 45 % of the deposit here
   if (!lsGet("vg.geo13", false)) { CFG.addMult = 1.3; CFG.stopPct = 5; saveCfg(); lsSet("vg.geo13", true); }   // adds ×1.3 each; the stop 5 % above the last planned add

@@ -27,6 +27,7 @@ function create(host) {
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
   if (!lsGet("vg.adds35", false)) { if (CFG.addStep === 3) CFG.addStep = 5; if (CFG.maxAdds == null) CFG.maxAdds = 3; saveCfg(); lsSet("vg.adds35", true); }   // the default: 3 adds every 5 % (an own value stays)
+  if (!lsGet("vg.strict45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.strict45", true); }   // strictly 45 % / 45 % with gridbot-html
   if (!lsGet("vg.split45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.split45", true); }   // the account is split 50/50 with gridbot-html: 45 % of the deposit here
   if (!lsGet("vg.geo13", false)) { CFG.addMult = 1.3; CFG.stopPct = 5; saveCfg(); lsSet("vg.geo13", true); }   // adds ×1.3 each; the stop 5 % above the last planned add
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
@@ -146,7 +147,7 @@ function create(host) {
     // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
     const addRes = heldSyms.reduce((a, s) => { const done = Math.max(0, ((TRADES[s] && TRADES[s].fills) || 1) - 1); let r = 0; for (let k = 1; k <= addsLeft(s); k++) r += lot() * addK(done + k) * 1.03 / lev; return a + r; }, 0);
     const capOwn = eq * CFG.budgetPct / 100;
-    const cap = foreign == null ? capOwn : Math.max(capOwn, eq * CFG.fillPct / 100 - foreign), free = cap - posIM - addRes;
+    const cap = capOwn, free = cap - posIM - addRes;   // strictly budgetPct % (45 %): the other half of the account is gridbot-html's
     BUD = Object.assign(BUD || {}, { eq, cap, capOwn, foreign, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
     return BUD;
   }

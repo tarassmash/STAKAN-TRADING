@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 20, live: false };
+const DEF = { budgetPct: 45, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 20, live: false };
 const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct"];
 
 function create(host) {
@@ -27,6 +27,7 @@ function create(host) {
   const CFG = Object.assign({}, DEF, lsGet("vg.cfg", {}));
   const saveCfg = () => lsSet("vg.cfg", CFG);
   if (!lsGet("vg.adds35", false)) { if (CFG.addStep === 3) CFG.addStep = 5; if (CFG.maxAdds == null) CFG.maxAdds = 3; saveCfg(); lsSet("vg.adds35", true); }   // the default: 3 adds every 5 % (an own value stays)
+  if (!lsGet("vg.split45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.split45", true); }   // the account is split 50/50 with gridbot-html: 45 % of the deposit here
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
@@ -116,8 +117,9 @@ function create(host) {
     let eq = BUD ? BUD.eq : 0;
     if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); eq = +((w.list || [])[0] || {}).totalEquity || 0; } catch (e) { /* keep the last */ } }
     else eq = (CFG.simEq || 1000) + (STAT.simPnl || 0);
-    const posIM = Object.values(C).filter(c => c.pos && c.pos.size > 0).reduce((a, c) => a + c.pos.size * c.pos.avg / lev, 0);
-    const heldSyms = Object.keys(C).filter(hasShort), held = heldSyms.length;
+    // only OUR shorts count (the other bot on the account has its own share of the deposit)
+    const posIM = Object.values(C).filter(c => c.pos && c.pos.size > 0 && c.pos.side === "Sell" && OURS.has(c.sym)).reduce((a, c) => a + c.pos.size * c.pos.avg / lev, 0);
+    const heldSyms = Object.keys(C).filter(s => hasShort(s) && OURS.has(s)), held = heldSyms.length;
     // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
     const addRes = heldSyms.reduce((a, s) => a + addsLeft(s) * lot() * 1.03 / lev, 0);
     const cap = eq * CFG.budgetPct / 100, free = cap - posIM - addRes;

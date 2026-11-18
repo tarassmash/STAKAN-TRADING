@@ -8,8 +8,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 20, live: false };
-const NUMS = ["budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct"];
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 20, live: false };
+const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -114,16 +114,32 @@ function create(host) {
   // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
   async function budget() {
     const lev = Math.max(1, CFG.lev), perCoin = CFG.levels * CFG.usdt * 1.03 / lev;   // the margin of one coin's orders
-    let eq = BUD ? BUD.eq : 0;
-    if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); eq = +((w.list || [])[0] || {}).totalEquity || 0; } catch (e) { /* keep the last */ } }
+    let eq = BUD ? BUD.eq : 0, im = null;
+    if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (w.list || [])[0] || {}; eq = +a.totalEquity || 0; if (a.totalInitialMargin != null) im = +a.totalInitialMargin || 0; } catch (e) { /* keep the last */ } }
     else eq = (CFG.simEq || 1000) + (STAT.simPnl || 0);
     // only OUR shorts count (the other bot on the account has its own share of the deposit)
     const posIM = Object.values(C).filter(c => c.pos && c.pos.size > 0 && c.pos.side === "Sell" && OURS.has(c.sym)).reduce((a, c) => a + c.pos.size * c.pos.avg / lev, 0);
+    // what the OTHER bot really holds on the exchange = the account's margin minus ours (our shorts + our open SELL limits).
+    // The other bot's neutral grids take much less margin than its own count says, so the share split left ~half of the
+    // deposit idle: we fill the account up to fillPct % of the deposit with what the other bot does not use.
+    let foreign = null;
+    if (im != null) {
+      try {
+        let ourOrd = 0, cursor = "";
+        for (let n = 0; n < 10; n++) {
+          const r = await priv("GET", "/v5/order/realtime", Object.assign({ category: "linear", settleCoin: "USDT", limit: 50 }, cursor ? { cursor } : {}));
+          for (const o of r.list || []) if ((o.orderLinkId || "").startsWith("vg_") && o.side === "Sell" && !o.reduceOnly) ourOrd += (+o.qty - (+o.cumExecQty || 0)) * +o.price / lev;
+          cursor = r.nextPageCursor || ""; if (!cursor || !(r.list || []).length) break;
+        }
+        foreign = Math.max(0, im - posIM - ourOrd);
+      } catch (e) { foreign = null; }
+    }
     const heldSyms = Object.keys(C).filter(s => hasShort(s) && OURS.has(s)), held = heldSyms.length;
     // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
     const addRes = heldSyms.reduce((a, s) => a + addsLeft(s) * lot() * 1.03 / lev, 0);
-    const cap = eq * CFG.budgetPct / 100, free = cap - posIM - addRes;
-    BUD = Object.assign(BUD || {}, { eq, cap, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
+    const capOwn = eq * CFG.budgetPct / 100;
+    const cap = foreign == null ? capOwn : Math.max(capOwn, eq * CFG.fillPct / 100 - foreign), free = cap - posIM - addRes;
+    BUD = Object.assign(BUD || {}, { eq, cap, capOwn, foreign, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
     return BUD;
   }
 
@@ -168,7 +184,7 @@ function create(host) {
       const keep = new Set(flat.slice(0, K + 1).map(x => x.sym));
       const next = flat.filter(x => ACTIVE.includes(x.sym) && keep.has(x.sym)).map(x => x.sym).slice(0, K);
       for (const x of flat.slice(0, K)) if (next.length < K && !next.includes(x.sym)) next.push(x.sym);
-      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${CFG.budgetPct}% = ${B.cap.toFixed(2)} · шорты ${B.posIM.toFixed(2)} + доборы ${B.addRes.toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
+      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${B.foreign != null && B.cap > B.capOwn + 0.01 ? `до ${CFG.fillPct}% счёта (другой бот держит ${B.foreign.toFixed(2)}) = ${B.cap.toFixed(2)}` : `${CFG.budgetPct}% = ${B.cap.toFixed(2)}`} · шорты ${B.posIM.toFixed(2)} + доборы ${B.addRes.toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
       BUD.prevK = K; BUD.prevLot = B.lot; BUD.kLogged = true;
       const added = next.filter(s => !ACTIVE.includes(s)), removed = ACTIVE.filter(s => !next.includes(s));
       ACTIVE = next;
@@ -477,7 +493,7 @@ function create(host) {
   function setCfg(o) {
     const ch = [];
     for (const k of NUMS) if (o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
-    CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
+    CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.fillPct = Math.max(CFG.budgetPct, Math.min(95, CFG.fillPct || 90)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
     CFG.addStep = Math.max(0.5, CFG.addStep || 5); CFG.maxAdds = Math.max(0, Math.min(50, Math.round(CFG.maxAdds))); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
     CFG.trailGap = Math.max(0.05, CFG.trailGap); CFG.gridTrail = Math.max(0, CFG.gridTrail);
     if (typeof o.trailOn === "boolean" && o.trailOn !== CFG.trailOn) { CFG.trailOn = o.trailOn; ch.push("trailOn"); for (const c of Object.values(C)) c.takeKey = ""; log(CFG.trailOn ? `Трейлинг тейка ВКЛ: от −${CFG.take}% ведётся за минимумом, откат ${CFG.trailGap}% → выход` : `Трейлинг тейка ВЫКЛ: тейк лимиткой −${CFG.take}% от средней`, "info"); }

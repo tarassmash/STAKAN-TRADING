@@ -112,6 +112,7 @@ function create(host) {
 
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
   // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
+  let OTHER = new Set();   // coins the other bot (gridbot-html) is trading now: we never enter them — one coin = one position on Bybit
   async function budget() {
     const lev = Math.max(1, CFG.lev), perCoin = CFG.levels * CFG.usdt * 1.03 / lev;   // the margin of one coin's orders
     let eq = BUD ? BUD.eq : 0, im = null;
@@ -123,15 +124,20 @@ function create(host) {
     // The other bot's neutral grids take much less margin than its own count says, so the share split left ~half of the
     // deposit idle: we fill the account up to fillPct % of the deposit with what the other bot does not use.
     let foreign = null;
+    const otherSyms = new Set();
     if (im != null) {
       try {
         let ourOrd = 0, cursor = "";
         for (let n = 0; n < 10; n++) {
           const r = await priv("GET", "/v5/order/realtime", Object.assign({ category: "linear", settleCoin: "USDT", limit: 50 }, cursor ? { cursor } : {}));
-          for (const o of r.list || []) if ((o.orderLinkId || "").startsWith("vg_") && o.side === "Sell" && !o.reduceOnly) ourOrd += (+o.qty - (+o.cumExecQty || 0)) * +o.price / lev;
+          for (const o of r.list || []) {
+            if ((o.orderLinkId || "").startsWith("vg_") && o.side === "Sell" && !o.reduceOnly) ourOrd += (+o.qty - (+o.cumExecQty || 0)) * +o.price / lev;
+            if ((o.orderLinkId || "").startsWith("grid")) otherSyms.add(o.symbol);   // gridbot-html trades this coin
+          }
           cursor = r.nextPageCursor || ""; if (!cursor || !(r.list || []).length) break;
         }
         foreign = Math.max(0, im - posIM - ourOrd);
+        OTHER = otherSyms;
       } catch (e) { foreign = null; }
     }
     const heldSyms = Object.keys(C).filter(s => hasShort(s) && OURS.has(s)), held = heldSyms.length;
@@ -169,7 +175,9 @@ function create(host) {
       for (const x of out) x.held = hasShort(x.sym);
       out.sort((a, b) => b.range - a.range);
       // as many coins as the free money allows: 90 % of the deposit always in the limits (a coin stays while it is in the top K + 1)
-      const B = await budget(), flat = out.filter(x => !x.held);
+      const B = await budget(), flat = out.filter(x => !x.held && !OTHER.has(x.sym));
+      const busy = [...OTHER].filter(s => !hasShort(s)).map(s => s.replace(/USDT$/, "")).sort().join(",");
+      if (busy !== (BUD.otherLogged ?? "")) { BUD.otherLogged = busy; if (busy) log(`Монеты gridbot-html — не захожу: ${busy}`, "info"); }
       // K coins: as many as the free money allows (up to maxCoins and the candidates found);
       // money left over when K hits that limit -> a bigger lot, so budgetPct % of the deposit is always in the limits
       const kMax = Math.min(Math.round(CFG.maxCoins), flat.length);

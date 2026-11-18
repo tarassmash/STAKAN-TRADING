@@ -85,6 +85,7 @@
     <div class="row"><label>Опоздание сетки, мин</label><input type="number" id="delay" min="1" max="10" step="1" /></div>
 
     <h2>Выход</h2>
+    <div class="row"><label title="Стоп-лосс на бирже (маркет) на +X% выше средней цены шорта, двигается после доборов. 0 = без стопа">Аварийный стоп, % (0 = выкл)</label><input type="number" id="stopPct" min="0" max="100" step="1" /></div>
     <div class="row"><label>Трейлинг тейка</label><input type="checkbox" id="trailOn" /></div>
     <div class="row"><label>Откат от минимума → выход, %</label><input type="number" id="trailGap" min="0.05" step="0.05" /></div>
     <div class="row"><label>Трейлинг сетки вниз, % (0 = выкл)</label><input type="number" id="gridTrail" min="0" step="0.1" /></div>
@@ -136,7 +137,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos"];
+const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
 let S = null, BUSY = false, DIRTY = false;
@@ -199,7 +200,7 @@ async function load() { try { S = await fetch("/api/state", { cache: "no-store" 
 document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
 $("trailOn").addEventListener("change", () => act("save"));
 $("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
-$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nЛимитки на ${c.budgetPct}% депозита: сетки на столько монет, сколько помещается (до ${c.maxCoins}), на каждой ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, БЕЗ СТОПА: выход только в плюс, на росте до ${c.maxAdds} доборов каждые ${c.addStep}%, плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
+$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nЛимитки на ${c.budgetPct}% депозита: сетки на столько монет, сколько помещается (до ${c.maxCoins}), на каждой ${c.levels} SELL по ${c.usdt} USDT, шаг ${c.step}%, тейк −${c.take}% от средней, ${c.stopPct > 0 ? "аварийный стоп +" + c.stopPct + "% от средней," : "БЕЗ СТОПА: выход только в плюс,"} на росте до ${c.maxAdds} доборов каждые ${c.addStep}%, плечо x${c.lev}.\nТоргует сервер — страницу можно закрыть.` : null); };
 $("stopBtn").onclick = () => act("stop", "Остановить бота? Сетки и доборы снимутся, открытые шорты останутся с тейком на бирже.");
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");

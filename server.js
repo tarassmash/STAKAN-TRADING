@@ -125,6 +125,7 @@ async function act(b) {
   if (what === "stop") return await BOT.stop();
   if (what === "reset") return BOT.resetStats();
   if (what === "btcOnly") { const on = !BOT.view().cfg.btcOnly; BOT.setCfg({ btcOnly: on }); return on ? "₿ SELL только когда BTC в локальном тренде вниз" : "₿ Фильтр BTC выключен"; }
+  if (what === "longOn") { const on = !BOT.view().cfg.longOn; BOT.setCfg({ longOn: on }); return on ? "↑ Лонги на дампах включены" : "↑ Лонги выключены — только шорты"; }
   if (what === "analyze") return await BOT.analyze(String(b.day || ""), "по кнопке");
   if (what === "applyRec") return BOT.applyRec(String(b.day || ""));
   if (what === "test") { await bx("/v5/market/time"); if (!HAS_KEYS) return "Public OK (нет ключей — только симуляция)"; await refreshAccount(); if (ACC.err) throw new Error(ACC.err); return `Связь OK · баланс ${(ACC.equity || 0).toFixed(2)} USDT, свободно ${(ACC.available || 0).toFixed(2)}`; }

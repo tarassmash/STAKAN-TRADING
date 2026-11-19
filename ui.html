@@ -66,6 +66,8 @@
     <h2>Фильтр входа</h2>
     <button class="btn sec" id="btcBtn" style="margin-top:0">₿ SELL только при BTC вниз: ВЫКЛ</button>
     <div class="note" id="btcInfo">—</div>
+    <button class="btn sec" id="longBtn" style="margin-top:8px">↑ Лонги на дампах: —</button>
+    <div class="note" id="longInfo">BUY-сетка снизу у падающих монет, доборы ниже, выход только в плюс трейлингом, стоп ниже последнего добора. Новые лонги не открываются, пока BTC в тренде вниз.</div>
 
     <h2>Монеты</h2>
     <div class="row"><label>В лимитках, % депозита</label><input type="number" id="budgetPct" min="5" max="100" step="5" /></div>
@@ -102,7 +104,7 @@
   <section class="main">
     <div class="pnl">
       <div class="box" id="pnlRealBox"><div class="k">Заработано с запуска</div><div class="v" id="pnlReal">—</div><div class="s" id="pnlSince">—</div></div>
-      <div class="box" id="pnlUnBox"><div class="k">Нереализованный PnL (открытые шорты)</div><div class="v" id="pnlUn">—</div><div class="s" id="pnlUnSub">—</div></div>
+      <div class="box" id="pnlUnBox"><div class="k">Нереализованный PnL (открытые позиции)</div><div class="v" id="pnlUn">—</div><div class="s" id="pnlUnSub">—</div></div>
       <div class="box" id="pnlTotBox"><div class="k">Итого</div><div class="v" id="pnlTot">—</div><div class="s">заработано + нереализованный</div></div>
     </div>
     <div class="panel">
@@ -168,6 +170,8 @@ function render() {
   $("keysInfo").innerHTML = (S.keys ? "✅ ключи Bybit на сервере" : "❌ нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET — работает только симуляция") + " · " + (S.env === "testnet" ? "TESTNET" : "MAINNET")
     + (S.password ? "" : '<br><span class="warn">⚠ задайте UI_PASSWORD в Railway → Variables, иначе кнопки не работают</span>');
   { const bt = B.btc || {}, bb = $("btcBtn"); bb.textContent = bt.on ? "₿ SELL только при BTC вниз: ВКЛ" : "₿ SELL только при BTC вниз: ВЫКЛ"; bb.style.color = bt.on ? "var(--yellow)" : "var(--muted)"; bb.style.borderColor = bt.on ? "var(--yellow)" : "var(--border)";
+    $("longBtn").textContent = "↑ Лонги на дампах: " + (bt.longOn ? "ВКЛ" : "ВЫКЛ");
+    $("longInfo").innerHTML = bt.longOn ? (bt.longBlocked ? '<span class="warn">⏸ BTC в тренде вниз — новые лонги не открываю, шорты работают</span>' : '<span class="up">✓ лонги на дампах разрешены</span>') : "выкл — только шорты";
     $("btcInfo").innerHTML = (bt.on ? (bt.down ? '<span class="up">✓ BTC в тренде вниз — SELL ставятся</span>' : '<span class="warn">⏸ BTC не вниз — новые SELL не ставятся, шорты веду</span>') : "выкл — SELL ставятся при любом BTC") + "<br>" + esc(bt.why || "");
     $("falInfo").style.color = B.fal ? "" : "var(--yellow)"; if (!B.fal) $("falInfo").textContent = "⚠ Нет FAL_KEY в Railway → Variables — журнал пишется, анализ fal недоступен."; }
   $("equity").textContent = S.acc.equity != null ? (+S.acc.equity).toFixed(2) + " (свободно " + (+S.acc.available || 0).toFixed(2) + ")" : (S.acc.err ? "ошибка" : "—");
@@ -178,14 +182,14 @@ function render() {
     const p = r.pos;
     return `<tr><td><b>${esc(r.sym.replace(/USDT$/, ""))}</b>${r.active ? "" : r.held ? ' <span class="mut">(доборы)</span>' : ' <span class="mut">(без сетки)</span>'}</td><td>${r.range ? r.range.toFixed(2) + "%" : "—"}</td><td>${f(r.last)}</td><td>${f(r.anchor)}</td>`
       + `<td class="grid">${(r.active || r.held) && r.grid.length ? r.grid.map(f).join(" · ") : "—"}</td>`
-      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (p.side !== "Sell" ? "" : r.trail ? ' → <span class="up">🎯 трейл: мин ' + f(r.trail.best) + ", выход ≤ " + f(r.trail.level) + "</span>" : ' → <span class="up">' + (c.trailOn ? "трейлинг с " : "") + f(r.take) + "</span>") : "—"}</td>`
+      + `<td>${p ? (p.side === "Sell" ? '<span class="dn">SHORT</span> ' : '<span class="up">LONG</span> ') + f(p.size) : "—"}</td><td>${p ? f(p.avg) + (r.trail ? ' → <span class="up">🎯 трейл: ' + (p.side === "Buy" ? "макс " : "мин ") + f(r.trail.best) + ", выход " + (p.side === "Buy" ? "≥ " : "≤ ") + f(r.trail.level) + "</span>" : ' → <span class="up">' + (c.trailOn ? "трейлинг с " : "") + f(r.take) + "</span>") : "—"}</td>`
       + `<td class="${!p ? "mut" : p.upnl >= 0 ? "up" : "dn"}">${p ? (p.upnl >= 0 ? "+" : "") + (+p.upnl).toFixed(3) : "—"}</td><td>${r.takes}</td></tr>`;
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу самые волатильные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
   { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";
     const set = (id, v) => { $(id).textContent = money(v); $(id).style.color = v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--text)"; $(id + "Box").className = "box" + (v > 0 ? " pos" : v < 0 ? " neg" : ""); };
     set("pnlReal", P.realized); set("pnlUn", P.unreal); set("pnlTot", P.total);
     $("pnlSince").textContent = P.since ? `с ${new Date(P.since).toLocaleString("ru-RU")} · закрыто сделок: ${P.closed}${B.live ? "" : " (симуляция)"}` : "бот ещё не запускался";
-    $("pnlUnSub").textContent = `шортов открыто: ${B.rows.filter(r => r.held).length}`; }
+    $("pnlUnSub").textContent = `позиций открыто: ${B.rows.filter(r => r.held).length} (лонгов ${B.rows.filter(r => r.held && r.pos && r.pos.side === "Buy").length})`; }
   const st = B.stat;
   $("stats").innerHTML = `<span>сканов <b>${st.scans}</b></span><span>исполнено SELL <b>${st.fills}</b></span><span>тейков <b class="up">${st.takes}</b></span>`
     + (B.live ? "" : `<span>PnL симуляции <b class="${st.simPnl >= 0 ? "up" : "dn"}">${st.simPnl >= 0 ? "+" : ""}${(+st.simPnl).toFixed(3)} USDT</b></span>`)
@@ -206,6 +210,7 @@ $("stopBtn").onclick = () => act("stop", "Остановить бота? Сет�
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");
 $("btcBtn").onclick = () => act("btcOnly");
+$("longBtn").onclick = () => act("longOn");
 // ---------- the days and the fal analysis ----------
 let DAYS = [], anOpen = "";
 async function loadDays() { try { DAYS = (await fetch("/api/days", { cache: "no-store" }).then(r => r.json())).days || []; renderDays(); } catch (e) { /* next time */ } }

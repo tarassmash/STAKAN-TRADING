@@ -30,6 +30,7 @@ function create(host) {
   if (!lsGet("vg.lev3", false)) { CFG.lev = Math.min(3, CFG.lev || 3); saveCfg(); lsSet("vg.lev3", true); }   // leverage 3x at most: a margin reserve
   if (!lsGet("vg.strict45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.strict45", true); }   // strictly 45 % / 45 % with gridbot-html
   if (!lsGet("vg.split45", false)) { CFG.budgetPct = 45; saveCfg(); lsSet("vg.split45", true); }   // the account is split 50/50 with gridbot-html: 45 % of the deposit here
+  if (!lsGet("vg.solo80", false)) { CFG.budgetPct = 80; saveCfg(); lsSet("vg.solo80", true); }   // gridbot-html выключен — Стакан один на счёте: 80 % депозита
   if (!lsGet("vg.geo13", false)) { CFG.addMult = 1.3; CFG.stopPct = 5; saveCfg(); lsSet("vg.geo13", true); }   // adds ×1.3 each; the stop 5 % above the last planned add
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
@@ -604,6 +605,7 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
   function applyRec(day) {
     let an; try { an = JSON.parse(fs.readFileSync(anFile(day), "utf8")); } catch (e) { return "Нет анализа за " + day; }
     const o = Object.assign({}, an.params);
+    delete o.budgetPct;   // долю депозита задаёт пользователь (80 %), анализ её не меняет
     for (const k of ["trailOn", "btcOnly"]) if (k in o) o[k] = o[k] === true || o[k] === "true";
     const ch = setCfg(o); an.applied = now(); fs.writeFileSync(anFile(day), JSON.stringify(an));
     log(`🧠 Применены настройки из анализа за ${day}: ${ch.join(", ") || "без изменений"}`, "ok");

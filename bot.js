@@ -77,8 +77,8 @@ function create(host) {
   }
   const lot = () => Math.max(CFG.usdt, (BUD && BUD.lot) || 0);   // USDT per order: at least the setting, more when the money would lie idle
   const addK = (n) => Math.pow(Math.max(1, CFG.addMult || 1), Math.max(0, n));   // add №n = lot × addMult^n (geometric adds)
-  function qtyFor(i, px, mult) {
-    let q = +rnd(lot() * (mult || 1) / px, i.step, "down");
+  function qtyFor(i, px, mult, base) {
+    let q = +rnd((base || lot()) * (mult || 1) / px, i.step, "down");
     if (q < i.minQty) q = i.minQty;
     if (q * px < i.minNot) q = +rnd(i.minNot * 1.02 / px, i.step, "up");
     return q;
@@ -119,12 +119,39 @@ function create(host) {
     const done = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1);
     return Math.max(0, Math.min(CFG.levels, Math.round(CFG.maxAdds) - done));
   }
+  // РЕЗЕРВ ПОД ДОБОРЫ: сколько денег (в лотах) нужно монете на ВСЮ сделку, а не только на сетку входа.
+  // Худший случай по n = 1..levels: исполнилось n заявок входа, потом все оставшиеся доборы (×addMult каждый)
+  // + запас на минус позиции, пока цена идёт до последнего добора. Деньги под это держатся с самого начала.
+  function tradeUnits() {
+    const lev = Math.max(1, CFG.lev), A = Math.round(CFG.maxAdds), m = Math.max(1, CFG.addMult || 1);
+    let worst = CFG.levels * 1.03 / lev;   // одна сетка входа
+    for (let n = 1; n <= CFG.levels; n++) {
+      const f = []; let px = 1;
+      for (let j = 0; j < n; j++) { px *= 1 + CFG.step / 100; f.push([1, px]); }
+      for (let j = n, k = 0; j <= A && k < CFG.levels; j++, k++) { px *= 1 + CFG.addStep / 100; f.push([Math.pow(m, j), px]); }
+      const units = f.reduce((a, x) => a + x[0], 0), loss = f.reduce((a, x) => a + x[0] * (px / x[1] - 1), 0);
+      worst = Math.max(worst, units * 1.03 / lev + loss);
+    }
+    return worst;
+  }
+  const tradeLot = (sym) => (TRADES[sym] && TRADES[sym].lot) || lot();   // доборы сделки — от её собственного лота (лот новых монет может меняться)
+  // резерв уже открытой позиции: маржа оставшихся доборов + минус, если цена дойдёт до последнего добора
+  function heldNeed(sym) {
+    const c = C[sym]; if (!c || !c.pos) return 0;
+    const lev = Math.max(1, CFG.lev), L = c.pos.side === "Buy", d = L ? -1 : 1, left = addsLeft(sym), l = tradeLot(sym);
+    const done = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1);
+    const p0 = c.lp || c.last || c.pos.avg, base = L ? Math.min(c.lastAdd || Infinity, c.pos.avg) : Math.max(c.lastAdd || 0, c.pos.avg);
+    const lastPx = base * (1 + d * CFG.addStep * left / 100);
+    let need = Math.max(0, d * (lastPx / p0 - 1)) * c.pos.size * p0;   // минус текущей позиции до последнего добора
+    for (let k = 1; k <= left; k++) { const px = base * (1 + d * CFG.addStep * k / 100), u = l * addK(done + k); need += u * 1.03 / lev + u * Math.max(0, d * (lastPx / px - 1)); }
+    return need;
+  }
 
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
   // one coin = `levels` orders × usdt (its entry grid, or its add ladder when a short is open); what the open shorts use is taken off
   let OTHER = new Set();   // coins the other bot (gridbot-html) is trading now: we never enter them — one coin = one position on Bybit
   async function budget() {
-    const lev = Math.max(1, CFG.lev), perCoin = CFG.levels * CFG.usdt * 1.03 / lev;   // the margin of one coin's orders
+    const lev = Math.max(1, CFG.lev), perCoin = CFG.usdt * tradeUnits();   // одна монета = сетка входа + ВСЕ её доборы + запас на минус
     let eq = BUD ? BUD.eq : 0, im = null;
     if (isLive()) { try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (w.list || [])[0] || {}; eq = +a.totalEquity || 0; if (a.totalInitialMargin != null) im = +a.totalInitialMargin || 0; } catch (e) { /* keep the last */ } }
     else eq = (CFG.simEq || 1000) + (STAT.simPnl || 0);
@@ -152,7 +179,7 @@ function create(host) {
     }
     const heldSyms = Object.keys(C).filter(s => hasPos(s) && OURS.has(s)), held = heldSyms.length;
     // reserve only for the adds a short can still make (all adds done -> no orders, no reserve: the money works elsewhere)
-    const addRes = heldSyms.reduce((a, s) => { const done = Math.max(0, ((TRADES[s] && TRADES[s].fills) || 1) - 1); let r = 0; for (let k = 1; k <= addsLeft(s); k++) r += lot() * addK(done + k) * 1.03 / lev; return a + r; }, 0);
+    const addRes = heldSyms.reduce((a, s) => a + heldNeed(s), 0);
     const capOwn = eq * CFG.budgetPct / 100;
     const cap = capOwn, free = cap - posIM - addRes;   // strictly budgetPct % (45 %): the other half of the account is gridbot-html's
     BUD = Object.assign(BUD || {}, { eq, cap, capOwn, foreign, posIM, held, addRes, perCoinBase: perCoin, free, at: now() });
@@ -215,7 +242,7 @@ function create(host) {
       const keep = new Set(flat.slice(0, K + 1).map(x => x.sym));
       const next = flat.filter(x => ACTIVE.includes(x.sym) && keep.has(x.sym)).map(x => x.sym).slice(0, K);
       for (const x of flat.slice(0, K)) if (next.length < K && !next.includes(x.sym)) next.push(x.sym);
-      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${B.foreign != null && B.cap > B.capOwn + 0.01 ? `до ${CFG.fillPct}% счёта (другой бот держит ${B.foreign.toFixed(2)}) = ${B.cap.toFixed(2)}` : `${CFG.budgetPct}% = ${B.cap.toFixed(2)}`} · шорты ${B.posIM.toFixed(2)} + доборы ${B.addRes.toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
+      if (!B.kLogged || B.k !== (BUD.prevK ?? -1) || Math.abs(B.lot / (BUD.prevLot || 1) - 1) > 0.1) log(`Бюджет: депозит ${B.eq.toFixed(2)} USDT · ${B.foreign != null && B.cap > B.capOwn + 0.01 ? `до ${CFG.fillPct}% счёта (другой бот держит ${B.foreign.toFixed(2)}) = ${B.cap.toFixed(2)}` : `${CFG.budgetPct}% = ${B.cap.toFixed(2)}`} · шорты ${B.posIM.toFixed(2)} + доборы ${B.addRes.toFixed(2)} · свободно ${Math.max(0, B.free).toFixed(2)} → сетки на ${K} монет по ${CFG.levels} заявок × ${B.lot} USDT (резерв на монету с доборами ${B.perCoin.toFixed(2)})${scale > 1.001 ? " (лот увеличен, чтобы занять " + CFG.budgetPct + "%)" : ""}`, "info");
       BUD.prevK = K; BUD.prevLot = B.lot; BUD.kLogged = true;
       const added = next.filter(s => !ACTIVE.includes(s)), removed = ACTIVE.filter(s => !next.includes(s));
       ACTIVE = next;
@@ -226,7 +253,7 @@ function create(host) {
         top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.move.toFixed(2)]) });
       if (added.length || removed.length) log(`Скан: ${ACTIVE.length} монет на ${CFG.budgetPct}% депозита → ${ACTIVE.map(s => s.replace(/USDT$/, "") + (sideOf(coin(s)) === "Buy" ? "↑" : "↓")).join(", ")}${added.length ? " · + " + added.join(", ") : ""}${removed.length ? " · − " + removed.join(", ") : ""}`, "ok");
       for (const s of removed) if (!hasPos(s)) await dropGrid(s);   // a coin with an open short keeps its grid (the adds)
-      for (const s of gridCoins()) { try { await gridFor(s); } catch (e) { log(`${s}: сетка: ${e.message}`, "err"); } }
+      for (const s of [...gridCoins()].sort((a, b) => hasPos(b) - hasPos(a))) { try { await gridFor(s); } catch (e) { log(`${s}: сетка: ${e.message}`, "err"); } }   // сначала доборы открытых позиций, потом сетки входа
     } catch (e) { log("Скан: " + e.message, "err"); }
     finally { scanning = false; }
   }
@@ -246,7 +273,7 @@ function create(host) {
     if (posQty > 0) {
       const base = side === "Buy" ? Math.min(c.lastAdd || Infinity, c.pos.avg) : Math.max(c.lastAdd || 0, c.pos.avg);
       const addsDone = Math.max(0, ((TRADES[sym] && TRADES[sym].fills) || 1) - 1), addsLeft = Math.max(0, Math.round(CFG.maxAdds) - addsDone);
-      want = []; wantQty = []; for (let k = 1; k <= Math.min(CFG.levels, room, addsLeft); k++) { const px = +rnd(base * (1 + d * CFG.addStep * k / 100), i.tick, rm); want.push(px); wantQty.push(qtyFor(i, px, addK(addsDone + k))); }
+      want = []; wantQty = []; for (let k = 1; k <= Math.min(CFG.levels, room, addsLeft); k++) { const px = +rnd(base * (1 + d * CFG.addStep * k / 100), i.tick, rm); want.push(px); wantQty.push(qtyFor(i, px, addK(addsDone + k), tradeLot(sym))); }
       if (!addsLeft && !c.addsLogged) { c.addsLogged = true; log(`${sym}: сделано ${addsDone} доборов из ${CFG.maxAdds} (${word(side)}) — новых заявок нет, жду тейк`, "info"); } else if (addsLeft) c.addsLogged = false;
       c.grid = want;
     } else want = c.grid.slice(0, Math.min(CFG.levels, room));
@@ -258,7 +285,7 @@ function create(host) {
     for (let k = 0; k < Math.max(want.length, open.length); k++) {
       const o = open[k], px = want[k], q = wantQty ? wantQty[k] : qty;
       if (o && px == null) { await cancelOrder(sym, o); continue; }
-      if (!o) { await placeEntry(sym, px, q, c); continue; }
+      if (!o) { if (!(await placeEntry(sym, px, q, c)) && posQty > 0 && (await makeRoom(sym))) await placeEntry(sym, px, q, c); continue; }
       const qtyOff = Math.abs(+o.qty / q - 1) > 0.1 && !(+o.cumExecQty > 0);   // the lot changed a lot -> the order follows it
       if (Math.abs(+o.price - px) >= tick / 2 || qtyOff) {
         try { await post("/v5/order/amend", Object.assign({ category: "linear", symbol: sym, orderId: o.orderId, price: String(px) }, qtyOff ? { qty: String(q) } : {})); }
@@ -268,11 +295,20 @@ function create(host) {
   }
   async function placeEntry(sym, px, qty, c) {
     const side = sideOf(c);
-    try { await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: c.hedge ? (side === "Buy" ? 1 : 2) : 0, orderLinkId: "vg_e" + now() + Math.floor(Math.random() * 1e4) }); }
+    try { await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: c.hedge ? (side === "Buy" ? 1 : 2) : 0, orderLinkId: "vg_e" + now() + Math.floor(Math.random() * 1e4) }); return true; }
     catch (e) {
-      if (/^(110004|110007|110012|110044|110045|110052)$/.test(String(e.code)) || /not enough|insufficient/i.test(e.message)) { if (now() - (noMoneyAt || 0) > 60000) { noMoneyAt = now(); log(`Маржи на новые заявки не хватает — ${CFG.budgetPct}% депозита уже в работе, жду`, "info"); } }
+      if (/^(110004|110007|110012|110044|110045|110052)$/.test(String(e.code)) || /not enough|insufficient/i.test(e.message)) { if (hasPos(sym)) return false; if (now() - (noMoneyAt || 0) > 60000) { noMoneyAt = now(); log(`Маржи на новые заявки не хватает — ${CFG.budgetPct}% депозита уже в работе, жду`, "info"); } }
       else log(`${sym}: ${side === "Buy" ? "BUY" : "SELL"} ${qty} @ ${px}: ${e.message}`, "err");
+      return false;
     }
+  }
+  // добору не хватило маржи: доборы важнее новых входов — снимаем сетку входа с наименее волатильной монеты без позиции
+  async function makeRoom(sym) {
+    const victim = [...ACTIVE].reverse().find(s => s !== sym && !hasPos(s));
+    if (!victim) { log(`${sym}: ⚠ на добор не хватает маржи, а снимать уже нечего — уменьшите лот / «% депозита» / число доборов`, "err"); return false; }
+    ACTIVE = ACTIVE.filter(s => s !== victim); await dropGrid(victim);
+    log(`${sym}: на добор не хватало маржи — снял сетку входа ${victim}, ставлю добор`, "info");
+    return true;
   }
   async function cancelOrder(sym, o) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: o.orderId }); } catch (e) { /* gone */ } }
   async function dropGrid(sym) {

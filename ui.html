@@ -66,6 +66,9 @@
     <h2>Фильтр входа</h2>
     <button class="btn sec" id="btcBtn" style="margin-top:0">₿ SELL только при BTC вниз: ВЫКЛ</button>
     <div class="note" id="btcInfo">—</div>
+    <button class="btn sec" id="oiBtn" style="margin-top:8px">📉 SELL только при падении OI: ВЫКЛ</button>
+    <div class="row"><label title="На сколько % открытый интерес монеты должен упасть за 15 мин, чтобы ставить SELL. 0 = любое падение">Падение OI за 15 мин, % (0 = любое)</label><input type="number" id="oiPct" min="0" max="50" step="0.1" /></div>
+    <div class="note" id="oiInfo">—</div>
     <button class="btn sec" id="longBtn" style="margin-top:8px">↑ Лонги на дампах: —</button>
     <div class="note" id="longInfo">BUY-сетка снизу у падающих монет, доборы ниже, выход только в плюс трейлингом, стоп ниже последнего добора. Новые лонги не открываются, пока BTC в тренде вниз.</div>
 
@@ -117,8 +120,8 @@
     <div class="panel">
       <h2>Кандидаты: волатильность последней минуты</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Монета</th><th>Диапазон прошлой 1m</th><th>Диапазон текущей 1m</th><th>Ход за 1 мин</th><th>Оборот 24ч</th></tr></thead>
-        <tbody id="candBody"><tr><td colspan="5" class="mut">—</td></tr></tbody>
+        <thead><tr><th>Монета</th><th>Диапазон прошлой 1m</th><th>Диапазон текущей 1m</th><th>Ход за 1 мин</th><th>OI 15 мин</th><th>Оборот 24ч</th></tr></thead>
+        <tbody id="candBody"><tr><td colspan="6" class="mut">—</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -140,7 +143,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct", "addMult"];
+const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
 let S = null, BUSY = false, DIRTY = false;
@@ -170,6 +173,8 @@ function render() {
   $("keysInfo").innerHTML = (S.keys ? "✅ ключи Bybit на сервере" : "❌ нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET — работает только симуляция") + " · " + (S.env === "testnet" ? "TESTNET" : "MAINNET")
     + (S.password ? "" : '<br><span class="warn">⚠ задайте UI_PASSWORD в Railway → Variables, иначе кнопки не работают</span>');
   { const bt = B.btc || {}, bb = $("btcBtn"); bb.textContent = bt.on ? "₿ SELL только при BTC вниз: ВКЛ" : "₿ SELL только при BTC вниз: ВЫКЛ"; bb.style.color = bt.on ? "var(--yellow)" : "var(--muted)"; bb.style.borderColor = bt.on ? "var(--yellow)" : "var(--border)";
+    { const oi = B.oi || {}, ob = $("oiBtn"); ob.textContent = "📉 SELL только при падении OI: " + (oi.on ? "ВКЛ" : "ВЫКЛ"); ob.style.color = oi.on ? "var(--yellow)" : "var(--muted)"; ob.style.borderColor = oi.on ? "var(--yellow)" : "var(--border)";
+      $("oiInfo").innerHTML = oi.on ? `<span class="up">✓ новый SELL только если открытый интерес монеты за 15 мин падает${oi.pct > 0 ? " на " + oi.pct + "%+" : ""}</span> — памп на закрытии позиций, а не на новых деньгах; открытые шорты веду как обычно` : "выкл — SELL при любом открытом интересе"; }
     $("longBtn").textContent = "↑ Лонги на дампах: " + (bt.longOn ? "ВКЛ" : "ВЫКЛ");
     $("longInfo").innerHTML = bt.longOn ? (bt.longBlocked ? '<span class="warn">⏸ BTC в тренде вниз — новые лонги не открываю, шорты работают</span>' : '<span class="up">✓ лонги на дампах разрешены</span>') : "выкл — только шорты";
     $("btcInfo").innerHTML = (bt.on ? (bt.down ? '<span class="up">✓ BTC в тренде вниз — SELL ставятся</span>' : '<span class="warn">⏸ BTC не вниз — новые SELL не ставятся, шорты веду</span>') : "выкл — SELL ставятся при любом BTC") + "<br>" + esc(bt.why || "");
@@ -197,7 +202,7 @@ function render() {
     + (B.nextScan != null ? `<span>скан через <b>${B.nextScan} с</b></span>` : "")
     + (B.bud ? `<span style="flex-basis:100%">бюджет: депозит <b>${(+B.bud.eq).toFixed(2)}</b> · ${c.budgetPct}% = <b>${(+B.bud.cap).toFixed(2)}</b> USDT · в шортах <b>${(+B.bud.posIM).toFixed(2)}</b> · под доборы <b>${(+(B.bud.addRes ?? 0)).toFixed(2)}</b> · на новые монеты <b>${Math.max(0, B.bud.free).toFixed(2)}</b> → сетки на <b>${B.bud.k}</b> монет × ${c.levels} заявок по <b>${B.bud.lot ?? c.usdt}</b> USDT</span>` : "");
   $("candBody").innerHTML = B.cand.map(x => `<tr><td><b>${esc(x.sym.replace(/USDT$/, ""))}</b>${x.active ? " 🔥" : ""}</td><td>${x.rPrev.toFixed(2)}%</td><td>${x.rCur.toFixed(2)}%</td>`
-    + `<td class="${x.move >= 0 ? "up" : "dn"}">${x.move >= 0 ? "+" : ""}${x.move.toFixed(2)}%</td><td>${(x.turn / 1e6).toFixed(0)} M$</td></tr>`).join("") || '<tr><td colspan="5" class="mut">—</td></tr>';
+    + `<td class="${x.move >= 0 ? "up" : "dn"}">${x.move >= 0 ? "+" : ""}${x.move.toFixed(2)}%</td><td class="${x.oi == null ? "mut" : x.oi < 0 ? "dn" : "up"}">${x.oi == null ? "—" : (x.oi >= 0 ? "+" : "") + x.oi.toFixed(2) + "%"}</td><td>${(x.turn / 1e6).toFixed(0)} M$</td></tr>`).join("") || '<tr><td colspan="6" class="mut">—</td></tr>';
   $("log").innerHTML = B.log.map(([t, m, cls]) => `<div class="${esc(cls)}">[${new Date(t).toLocaleTimeString("ru-RU")}] ${esc(m)}</div>`).join("");
 }
 async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); render(); } catch (e) { /* next tick */ } }
@@ -211,6 +216,7 @@ $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");
 $("btcBtn").onclick = () => act("btcOnly");
 $("longBtn").onclick = () => act("longOn");
+$("oiBtn").onclick = () => act("oiOn");
 // ---------- the days and the fal analysis ----------
 let DAYS = [], anOpen = "";
 async function loadDays() { try { DAYS = (await fetch("/api/days", { cache: "no-store" }).then(r => r.json())).days || []; renderDays(); } catch (e) { /* next time */ } }

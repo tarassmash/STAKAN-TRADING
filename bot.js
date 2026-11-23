@@ -8,8 +8,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true };
-const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult"];
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0 };
+const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -202,9 +202,11 @@ function create(host) {
             const k = await pub("/v5/market/kline", { category: "linear", symbol: x.symbol, interval: "1", limit: 2 + CFG.delay });
             const rows = (k.list || []).map(r => ({ o: +r[1], h: +r[2], l: +r[3], c: +r[4] }));   // newest first
             if (rows.length < 2) return null;
+            let oi = null;   // открытый интерес: изменение за 15 мин (свечи OI по 5 мин), % ; null = нет данных
+            if (CFG.oiOn) { try { const o = await pub("/v5/market/open-interest", { category: "linear", symbol: x.symbol, intervalTime: "5min", limit: 4 }); const l = (o.list || []).map(r => +r.openInterest); if (l.length >= 2 && l[l.length - 1] > 0) oi = (l[0] / l[l.length - 1] - 1) * 100; } catch (e) { /* нет данных */ } }
             const cur = rows[0], prev = rows[1], anchorRow = rows[Math.min(CFG.delay, rows.length - 1)];
             const rPrev = (prev.h - prev.l) / prev.c * 100, rCur = (cur.h - cur.l) / cur.c * 100, move = (cur.c / prev.o - 1) * 100;
-            return { sym: x.symbol, rPrev, rCur, move, range: Math.max(rPrev, rCur), last: +x.lastPrice, anchor: anchorRow.c, turn: +x.turnover24h };
+            return { sym: x.symbol, rPrev, rCur, move, range: Math.max(rPrev, rCur), last: +x.lastPrice, anchor: anchorRow.c, turn: +x.turnover24h, oi };
           } catch (e) { return null; }
         }));
         out.push(...part.filter(Boolean));
@@ -229,11 +231,17 @@ function create(host) {
       } else if (CFG.btcOnly && BTC.blocked !== false) { log(`₿ Фильтр BTC: ${btc.why} — ставлю SELL`, "ok"); BTC.blocked = false; }
       if (CFG.longOn && isLive() && BTC.longBlocked !== !buyOK) { BTC.longBlocked = !buyOK; log(buyOK ? `₿ ${btc.why} — лонги на дампах разрешены` : `₿ ${btc.why} — новые лонги не открываю (BTC вниз), шорты работают`, "info"); }
       // сторона монеты: растёт на минутной свече -> SELL сверху, падает -> BUY снизу; активная монета без позиции сторону не меняет
+      // 📉 фильтр OI: SELL на монете только когда её открытый интерес падает (за 15 мин упал хотя бы на oiPct %) —
+      // памп на закрытии шортов / выходе из позиций, а не на новых деньгах. OI растёт или нет данных -> SELL не ставлю.
+      const oiOK = (x) => !CFG.oiOn || (x.oi != null && x.oi < 0 && x.oi <= -Math.max(0, CFG.oiPct || 0));
+      let oiBlocked = [];
       for (const x of flat) {
-        const c = coin(x.sym), want = x.move >= 0 ? "Sell" : "Buy";
-        const keepSide = ACTIVE.includes(x.sym) && c.side && (c.side === "Sell" ? sellOK : buyOK);
-        x.side = keepSide ? c.side : (want === "Sell" ? (sellOK ? "Sell" : buyOK ? "Buy" : null) : (buyOK ? "Buy" : sellOK ? "Sell" : null));
+        const c = coin(x.sym), want = x.move >= 0 ? "Sell" : "Buy", sOK = sellOK && oiOK(x);
+        if (sellOK && !sOK && want === "Sell") oiBlocked.push(x.sym.replace(/USDT$/, "") + (x.oi == null ? " (нет OI)" : ` OI ${x.oi >= 0 ? "+" : ""}${x.oi.toFixed(2)}%`));
+        const keepSide = ACTIVE.includes(x.sym) && c.side && (c.side === "Sell" ? sOK : buyOK);
+        x.side = keepSide ? c.side : (want === "Sell" ? (sOK ? "Sell" : null) : (buyOK ? "Buy" : sOK ? "Sell" : null));   // памп с растущим OI -> ни SELL, ни BUY
       }
+      if (CFG.oiOn) { const key = oiBlocked.slice(0, 8).join(", "); if (key !== (BUD.oiLogged ?? "")) { BUD.oiLogged = key; if (key) log(`📉 Фильтр OI: открытый интерес не падает — SELL не ставлю: ${key}${oiBlocked.length > 8 ? " …" : ""}`, "info"); } }
       for (let n = flat.length - 1; n >= 0; n--) if (!flat[n].side) flat.splice(n, 1);
       K = Math.max(0, Math.min(K, flat.length));
       const scale = K ? Math.max(1, B.free / (K * B.perCoinBase)) : 1;
@@ -246,10 +254,10 @@ function create(host) {
       BUD.prevK = K; BUD.prevLot = B.lot; BUD.kLogged = true;
       const added = next.filter(s => !ACTIVE.includes(s)), removed = ACTIVE.filter(s => !next.includes(s));
       ACTIVE = next;
-      CAND = out.filter(x => !x.held || ACTIVE.includes(x.sym)).slice(0, 15).map(x => ({ sym: x.sym, rPrev: x.rPrev, rCur: x.rCur, move: x.move, turn: x.turn, active: ACTIVE.includes(x.sym) }));
+      CAND = out.filter(x => !x.held || ACTIVE.includes(x.sym)).slice(0, 15).map(x => ({ sym: x.sym, rPrev: x.rPrev, rCur: x.rCur, move: x.move, turn: x.turn, oi: x.oi, active: ACTIVE.includes(x.sym) }));
       for (const x of out) if (ACTIVE.includes(x.sym) || hasPos(x.sym)) { const c = coin(x.sym); c.range = x.range; c.last = x.last; c.anchor = x.anchor; }   // the grid anchor = the price delay min ago
       STAT.scans++; lastScanAt = now(); saveStat();
-      jlog("scan", { btc: { down: btc.down, ch30: btc.ch30, e9: btc.e9, e21: btc.e21 }, btcBlock: !!(CFG.btcOnly && !btc.down), eq: +B.eq.toFixed(2), free: +B.free.toFixed(2), k: B.k, lot: B.lot, active: ACTIVE, held: Object.keys(C).filter(hasPos), sides: Object.fromEntries(ACTIVE.map(s => [s, sideOf(coin(s))])),
+      jlog("scan", { btc: { down: btc.down, ch30: btc.ch30, e9: btc.e9, e21: btc.e21 }, btcBlock: !!(CFG.btcOnly && !btc.down), oiOn: !!CFG.oiOn, oiBlocked: oiBlocked.length, eq: +B.eq.toFixed(2), free: +B.free.toFixed(2), k: B.k, lot: B.lot, active: ACTIVE, held: Object.keys(C).filter(hasPos), sides: Object.fromEntries(ACTIVE.map(s => [s, sideOf(coin(s))])),
         top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.move.toFixed(2)]) });
       if (added.length || removed.length) log(`Скан: ${ACTIVE.length} монет на ${CFG.budgetPct}% депозита → ${ACTIVE.map(s => s.replace(/USDT$/, "") + (sideOf(coin(s)) === "Buy" ? "↑" : "↓")).join(", ")}${added.length ? " · + " + added.join(", ") : ""}${removed.length ? " · − " + removed.join(", ") : ""}`, "ok");
       for (const s of removed) if (!hasPos(s)) await dropGrid(s);   // a coin with an open short keeps its grid (the adds)
@@ -589,6 +597,8 @@ function create(host) {
     if (typeof o.longOn === "boolean" && o.longOn !== CFG.longOn) { CFG.longOn = o.longOn; ch.push("longOn"); BTC.longBlocked = null; log(CFG.longOn ? "↑ Лонги на дампах ВКЛ (BUY-сетка снизу у падающих монет)" : "↑ Лонги ВЫКЛ — только шорты", "info"); }
     if (typeof o.longBtc === "boolean" && o.longBtc !== CFG.longBtc) { CFG.longBtc = o.longBtc; ch.push("longBtc"); BTC.longBlocked = null; }
     if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
+    CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
+    if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); if (BUD) BUD.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: новый SELL только если открытый интерес монеты за 15 мин падает${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""} (открытые позиции веду как обычно)` : "📉 Фильтр OI ВЫКЛ: SELL при любом открытом интересе", "info"); }
     saveCfg();
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });
     if (ch.includes("delay")) schedule();
@@ -677,7 +687,7 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
     let an; try { an = JSON.parse(fs.readFileSync(anFile(day), "utf8")); } catch (e) { return "Нет анализа за " + day; }
     const o = Object.assign({}, an.params);
     delete o.budgetPct;   // долю депозита задаёт пользователь (80 %), анализ её не меняет
-    for (const k of ["trailOn", "btcOnly", "longOn"]) if (k in o) o[k] = o[k] === true || o[k] === "true";
+    delete o.oiOn; for (const k of ["trailOn", "btcOnly", "longOn"]) if (k in o) o[k] = o[k] === true || o[k] === "true";
     const ch = setCfg(o); an.applied = now(); fs.writeFileSync(anFile(day), JSON.stringify(an));
     log(`🧠 Применены настройки из анализа за ${day}: ${ch.join(", ") || "без изменений"}`, "ok");
     return ch.length ? "Применено: " + ch.join(", ") : "Настройки уже такие";
@@ -699,7 +709,7 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
     const unreal = Object.keys(C).filter(hasPos).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);
     const realized = isLive() ? STAT.realized || 0 : STAT.simPnl || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: isLive() ? STAT.closed || 0 : STAT.takes };
-    return { btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    return { oi: { on: CFG.oiOn, pct: CFG.oiPct }, btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();

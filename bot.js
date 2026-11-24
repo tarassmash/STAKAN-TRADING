@@ -303,7 +303,17 @@ function create(host) {
   }
   async function placeEntry(sym, px, qty, c) {
     const side = sideOf(c);
-    try { await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: c.hedge ? (side === "Buy" ? 1 : 2) : 0, orderLinkId: "vg_e" + now() + Math.floor(Math.random() * 1e4) }); return true; }
+    const send = () => post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(px), timeInForce: "GTC", positionIdx: c.hedge ? (side === "Buy" ? 1 : 2) : 0, orderLinkId: "vg_e" + now() + Math.floor(Math.random() * 1e4) });
+    try {
+      try { await send(); }
+      catch (e) {
+        if (String(e.code) !== "10001" || !/position idx/i.test(e.message || "")) throw e;
+        c.hedge = !c.hedge;   // режим позиций на бирже другой (Hedge / One-way) — подстраиваемся и повторяем
+        log(`${sym}: режим позиций на бирже — ${c.hedge ? "Hedge" : "односторонний"}, подстроился`, "info");
+        await send();
+      }
+      return true;
+    }
     catch (e) {
       if (/^(110004|110007|110012|110044|110045|110052)$/.test(String(e.code)) || /not enough|insufficient/i.test(e.message)) { if (hasPos(sym)) return false; if (now() - (noMoneyAt || 0) > 60000) { noMoneyAt = now(); log(`Маржи на новые заявки не хватает — ${CFG.budgetPct}% депозита уже в работе, жду`, "info"); } }
       else log(`${sym}: ${side === "Buy" ? "BUY" : "SELL"} ${qty} @ ${px}: ${e.message}`, "err");

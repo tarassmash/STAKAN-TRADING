@@ -68,7 +68,9 @@
     <div class="note" id="turboInfo">Заявки ближе к цене, быстрый тейк с коротким трейлингом — больше сделок в час. Умный риск: максимум 2 добора, стоп близко над последним добором, само выключается при минусе 3% депозита. Выкл — обычные настройки возвращаются.</div>
 
     <h2>Фильтр входа</h2>
-    <button class="btn sec" id="btcBtn" style="margin-top:0">₿ SELL только при BTC вниз: ВЫКЛ</button>
+    <button class="btn sec" id="usBtn" style="margin-top:0">🔔 Пауза на открытие США: —</button>
+    <div class="note" id="usInfo">Пн–пт 15:25–16:00 по Мадриду новые сетки не ставятся — самые резкие движения дня. Открытые позиции бот ведёт как обычно (тейк, стоп).</div>
+    <button class="btn sec" id="btcBtn" style="margin-top:8px">₿ SELL только при BTC вниз: ВЫКЛ</button>
     <div class="note" id="btcInfo">—</div>
     <button class="btn sec" id="oiBtn" style="margin-top:8px">📉 SELL только при падении OI: ВЫКЛ</button>
     <div class="row"><label title="На сколько % открытый интерес монеты должен упасть за 15 мин, чтобы ставить SELL. 0 = любое падение">Падение OI за 15 мин, % (0 = любое)</label><input type="number" id="oiPct" min="0" max="50" step="0.1" /></div>
@@ -181,6 +183,8 @@ function render() {
       $("oiInfo").innerHTML = oi.on ? `<span class="up">✓ новый SELL только если открытый интерес монеты за 15 мин падает${oi.pct > 0 ? " на " + oi.pct + "%+" : ""}</span> — памп на закрытии позиций, а не на новых деньгах; открытые шорты веду как обычно` : "выкл — SELL при любом открытом интересе"; }
     { const t = B.turbo || {}, tb = $("turboBtn"); tb.textContent = "⚡ Супер-быстрый заработок: " + (t.on ? "ВКЛ" : "ВЫКЛ"); tb.style.color = t.on ? "var(--yellow)" : "var(--muted)"; tb.style.borderColor = t.on ? "var(--yellow)" : "var(--border)";
       if (t.on) { const p = t.preset || {}, m = Math.round((Date.now() - t.from) / 60000); $("turboInfo").innerHTML = `<span class="up">⚡ работает ${m} мин · за турбо ${t.pnl >= 0 ? "+" : ""}${(+t.pnl || 0).toFixed(2)} USDT</span><br>шаг ${p.step}% × ${p.levels} заявки · тейк от −${p.take}%, откат ${p.trailGap}% · доборы ${p.maxAdds} через ${p.addStep}% · стоп +${p.stopPct}% · авто-выкл при −${t.lossPct}% депозита`; } else $("turboInfo").textContent = "Заявки ближе к цене, быстрый тейк с коротким трейлингом — больше сделок в час. Умный риск: максимум 2 добора, стоп близко над последним добором, само выключается при минусе 3% депозита. Выкл — обычные настройки возвращаются."; }
+    { const u = B.us || {}, ub = $("usBtn"); ub.textContent = "🔔 Пауза на открытие США: " + (u.on ? "ВКЛ" : "ВЫКЛ"); ub.style.color = u.on ? "var(--yellow)" : "var(--muted)"; ub.style.borderColor = u.on ? "var(--yellow)" : "var(--border)";
+      if (u.now) $("usInfo").innerHTML = '<span class="warn">⏸ Сейчас открытие США — новые сетки не ставлю, позиции веду</span>'; else $("usInfo").textContent = "Пн–пт 15:25–16:00 по Мадриду новые сетки не ставятся — самые резкие движения дня. Открытые позиции бот ведёт как обычно (тейк, стоп)."; }
     $("longBtn").textContent = "↑ Лонги на дампах: " + (bt.longOn ? "ВКЛ" : "ВЫКЛ");
     $("longInfo").innerHTML = bt.longOn ? (bt.longBlocked ? '<span class="warn">⏸ BTC в тренде вниз — новые лонги не открываю, шорты работают</span>' : '<span class="up">✓ лонги на дампах разрешены</span>') : "выкл — только шорты";
     $("btcInfo").innerHTML = (bt.on ? (bt.down ? '<span class="up">✓ BTC в тренде вниз — SELL ставятся</span>' : '<span class="warn">⏸ BTC не вниз — новые SELL не ставятся, шорты веду</span>') : "выкл — SELL ставятся при любом BTC") + "<br>" + esc(bt.why || "");
@@ -223,6 +227,7 @@ $("resetBtn").onclick = () => act("reset", "Сбросить статистик�
 $("btcBtn").onclick = () => act("btcOnly");
 $("longBtn").onclick = () => act("longOn");
 $("oiBtn").onclick = () => act("oiOn");
+$("usBtn").onclick = () => act("usPause");
 $("turboBtn").onclick = () => act("turbo", S && S.bot && S.bot.turbo && S.bot.turbo.on ? "" : "Включить ТУРБО? Больше сделок и быстрые тейки; стоп ближе, до 2 доборов, авто-выкл при −3% депозита.");
 // ---------- the days and the fal analysis ----------
 let DAYS = [], anOpen = "";

@@ -17,6 +17,13 @@ function usOpenNow(t) {
   if (p.weekday === "Sat" || p.weekday === "Sun") return false;
   const m = (+p.hour % 24) * 60 + +p.minute; return m >= 9 * 60 && m < 10 * 60;
 }
+// 🌙 ночная пауза каждый день 00:45–03:00 по Мадриду: новая дневная свеча крипты (00:00 UTC) + открытие Токио и Китая
+function nightNow(t) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(t || Date.now())).map(x => [x.type, x.value]));
+  const m = (+p.hour % 24) * 60 + +p.minute; return m >= 45 && m < 3 * 60;
+}
+// какая пауза сейчас: "us" / "night" / ""
+function pauseNow(t) { return usOpenNow(t) ? "us" : nightNow(t) ? "night" : ""; }
 const TURBO_LOSS_PCT = 3;   // турбо выключается само, если с момента включения закрыто в минус 3% депозита
 const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
 
@@ -233,8 +240,8 @@ function create(host) {
       let K = Math.max(0, Math.min(kMax, Math.floor(B.free / B.perCoinBase)));
       const btc = await btcTrend();
       // какие стороны можно открывать: SELL (шорт на пампе) и BUY (лонг на дампе)
-      const usP = !!CFG.usPause && usOpenNow();
-      if (usP !== !!BTC.usPaused) { BTC.usPaused = usP; log(usP ? "🔔 Открытие биржи США (15:00–16:00 по Мадриду): снимаю все заявки и закрываю все позиции лимитками по лучшей цене (стоп остаётся до закрытия)" : "🔔 Открытие США прошло — снова ставлю сетки", "info"); }
+      const pz = CFG.usPause ? pauseNow() : "", usP = !!pz;
+      if (pz !== (BTC.pauseKind || "")) { BTC.pauseKind = pz; BTC.usPaused = usP; log(pz === "us" ? "🔔 Открытие биржи США (15:00–16:00 по Мадриду): снимаю все заявки и закрываю все позиции лимитками по лучшей цене (стоп остаётся до закрытия)" : pz === "night" ? "🌙 Ночная пауза (00:45–03:00 по Мадриду: новая дневная свеча + открытие Азии): снимаю все заявки и закрываю все позиции лимитками по лучшей цене" : "▶ Пауза закончилась — снова ставлю сетки", "info"); }
       const sellOK = !usP && !(CFG.btcOnly && !btc.down);
       const buyOK = !usP && !!CFG.longOn && isLive() && !(CFG.longBtc && btc.down);   // лонги не ловим, пока BTC в тренде вниз
       if (CFG.btcOnly && !btc.down) {
@@ -371,7 +378,7 @@ function create(host) {
         if (!tr.ords.includes(x.orderId)) { tr.ords.push(x.orderId); tr.fills++; }
         tr.qty += +x.execQty; saveTrades();
         jlog("fill", { sym: x.symbol, px: +x.execPrice, qty: +x.execQty, n: tr.fills, add: tr.fills > 1 });
-      } else if (id.startsWith("vg_tu") && +x.leavesQty === 0) { log(`${x.symbol}: 🔔 позиция закрыта лимиткой на паузе США @ ${x.execPrice}`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; TRADES[x.symbol].usExit = true; saveTrades(); } }
+      } else if (id.startsWith("vg_tu") && +x.leavesQty === 0) { log(`${x.symbol}: ⏸ позиция закрыта лимиткой на паузе @ ${x.execPrice}`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; TRADES[x.symbol].usExit = true; saveTrades(); } }
       else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — ${word((TRADES[x.symbol] || {}).side || (x.side === "Sell" ? "Buy" : "Sell"))} закрыт в плюс`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; saveTrades(); } }
     }
     if (SEEN.size > 5000) { const a = [...SEEN].slice(-2000); SEEN.clear(); a.forEach(v => SEEN.add(v)); }
@@ -410,7 +417,7 @@ function create(host) {
     try {
       if (mine) await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: mine.orderId, price: px, qty });
       else await post("/v5/order/create", { category: "linear", symbol: sym, side: exitSide, orderType: "Limit", qty, price: px, timeInForce: "PostOnly", reduceOnly: true, positionIdx: c.pos.idx, orderLinkId: "vg_tu" + now() + Math.floor(Math.random() * 1e4) });
-      if (!String(c.takeKey || "").startsWith("us|")) log(`${sym}: 🔔 открытие США — закрываю ${word(c.pos.side)} лимиткой ${exitSide.toUpperCase()} ${qty} @ ${px} (средняя ${fmt(c.pos.avg)}), веду за ценой`, "info");
+      if (!String(c.takeKey || "").startsWith("us|")) log(`${sym}: ${BTC.pauseKind === "night" ? "🌙 ночная пауза" : "🔔 открытие США"} — закрываю ${word(c.pos.side)} лимиткой ${exitSide.toUpperCase()} ${qty} @ ${px} (средняя ${fmt(c.pos.avg)}), веду за ценой`, "info");
       c.takeKey = key;
     } catch (e) { c.takeKey = ""; if (mine) await cancelOrder(sym, mine); }
   }
@@ -645,7 +652,7 @@ function create(host) {
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.longOn === "boolean" && o.longOn !== CFG.longOn) { CFG.longOn = o.longOn; ch.push("longOn"); BTC.longBlocked = null; log(CFG.longOn ? "↑ Лонги на дампах ВКЛ (BUY-сетка снизу у падающих монет)" : "↑ Лонги ВЫКЛ — только шорты", "info"); }
     if (typeof o.longBtc === "boolean" && o.longBtc !== CFG.longBtc) { CFG.longBtc = o.longBtc; ch.push("longBtc"); BTC.longBlocked = null; }
-    if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "🔔 Пауза на открытие США ВКЛ: пн–пт 15:00–16:00 по Мадриду все заявки сняты, позиции закрываются лимитками" : "🔔 Пауза на открытие США ВЫКЛ", "info"); }
+    if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "⏸ Паузы ВКЛ: пн–пт 15:00–16:00 (открытие США) и каждую ночь 00:45–03:00 по Мадриду — заявки сняты, позиции закрываются лимитками" : "⏸ Паузы ВЫКЛ", "info"); }
     if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
     CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); if (BUD) BUD.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: новый SELL только если открытый интерес монеты за 15 мин падает${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""} (открытые позиции веду как обычно)` : "📉 Фильтр OI ВЫКЛ: SELL при любом открытом интересе", "info"); }
@@ -789,7 +796,7 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
     const unreal = Object.keys(C).filter(hasPos).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);
     const realized = isLive() ? STAT.realized || 0 : STAT.simPnl || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: isLive() ? STAT.closed || 0 : STAT.takes };
-    return { us: { on: !!CFG.usPause, now: !!CFG.usPause && usOpenNow() }, turbo: { on: !!CFG.turbo, from: CFG.turboFrom || 0, pnl: CFG.turbo ? turboPnl() : 0, lossPct: TURBO_LOSS_PCT, preset: TURBO }, oi: { on: CFG.oiOn, pct: CFG.oiPct }, btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    return { us: { on: !!CFG.usPause, now: CFG.usPause ? pauseNow() : "" }, turbo: { on: !!CFG.turbo, from: CFG.turboFrom || 0, pnl: CFG.turbo ? turboPnl() : 0, lossPct: TURBO_LOSS_PCT, preset: TURBO }, oi: { on: CFG.oiOn, pct: CFG.oiPct }, btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();

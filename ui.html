@@ -69,7 +69,7 @@
 
     <h2>Фильтр входа</h2>
     <button class="btn sec" id="usBtn" style="margin-top:0">🔔 Пауза на открытие США: —</button>
-    <div class="note" id="usInfo">Пн–пт 15:00–16:00 по Мадриду все заявки входа и доборов снимаются — самые резкие движения дня. Тейк и стоп открытых позиций остаются.</div>
+    <div class="note" id="usInfo">Пн–пт 15:00–16:00 по Мадриду все заявки снимаются, а открытые позиции закрываются лимитками по лучшей цене (стоп работает, пока позиция не закрыта). С 16:00 торговля заново.</div>
     <button class="btn sec" id="btcBtn" style="margin-top:8px">₿ SELL только при BTC вниз: ВЫКЛ</button>
     <div class="note" id="btcInfo">—</div>
     <button class="btn sec" id="oiBtn" style="margin-top:8px">📉 SELL только при падении OI: ВЫКЛ</button>
@@ -184,7 +184,7 @@ function render() {
     { const t = B.turbo || {}, tb = $("turboBtn"); tb.textContent = "⚡ Супер-быстрый заработок: " + (t.on ? "ВКЛ" : "ВЫКЛ"); tb.style.color = t.on ? "var(--yellow)" : "var(--muted)"; tb.style.borderColor = t.on ? "var(--yellow)" : "var(--border)";
       if (t.on) { const p = t.preset || {}, m = Math.round((Date.now() - t.from) / 60000); $("turboInfo").innerHTML = `<span class="up">⚡ работает ${m} мин · за турбо ${t.pnl >= 0 ? "+" : ""}${(+t.pnl || 0).toFixed(2)} USDT</span><br>шаг ${p.step}% × ${p.levels} заявки · тейк от −${p.take}%, откат ${p.trailGap}% · доборы ${p.maxAdds} через ${p.addStep}% · стоп +${p.stopPct}% · авто-выкл при −${t.lossPct}% депозита`; } else $("turboInfo").textContent = "Заявки ближе к цене, быстрый тейк с коротким трейлингом — больше сделок в час. Умный риск: максимум 2 добора, стоп близко над последним добором, само выключается при минусе 3% депозита. Выкл — обычные настройки возвращаются."; }
     { const u = B.us || {}, ub = $("usBtn"); ub.textContent = "🔔 Пауза на открытие США: " + (u.on ? "ВКЛ" : "ВЫКЛ"); ub.style.color = u.on ? "var(--yellow)" : "var(--muted)"; ub.style.borderColor = u.on ? "var(--yellow)" : "var(--border)";
-      if (u.now) $("usInfo").innerHTML = '<span class="warn">⏸ Сейчас открытие США — все заявки сняты, тейк и стоп позиций работают</span>'; else $("usInfo").textContent = "Пн–пт 15:00–16:00 по Мадриду все заявки входа и доборов снимаются — самые резкие движения дня. Тейк и стоп открытых позиций остаются."; }
+      if (u.now) $("usInfo").innerHTML = '<span class="warn">⏸ Сейчас открытие США — заявки сняты, позиции закрываются лимитками</span>'; else $("usInfo").textContent = "Пн–пт 15:00–16:00 по Мадриду все заявки снимаются, а открытые позиции закрываются лимитками по лучшей цене (стоп работает, пока позиция не закрыта). С 16:00 торговля заново."; }
     $("longBtn").textContent = "↑ Лонги на дампах: " + (bt.longOn ? "ВКЛ" : "ВЫКЛ");
     $("longInfo").innerHTML = bt.longOn ? (bt.longBlocked ? '<span class="warn">⏸ BTC в тренде вниз — новые лонги не открываю, шорты работают</span>' : '<span class="up">✓ лонги на дампах разрешены</span>') : "выкл — только шорты";
     $("btcInfo").innerHTML = (bt.on ? (bt.down ? '<span class="up">✓ BTC в тренде вниз — SELL ставятся</span>' : '<span class="warn">⏸ BTC не вниз — новые SELL не ставятся, шорты веду</span>') : "выкл — SELL ставятся при любом BTC") + "<br>" + esc(bt.why || "");

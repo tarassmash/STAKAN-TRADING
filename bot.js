@@ -234,7 +234,7 @@ function create(host) {
       const btc = await btcTrend();
       // какие стороны можно открывать: SELL (шорт на пампе) и BUY (лонг на дампе)
       const usP = !!CFG.usPause && usOpenNow();
-      if (usP !== !!BTC.usPaused) { BTC.usPaused = usP; log(usP ? "🔔 Открытие биржи США (15:00–16:00 по Мадриду): снимаю все заявки (вход и доборы), открытые позиции веду с тейком и стопом" : "🔔 Открытие США прошло — снова ставлю сетки", "info"); }
+      if (usP !== !!BTC.usPaused) { BTC.usPaused = usP; log(usP ? "🔔 Открытие биржи США (15:00–16:00 по Мадриду): снимаю все заявки и закрываю все позиции лимитками по лучшей цене (стоп остаётся до закрытия)" : "🔔 Открытие США прошло — снова ставлю сетки", "info"); }
       const sellOK = !usP && !(CFG.btcOnly && !btc.down);
       const buyOK = !usP && !!CFG.longOn && isLive() && !(CFG.longBtc && btc.down);   // лонги не ловим, пока BTC в тренде вниз
       if (CFG.btcOnly && !btc.down) {
@@ -371,7 +371,8 @@ function create(host) {
         if (!tr.ords.includes(x.orderId)) { tr.ords.push(x.orderId); tr.fills++; }
         tr.qty += +x.execQty; saveTrades();
         jlog("fill", { sym: x.symbol, px: +x.execPrice, qty: +x.execQty, n: tr.fills, add: tr.fills > 1 });
-      } else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — ${word((TRADES[x.symbol] || {}).side || (x.side === "Sell" ? "Buy" : "Sell"))} закрыт в плюс`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; saveTrades(); } }
+      } else if (id.startsWith("vg_tu") && +x.leavesQty === 0) { log(`${x.symbol}: 🔔 позиция закрыта лимиткой на паузе США @ ${x.execPrice}`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; TRADES[x.symbol].usExit = true; saveTrades(); } }
+      else if (id.startsWith("vg_t") && +x.leavesQty === 0) { STAT.takes++; coin(x.symbol).takes++; log(`${x.symbol}: ✅ тейк исполнен @ ${x.execPrice} — ${word((TRADES[x.symbol] || {}).side || (x.side === "Sell" ? "Buy" : "Sell"))} закрыт в плюс`, "ok"); if (TRADES[x.symbol]) { TRADES[x.symbol].exitPx = +x.execPrice; saveTrades(); } }
     }
     if (SEEN.size > 5000) { const a = [...SEEN].slice(-2000); SEEN.clear(); a.forEach(v => SEEN.add(v)); }
     saveStat();
@@ -395,7 +396,31 @@ function create(host) {
   // the trailing take: the price reached −take % from the average -> it follows the lowest price; a bounce of trailGap % from
   // the low -> out. The exit is a CONDITIONAL LIMIT on the exchange (trigger = the trail level, rising), never worse than −take %
   // from the average - always in profit, never market. While the move goes on the level goes down after it (the whole move).
+  // 🔔 пауза на открытие США: позицию закрываю лимиткой-мейкером по лучшей цене стакана (PostOnly), переставляю за ценой, пока не закроется
+  async function flatExit(sym, c, i) {
+    const L = c.pos.side === "Buy", exitSide = L ? "Sell" : "Buy", qty = rnd(c.pos.size, i.step, "down");
+    const t = TRAIL[sym]; if (t) { if (t.orderId) await cancelOrder(sym, { orderId: t.orderId }); if (t.exitId) await cancelOrder(sym, { orderId: t.exitId }); delete TRAIL[sym]; saveTrail(); }
+    let ob; try { ob = await pub("/v5/market/orderbook", { category: "linear", symbol: sym, limit: 1 }); } catch (e) { return; }
+    const best = L ? +((ob.a || [])[0] || [])[0] : +((ob.b || [])[0] || [])[0]; if (!(best > 0)) return;
+    const px = rnd(best, i.tick, L ? "up" : "down"), key = "us|" + px + "|" + qty;
+    if (c.takeKey === key) return;
+    const open = ((await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym })).list || []).filter(o => (o.orderLinkId || "").startsWith("vg_t"));
+    const mine = open.find(o => (o.orderLinkId || "").startsWith("vg_tu") && !(+o.triggerPrice > 0));
+    for (const o of open) if (o !== mine) await cancelOrder(sym, o);
+    try {
+      if (mine) await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: mine.orderId, price: px, qty });
+      else await post("/v5/order/create", { category: "linear", symbol: sym, side: exitSide, orderType: "Limit", qty, price: px, timeInForce: "PostOnly", reduceOnly: true, positionIdx: c.pos.idx, orderLinkId: "vg_tu" + now() + Math.floor(Math.random() * 1e4) });
+      if (!String(c.takeKey || "").startsWith("us|")) log(`${sym}: 🔔 открытие США — закрываю ${word(c.pos.side)} лимиткой ${exitSide.toUpperCase()} ${qty} @ ${px} (средняя ${fmt(c.pos.avg)}), веду за ценой`, "info");
+      c.takeKey = key;
+    } catch (e) { c.takeKey = ""; if (mine) await cancelOrder(sym, mine); }
+  }
   async function syncExit(sym, c, i) {
+    if (BTC.usPaused) return flatExit(sym, c, i);
+    if (String(c.takeKey || "").startsWith("us|")) {   // пауза кончилась, а позиция осталась — убираю лимитку паузы, дальше обычный выход
+      const open = ((await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym })).list || []).filter(o => (o.orderLinkId || "").startsWith("vg_tu"));
+      for (const o of open) await cancelOrder(sym, o);
+      c.takeKey = "";
+    }
     if (!CFG.trailOn) return syncTake(sym, c, i);
     if (c.takeKey !== "trail") {   // a plain take would close at the take level at once - it goes
       const open = ((await priv("GET", "/v5/order/realtime", { category: "linear", symbol: sym })).list || []).filter(o => (o.orderLinkId || "").startsWith("vg_t"));
@@ -620,7 +645,7 @@ function create(host) {
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.longOn === "boolean" && o.longOn !== CFG.longOn) { CFG.longOn = o.longOn; ch.push("longOn"); BTC.longBlocked = null; log(CFG.longOn ? "↑ Лонги на дампах ВКЛ (BUY-сетка снизу у падающих монет)" : "↑ Лонги ВЫКЛ — только шорты", "info"); }
     if (typeof o.longBtc === "boolean" && o.longBtc !== CFG.longBtc) { CFG.longBtc = o.longBtc; ch.push("longBtc"); BTC.longBlocked = null; }
-    if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "🔔 Пауза на открытие США ВКЛ: пн–пт 15:00–16:00 по Мадриду все заявки входа и доборов сняты" : "🔔 Пауза на открытие США ВЫКЛ", "info"); }
+    if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "🔔 Пауза на открытие США ВКЛ: пн–пт 15:00–16:00 по Мадриду все заявки сняты, позиции закрываются лимитками" : "🔔 Пауза на открытие США ВЫКЛ", "info"); }
     if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
     CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); if (BUD) BUD.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: новый SELL только если открытый интерес монеты за 15 мин падает${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""} (открытые позиции веду как обычно)` : "📉 Фильтр OI ВЫКЛ: SELL при любом открытом интересе", "info"); }

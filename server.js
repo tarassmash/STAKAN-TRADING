@@ -126,6 +126,7 @@ async function act(b) {
   if (what === "reset") return BOT.resetStats();
   if (what === "btcOnly") { const on = !BOT.view().cfg.btcOnly; BOT.setCfg({ btcOnly: on }); return on ? "₿ SELL только когда BTC в локальном тренде вниз" : "₿ Фильтр BTC выключен"; }
   if (what === "oiOn") { const on = !BOT.view().cfg.oiOn; BOT.setCfg({ oiOn: on }); return on ? "📉 SELL только когда открытый интерес монеты падает" : "📉 Фильтр OI выключен"; }
+  if (what === "turbo") return BOT.setTurbo(!BOT.view().cfg.turbo);
   if (what === "longOn") { const on = !BOT.view().cfg.longOn; BOT.setCfg({ longOn: on }); return on ? "↑ Лонги на дампах включены" : "↑ Лонги выключены — только шорты"; }
   if (what === "analyze") return await BOT.analyze(String(b.day || ""), "по кнопке");
   if (what === "applyRec") return BOT.applyRec(String(b.day || ""));

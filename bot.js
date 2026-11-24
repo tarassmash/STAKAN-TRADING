@@ -8,7 +8,10 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0 };
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+// ⚡ ТУРБО: быстрый оборот (близкие заявки, быстрый тейк) + умный риск (мало доборов, близкий стоп, авто-выкл при минусе)
+const TURBO = { step: 0.4, levels: 2, delay: 1, gridTrail: 0.2, take: 0.5, trailGap: 0.15, addStep: 3, maxAdds: 2, addMult: 1.5, stopPct: 3 };
+const TURBO_LOSS_PCT = 3;   // турбо выключается само, если с момента включения закрыто в минус 3% депозита
 const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
 
 function create(host) {
@@ -215,6 +218,7 @@ function create(host) {
       out.sort((a, b) => b.range - a.range);
       // as many coins as the free money allows: 90 % of the deposit always in the limits (a coin stays while it is in the top K + 1)
       const B = await budget(), flat = out.filter(x => !x.held && !OTHER.has(x.sym));
+      turboGuard(B.eq);
       const busy = [...OTHER].filter(s => !hasShort(s)).map(s => s.replace(/USDT$/, "")).sort().join(",");
       if (busy !== (BUD.otherLogged ?? "")) { BUD.otherLogged = busy; if (busy) log(`Монеты gridbot-html — не захожу: ${busy}`, "info"); }
       // K coins: as many as the free money allows (up to maxCoins and the candidates found);
@@ -596,6 +600,7 @@ function create(host) {
   // ---------------- commands ----------------
   function setCfg(o) {
     const ch = [];
+    if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }   // пока турбо ВКЛ, его параметры с формы не перетираются
     for (const k of NUMS) if (o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.budgetPct = Math.max(5, Math.min(100, CFG.budgetPct)); CFG.fillPct = Math.max(CFG.budgetPct, Math.min(95, CFG.fillPct || 90)); CFG.maxCoins = Math.max(1, Math.min(60, Math.round(CFG.maxCoins))); CFG.simEq = Math.max(10, CFG.simEq); CFG.levels = Math.max(1, Math.min(20, Math.round(CFG.levels))); CFG.delay = Math.max(1, Math.min(10, Math.round(CFG.delay)));
     CFG.addStep = Math.max(0.5, CFG.addStep || 5); CFG.addMult = Math.max(1, Math.min(3, +CFG.addMult || 1)); CFG.maxAdds = Math.max(0, Math.min(50, Math.round(CFG.maxAdds))); CFG.maxPos = Math.max(1, Math.round(CFG.maxPos)); CFG.step = Math.max(0.1, CFG.step); CFG.take = Math.max(0.1, CFG.take);
@@ -613,6 +618,36 @@ function create(host) {
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });
     if (ch.includes("delay")) schedule();
     return ch;
+  }
+  // ⚡ турбо: сохраняем обычные настройки, ставим быстрый набор; выкл — возвращаем как было
+  function turboPnl() {
+    if (!CFG.turboFrom) return 0;
+    let sum = 0; for (let t = CFG.turboFrom; t <= now() + 864e5; t += 864e5) { const d = readDay(dayOf(t)); if (d) for (const x of d.trades) if ((x.close || 0) >= CFG.turboFrom) sum += +x.pnl || 0; }
+    return +sum.toFixed(4);
+  }
+  function setTurbo(on, why) {
+    if (!!on === !!CFG.turbo) return CFG.turbo ? "⚡ Турбо уже ВКЛ" : "⚡ Турбо уже ВЫКЛ";
+    if (on) {
+      const save = {}; for (const k of Object.keys(TURBO)) save[k] = CFG[k];
+      CFG.turboSave = save; CFG.turbo = true; CFG.turboFrom = now();
+      setCfg(Object.assign({ _turbo: true }, TURBO));
+      for (const c of Object.values(C)) c.takeKey = "";
+      log(`⚡ ТУРБО ВКЛ: заявки ближе (шаг ${TURBO.step}%, ${TURBO.levels} шт), тейк от −${TURBO.take}% с откатом ${TURBO.trailGap}%, доборы до ${TURBO.maxAdds} через ${TURBO.addStep}%, стоп +${TURBO.stopPct}% над последним добором · авто-выкл при −${TURBO_LOSS_PCT}% депозита`, "ok");
+      jlog("turbo", { on: true, save });
+      return "⚡ Турбо включено — быстрый оборот, риск ограничен";
+    }
+    const pnl = turboPnl(), save = CFG.turboSave || {};
+    CFG.turbo = false; CFG.turboSave = null; CFG.turboFrom = 0;
+    setCfg(Object.assign({ _turbo: true }, save));
+    for (const c of Object.values(C)) c.takeKey = "";
+    log(`⚡ ТУРБО ВЫКЛ${why ? " (" + why + ")" : ""}: обычные настройки возвращены · за турбо ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDT`, why ? "err" : "info");
+    jlog("turbo", { on: false, why: why || "", pnl });
+    return "⚡ Турбо выключено — обычные настройки возвращены";
+  }
+  function turboGuard(eq) {
+    if (!CFG.turbo || !(eq > 0)) return;
+    const pnl = turboPnl();
+    if (pnl <= -eq * TURBO_LOSS_PCT / 100) setTurbo(false, `убыток ${pnl.toFixed(2)} USDT ≥ ${TURBO_LOSS_PCT}% депозита`);
   }
   async function start() {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
@@ -719,10 +754,10 @@ Answer ONE JSON: {"summary": "итоги дня по-русски, 4-8 коро�
     const unreal = Object.keys(C).filter(hasPos).filter(x => !isLive() || OURS.has(x)).reduce((a, x) => a + (C[x].pos.upnl || 0), 0);
     const realized = isLive() ? STAT.realized || 0 : STAT.simPnl || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: isLive() ? STAT.closed || 0 : STAT.takes };
-    return { oi: { on: CFG.oiOn, pct: CFG.oiPct }, btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+    return { turbo: { on: !!CFG.turbo, from: CFG.turboFrom || 0, pnl: CFG.turbo ? turboPnl() : 0, lossPct: TURBO_LOSS_PCT, preset: TURBO }, oi: { on: CFG.oiOn, pct: CFG.oiPct }, btc: { on: CFG.btcOnly, down: BTC.down, why: BTC.why, longOn: CFG.longOn, longBtc: CFG.longBtc, longBlocked: !!BTC.longBlocked }, fal: !!host.fal, open: Object.values(TRADES).length, pnl, bud: BUD, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, upnl, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + CFG.delay * 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   (async () => { await adoptOld(); if (running) { log("Сервер перезапущен — бот продолжает торговать", "ok"); execFrom = now() - 5000; /* only new fills: the base of the adds is kept on the disk */ schedule(); scan().catch(() => {}); } })();
-  return { start, stop, setCfg, resetStats, view, days, analyze, applyRec, journalPath };
+  return { start, stop, setCfg, setTurbo, resetStats, view, days, analyze, applyRec, journalPath };
 }
 module.exports = { create };

@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, coolMin: 180, pumpPct: 8, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
 // ⚡ ТУРБО: быстрый оборот (близкие заявки, быстрый тейк) + умный риск (мало доборов, близкий стоп, авто-выкл при минусе)
 const TURBO = { step: 0.4, levels: 2, delay: 1, gridTrail: 0.2, take: 0.5, trailGap: 0.15, addStep: 3, maxAdds: 2, addMult: 1.5, stopPct: 3 };
 // 🔔 пауза на открытие биржи США: пн–пт 9:00–10:00 по Нью-Йорку (15:00–16:00 Мадрид, летнее/зимнее время учтено) — новые сетки не ставлю
@@ -25,7 +25,7 @@ function nightNow(t) {
 // какая пауза сейчас: "us" / "night" / ""
 function pauseNow(t) { return usOpenNow(t) ? "us" : nightNow(t) ? "night" : ""; }
 const TURBO_LOSS_PCT = 3;   // турбо выключается само, если с момента включения закрыто в минус 3% депозита
-const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
+const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct", "coolMin", "pumpPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -59,6 +59,9 @@ function create(host) {
   const saveTrail = () => lsSet("vg.trail", TRAIL);
   const LAST_ADD = lsGet("vg.lastAdd", {});            // symbol -> the price of the last SELL fill (the base of the adds)
   const saveLastAdd = () => lsSet("vg.lastAdd", LAST_ADD);
+  const COOL = lsGet("vg.cool", {});                  // symbol -> until when the coin is not traded after a loss (the stop)
+  const saveCool = () => lsSet("vg.cool", COOL);
+  const cooling = (sym) => COOL[sym] && COOL[sym] > now();
   let running = !!lsGet("vg.running", false);
   const LOG = lsGet("vg.log", []);
   let logSaved = 0;
@@ -222,7 +225,8 @@ function create(host) {
             if (CFG.oiOn) { try { const o = await pub("/v5/market/open-interest", { category: "linear", symbol: x.symbol, intervalTime: "5min", limit: 4 }); const l = (o.list || []).map(r => +r.openInterest); if (l.length >= 2 && l[l.length - 1] > 0) oi = (l[0] / l[l.length - 1] - 1) * 100; } catch (e) { /* нет данных */ } }
             const cur = rows[0], prev = rows[1], anchorRow = rows[Math.min(CFG.delay, rows.length - 1)];
             const rPrev = (prev.h - prev.l) / prev.c * 100, rCur = (cur.h - cur.l) / cur.c * 100, move = (cur.c / prev.o - 1) * 100;
-            return { sym: x.symbol, rPrev, rCur, move, range: Math.max(rPrev, rCur), last: +x.lastPrice, anchor: anchorRow.c, turn: +x.turnover24h, oi };
+            const ch1h = +x.prevPrice1h > 0 ? (+x.lastPrice / +x.prevPrice1h - 1) * 100 : 0;
+            return { sym: x.symbol, rPrev, rCur, move, range: Math.max(rPrev, rCur), last: +x.lastPrice, anchor: anchorRow.c, turn: +x.turnover24h, oi, ch1h };
           } catch (e) { return null; }
         }));
         out.push(...part.filter(Boolean));
@@ -230,7 +234,10 @@ function create(host) {
       for (const x of out) x.held = hasPos(x.sym);
       out.sort((a, b) => b.range - a.range);
       // as many coins as the free money allows: 90 % of the deposit always in the limits (a coin stays while it is in the top K + 1)
-      const B = await budget(), flat = out.filter(x => !x.held && !OTHER.has(x.sym));
+      for (const s of Object.keys(COOL)) if (!cooling(s)) { delete COOL[s]; saveCool(); }
+      const coolNow = out.filter(x => !x.held && cooling(x.sym)).map(x => x.sym.replace(/USDT$/, "")).sort().join(",");
+      if (coolNow !== (BUD && BUD.coolLogged || "")) { if (BUD) BUD.coolLogged = coolNow; if (coolNow) log(`🧊 Кулдаун после стопа — не захожу: ${coolNow}`, "info"); }
+      const B = await budget(), flat = out.filter(x => !x.held && !OTHER.has(x.sym) && !cooling(x.sym));
       turboGuard(B.eq);
       const busy = [...OTHER].filter(s => !hasShort(s)).map(s => s.replace(/USDT$/, "")).sort().join(",");
       if (busy !== (BUD.otherLogged ?? "")) { BUD.otherLogged = busy; if (busy) log(`Монеты gridbot-html — не захожу: ${busy}`, "info"); }
@@ -253,14 +260,18 @@ function create(host) {
       // 📉 фильтр OI: SELL на монете только когда её открытый интерес падает (за 15 мин упал хотя бы на oiPct %) —
       // памп на закрытии шортов / выходе из позиций, а не на новых деньгах. OI растёт или нет данных -> SELL не ставлю.
       const oiOK = (x) => !CFG.oiOn || (x.oi != null && x.oi < 0 && x.oi <= -Math.max(0, CFG.oiPct || 0));
-      let oiBlocked = [];
+      let oiBlocked = [], pumpBlocked = [];
+      const pumpP = Math.max(0, CFG.pumpPct || 0);   // 🚀 фильтр пампа: монета за 1 ч выросла на pumpPct % и больше -> SELL не ставлю (упала на столько же -> BUY не ставлю)
       for (const x of flat) {
-        const c = coin(x.sym), want = x.move >= 0 ? "Sell" : "Buy", sOK = sellOK && oiOK(x);
+        const c = coin(x.sym), want = x.move >= 0 ? "Sell" : "Buy", pumpUp = pumpP > 0 && x.ch1h >= pumpP, dumpDn = pumpP > 0 && x.ch1h <= -pumpP;
+        if (pumpUp || dumpDn) pumpBlocked.push(x.sym.replace(/USDT$/, "") + ` ${x.ch1h >= 0 ? "+" : ""}${x.ch1h.toFixed(1)}%`);
+        const sOK = sellOK && oiOK(x) && !pumpUp, bOK = buyOK && !dumpDn;
         if (sellOK && !sOK && want === "Sell") oiBlocked.push(x.sym.replace(/USDT$/, "") + (x.oi == null ? " (нет OI)" : ` OI ${x.oi >= 0 ? "+" : ""}${x.oi.toFixed(2)}%`));
-        const keepSide = ACTIVE.includes(x.sym) && c.side && (c.side === "Sell" ? sOK : buyOK);
-        x.side = keepSide ? c.side : (want === "Sell" ? (sOK ? "Sell" : null) : (buyOK ? "Buy" : sOK ? "Sell" : null));   // памп с растущим OI -> ни SELL, ни BUY
+        const keepSide = ACTIVE.includes(x.sym) && c.side && (c.side === "Sell" ? sOK : bOK);
+        x.side = keepSide ? c.side : (want === "Sell" ? (sOK ? "Sell" : null) : (bOK ? "Buy" : sOK ? "Sell" : null));   // памп с растущим OI -> ни SELL, ни BUY
       }
       if (CFG.oiOn) { const key = oiBlocked.slice(0, 8).join(", "); if (key !== (BUD.oiLogged ?? "")) { BUD.oiLogged = key; if (key) log(`📉 Фильтр OI: открытый интерес не падает — SELL не ставлю: ${key}${oiBlocked.length > 8 ? " …" : ""}`, "info"); } }
+      { const key = pumpBlocked.slice(0, 8).join(", "); if (key !== (BUD.pumpLogged ?? "")) { BUD.pumpLogged = key; if (key) log(`🚀 Фильтр пампа: за 1 ч ±${pumpP}% и больше — против движения не захожу: ${key}${pumpBlocked.length > 8 ? " …" : ""}`, "info"); } }
       for (let n = flat.length - 1; n >= 0; n--) if (!flat[n].side) flat.splice(n, 1);
       K = Math.max(0, Math.min(K, flat.length));
       const scale = K ? Math.max(1, B.free / (K * B.perCoinBase)) : 1;
@@ -533,6 +544,7 @@ function create(host) {
     let pnl = simPnl;
     if (pnl == null && isLive()) { try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; } }
     const avg = pos ? pos.avg : tr.first, hold = (now() - tr.open) / 60000;
+    if (pnl != null && +pnl < 0 && !tr.usExit && CFG.coolMin > 0) { COOL[sym] = now() + CFG.coolMin * 60000; saveCool(); log(`${sym}: 🧊 закрыто в минус ${(+pnl).toFixed(2)} USDT (стоп) — ${CFG.coolMin} мин не торгую эту монету`, "err"); }
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), avg, adverse: +((tr.side === "Buy" ? 1 - tr.minPx / avg : tr.maxPx / avg - 1) * 100).toFixed(2), best: +((tr.side === "Buy" ? tr.maxPx / avg - 1 : 1 - tr.minPx / avg) * 100).toFixed(2), pnl: pnl == null ? null : +(+pnl).toFixed(4) }));
     delete TRADES[sym]; saveTrades();
   }
@@ -655,6 +667,7 @@ function create(host) {
     if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "⏸ Паузы ВКЛ: пн–пт 15:00–16:00 (открытие США) и каждую ночь 00:45–03:00 по Мадриду — заявки сняты, позиции закрываются лимитками" : "⏸ Паузы ВЫКЛ", "info"); }
     if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
     CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
+    CFG.coolMin = Math.max(0, Math.min(1440, Math.round(+CFG.coolMin || 0))); CFG.pumpPct = Math.max(0, Math.min(100, +CFG.pumpPct || 0));
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); if (BUD) BUD.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: новый SELL только если открытый интерес монеты за 15 мин падает${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""} (открытые позиции веду как обычно)` : "📉 Фильтр OI ВЫКЛ: SELL при любом открытом интересе", "info"); }
     saveCfg();
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });

@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, coolMin: 180, pumpPct: 8, resPct: 40, maxLossUsd: 1, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, coolMin: 180, pumpPct: 8, resPct: 40, maxLossUsd: 3, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
 // ⚡ ТУРБО: быстрый оборот (близкие заявки, быстрый тейк) + умный риск (мало доборов, близкий стоп, авто-выкл при минусе)
 const TURBO = { step: 0.4, levels: 2, delay: 1, gridTrail: 0.2, take: 0.5, trailGap: 0.5, addStep: 8, maxAdds: 2, addMult: 1.5, stopPct: 3 };
 // 🔔 пауза на открытие биржи США: пн–пт 9:00–10:00 по Нью-Йорку (15:00–16:00 Мадрид, летнее/зимнее время учтено) — новые сетки не ставлю
@@ -52,6 +52,7 @@ function create(host) {
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
   if (CFG.resPct == null || !Number.isFinite(+CFG.resPct)) { CFG.resPct = 40; saveCfg(); }
+  if (!lsGet("vg.maxLoss3", false)) { if (CFG.maxLossUsd === 1) CFG.maxLossUsd = 3; saveCfg(); lsSet("vg.maxLoss3", true); }   // макс. минус на позицию 3 USDT (было 1)
   if (!lsGet("vg.turboGap05", false)) { if (CFG.turbo && CFG.trailGap === 0.15) CFG.trailGap = 0.5; saveCfg(); lsSet("vg.turboGap05", true); }   // турбо: откат трейлинга 0.5 % (было 0.15 %)
   if (!lsGet("vg.turboAdd8", false)) { if (CFG.turbo && CFG.addStep === 3) { CFG.addStep = 8; } saveCfg(); lsSet("vg.turboAdd8", true); }   // турбо: добор против шорта каждые 8 % (было 3 %)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));

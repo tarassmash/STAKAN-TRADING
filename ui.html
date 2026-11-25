@@ -79,6 +79,7 @@
     <h2>Пробой</h2>
     <div class="row"><label title="Диапазон = максимум и минимум последних N закрытых минутных свечей">Диапазон, мин</label><input type="number" id="lookback" min="3" max="120" step="1" /></div>
     <div class="row"><label title="Вход, когда цена ушла за максимум / минимум на столько %">Вход за уровнем, %</label><input type="number" id="buf" min="0" max="2" step="0.05" /></div>
+    <div class="row"><label title="Вход лимиткой: после пробоя лимит стоит не дальше этого % за уровнем. Цена улетела дальше — вход пропущен">Лимит входа не дальше, %</label><input type="number" id="entrySlip" min="0.01" max="2" step="0.05" /></div>
     <div class="row"><label title="Средний размер минутной свечи за диапазон. Чем больше — тем «бешенее» монета: быстро ходит туда-сюда на много. Спокойные монеты пропускаю, самые бешеные — первыми">Минутная свеча от, % («бешеность»)</label><input type="number" id="minAtr" min="0" max="5" step="0.05" /></div>
     <div class="row"><label title="Слишком узкий диапазон — шум, такие монеты пропускаю">Диапазон от, %</label><input type="number" id="minRange" min="0.1" step="0.1" /></div>
     <div class="row"><label title="Слишком широкий диапазон — монета уже улетела, пропускаю">Диапазон до, %</label><input type="number" id="maxRange" min="0.2" step="0.5" /></div>
@@ -95,7 +96,7 @@
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять ордера пробоя)</button>
-    <div class="note">Берутся самые «бешеные» монеты — с самыми большими минутными свечами. Каждую минуту у них считается диапазон последних минут. На бирже стоят условные маркет-ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп-лимит за пробитым уровнем</b>, а бот ведёт <b>трейлинг</b>. Все выходы — <b>только лимитками</b> (не исполнилась — переставляется за ценой каждые 3 с), маркета на выходе нет. Доборов и усреднения нет.</div>
+    <div class="note">Берутся самые «бешеные» монеты — с самыми большими минутными свечами. Каждую минуту у них считается диапазон последних минут. На бирже стоят условные <b>лимитные</b> ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп-лимит за пробитым уровнем</b>, а бот ведёт <b>трейлинг</b>. Все выходы — <b>только лимитками</b> (не исполнилась — переставляется за ценой каждые 3 с), маркета на выходе нет. Доборов и усреднения нет.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD.</div>
   </aside>
@@ -137,7 +138,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "entrySlip", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) || +v === 0 ? "—" : String(+(+v).toPrecision(6));
 const sh = (s) => s.replace(/USDT$/, "");

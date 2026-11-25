@@ -1,7 +1,7 @@
 // ЩУКИН НА ПРОБОЯХ — серверный движок, торгует 24/7.
 //  • раз в минуту: скан USDT-перпов Bybit — самые подвижные монеты (24ч / 1ч), оборот от minTurn млн $;
 //  • у каждой: диапазон последних lookback закрытых минутных свечей (максимум / минимум);
-//  • на бирже ставятся условные маркет-ордера на ПРОБОЙ в обе стороны: BUY выше максимума, SELL ниже минимума (+buf %);
+//  • на бирже ставятся условные ЛИМИТНЫЕ ордера на ПРОБОЙ (лимит не дальше entrySlip % за уровнем) в обе стороны: BUY выше максимума, SELL ниже минимума (+buf %);
 //  • пробой исполнен: второй ордер снимается, на бирже сразу СТОП-ЛИМИТ за пробитым уровнем (stopBuf %);
 //    трейлинг ведёт бот (с +trailStart % от входа, отступ trailGap %), выход — ЛИМИТКОЙ, которая переставляется за ценой. Маркета на выходе нет;
 //  • 📉 фильтр OI (опция): входить только если открытый интерес монеты за 15 мин растёт (пробой на новых деньгах);
@@ -11,11 +11,11 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, maxPos: 5, maxCoins: 8, minTurn: 5, maxCand: 60, lookback: 15, buf: 0.1, minRange: 0.8, maxRange: 10, minAtr: 0.25, stopBuf: 0.5, trailStart: 1, trailGap: 0.5, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const DEF = { live: false, usdt: 5, lev: 10, maxPos: 5, maxCoins: 8, minTurn: 5, maxCand: 60, lookback: 15, buf: 0.1, entrySlip: 0.2, minRange: 0.8, maxRange: 10, minAtr: 0.25, stopBuf: 0.5, trailStart: 1, trailGap: 0.5, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
 // ⚡ ТУРБО на пробоях: диапазон 5 мин, вход ближе, стоп ближе, трейлинг раньше и плотнее
 const TURBO = { lookback: 5, buf: 0.05, minRange: 0.4, maxRange: 8, stopBuf: 0.3, trailStart: 0.5, trailGap: 0.3 };
 const TURBO_LOSS_PCT = 3;   // турбо выключается само при минусе 3 % депозита с момента включения
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "entrySlip", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -164,14 +164,15 @@ function create(host) {
     if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; }
     for (const side of ["Buy", "Sell"]) {
       const trig = levels[side], qty = qtyFor(i, trig), o = e[side];
+      const price = rnd(trig * (1 + (side === "Buy" ? 1 : -1) * CFG.entrySlip / 100), i.tick, side === "Buy" ? "down" : "up");   // лимит входа: не дальше entrySlip % за уровнем
       if (o && o.id && Math.abs(o.trig - trig) < +i.tick / 2 && Math.abs(o.qty / qty - 1) < 0.1) continue;
       if (o && o.id) {
-        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: o.id, triggerPrice: String(trig), qty: String(qty) }); Object.assign(o, { trig, qty }); }
+        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: o.id, triggerPrice: String(trig), price, qty: String(qty) }); Object.assign(o, { trig, qty }); }
         catch (er) { await cancel(sym, o.id); e[side] = null; }   // ордер мог уже сработать — новый поставлю только на следующем скане, если позиции нет
         continue;
       }
       try {
-        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Market", qty: String(qty), triggerPrice: String(trig), triggerDirection: side === "Buy" ? 1 : 2, triggerBy: "LastPrice", positionIdx: idxFor(c, side), orderLinkId: "bo_" + now() + Math.floor(Math.random() * 1e4) });
+        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", price, timeInForce: "GTC", qty: String(qty), triggerPrice: String(trig), triggerDirection: side === "Buy" ? 1 : 2, triggerBy: "LastPrice", positionIdx: idxFor(c, side), orderLinkId: "bo_" + now() + Math.floor(Math.random() * 1e4) });
         e[side] = { id: r.orderId, trig, qty };
       } catch (er) {
         if (er.code === 10001 && /position idx/i.test(er.message || "")) { c.hedge = !c.hedge; log(`${short(sym)}: режим позиций Bybit другой — переключаюсь, повтор на следующем скане`, "info"); }
@@ -330,7 +331,7 @@ function create(host) {
     if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }   // пока турбо ВКЛ, его параметры с формы не перетираются
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.maxPos = Math.max(1, Math.min(30, Math.round(CFG.maxPos))); CFG.maxCoins = Math.max(1, Math.min(40, Math.round(CFG.maxCoins)));
-    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.buf = Math.max(0, Math.min(2, CFG.buf)); CFG.minRange = Math.max(0.1, CFG.minRange); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxRange = Math.max(CFG.minRange + 0.1, CFG.maxRange);
+    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.buf = Math.max(0, Math.min(2, CFG.buf)); CFG.entrySlip = Math.max(0.01, Math.min(2, +CFG.entrySlip || 0.2)); CFG.minRange = Math.max(0.1, CFG.minRange); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxRange = Math.max(CFG.minRange + 0.1, CFG.maxRange);
     CFG.stopBuf = Math.max(0.05, Math.min(10, CFG.stopBuf)); CFG.trailStart = Math.max(0, Math.min(20, CFG.trailStart)); CFG.trailGap = Math.max(0.05, Math.min(10, CFG.trailGap)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: только сигналы", CFG.live ? "err" : "info"); }

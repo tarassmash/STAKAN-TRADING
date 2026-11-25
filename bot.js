@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, coolMin: 180, pumpPct: 8, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
+const DEF = { budgetPct: 45, fillPct: 90, maxCoins: 20, simEq: 1000, minTurn: 5, maxCand: 40, levels: 5, step: 1, usdt: 10, lev: 3, delay: 1, take: 1, btcOnly: false, trailOn: true, trailGap: 0.3, gridTrail: 0.3, addStep: 5, maxAdds: 3, maxPos: 20, stopPct: 5, addMult: 1.3, live: false, longOn: true, longBtc: true, oiOn: false, oiPct: 0, coolMin: 180, pumpPct: 8, resPct: 40, turbo: false, turboSave: null, turboFrom: 0, usPause: true };
 // ⚡ ТУРБО: быстрый оборот (близкие заявки, быстрый тейк) + умный риск (мало доборов, близкий стоп, авто-выкл при минусе)
 const TURBO = { step: 0.4, levels: 2, delay: 1, gridTrail: 0.2, take: 0.5, trailGap: 0.15, addStep: 8, maxAdds: 2, addMult: 1.5, stopPct: 3 };
 // 🔔 пауза на открытие биржи США: пн–пт 9:00–10:00 по Нью-Йорку (15:00–16:00 Мадрид, летнее/зимнее время учтено) — новые сетки не ставлю
@@ -25,7 +25,7 @@ function nightNow(t) {
 // какая пауза сейчас: "us" / "night" / ""
 function pauseNow(t) { return usOpenNow(t) ? "us" : nightNow(t) ? "night" : ""; }
 const TURBO_LOSS_PCT = 3;   // турбо выключается само, если с момента включения закрыто в минус 3% депозита
-const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct", "coolMin", "pumpPct"];
+const NUMS = ["budgetPct", "fillPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "trailGap", "gridTrail", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct", "coolMin", "pumpPct", "resPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -51,6 +51,7 @@ function create(host) {
   if (!lsGet("vg.geo13", false)) { CFG.addMult = 1.3; CFG.stopPct = 5; saveCfg(); lsSet("vg.geo13", true); }   // adds ×1.3 each; the stop 5 % above the last planned add
   if (!lsGet("vg.stop20b", false)) { CFG.stopPct = 20; saveCfg(); lsSet("vg.stop20b", true); }   // the emergency stop is on: 20 % against the short
   if (!lsGet("vg.take1", false)) { if (CFG.take === 0.7) CFG.take = 1; saveCfg(); lsSet("vg.take1", true); }   // the default take is 1 % now (an own value stays)
+  if (CFG.resPct == null || !Number.isFinite(+CFG.resPct)) { CFG.resPct = 40; saveCfg(); }
   if (!lsGet("vg.turboAdd8", false)) { if (CFG.turbo && CFG.addStep === 3) { CFG.addStep = 8; } saveCfg(); lsSet("vg.turboAdd8", true); }   // турбо: добор против шорта каждые 8 % (было 3 %)
   const STAT = Object.assign({ scans: 0, fills: 0, takes: 0, simPnl: 0, since: 0, realized: 0, closed: 0, realDone: 0, doneUntil: 0 }, lsGet("vg.stat", {}));
   const saveStat = () => lsSet("vg.stat", STAT);
@@ -152,7 +153,10 @@ function create(host) {
       const units = f.reduce((a, x) => a + x[0], 0), loss = f.reduce((a, x) => a + x[0] * (px / x[1] - 1), 0);
       worst = Math.max(worst, units * 1.03 / lev + loss);
     }
-    return worst;
+    // 💰 запас под доборы и минус до последнего добора держу только на resPct % (остальное работает в заявках входа);
+    // не хватит маржи на добор — бот снимет чужие заявки входа или закроет позицию около нуля
+    const entry = CFG.levels * 1.03 / lev, R = Math.max(0, Math.min(100, CFG.resPct ?? 100)) / 100;
+    return entry + Math.max(0, worst - entry) * R;
   }
   const tradeLot = (sym) => (TRADES[sym] && TRADES[sym].lot) || lot();   // доборы сделки — от её собственного лота (лот новых монет может меняться)
   // резерв уже открытой позиции: маржа оставшихся доборов + минус, если цена дойдёт до последнего добора
@@ -164,7 +168,7 @@ function create(host) {
     const lastPx = base * (1 + d * CFG.addStep * left / 100);
     let need = Math.max(0, d * (lastPx / p0 - 1)) * c.pos.size * p0;   // минус текущей позиции до последнего добора
     for (let k = 1; k <= left; k++) { const px = base * (1 + d * CFG.addStep * k / 100), u = l * addK(done + k); need += u * 1.03 / lev + u * Math.max(0, d * (lastPx / px - 1)); }
-    return need;
+    return need * Math.max(0, Math.min(100, CFG.resPct ?? 100)) / 100;
   }
 
   // ---------------- the budget: budgetPct % of the deposit always works in the limits ----------------
@@ -687,7 +691,7 @@ function create(host) {
     if (typeof o.usPause === "boolean" && o.usPause !== CFG.usPause) { CFG.usPause = o.usPause; ch.push("usPause"); log(CFG.usPause ? "⏸ Паузы ВКЛ: пн–пт 15:00–16:00 (открытие США) и каждую ночь 00:45–03:00 по Мадриду — заявки сняты, позиции закрываются лимитками" : "⏸ Паузы ВЫКЛ", "info"); }
     if (typeof o.btcOnly === "boolean" && o.btcOnly !== CFG.btcOnly) { CFG.btcOnly = o.btcOnly; ch.push("btcOnly"); BTC.blocked = null; }
     CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
-    CFG.coolMin = Math.max(0, Math.min(1440, Math.round(+CFG.coolMin || 0))); CFG.pumpPct = Math.max(0, Math.min(100, +CFG.pumpPct || 0));
+    CFG.coolMin = Math.max(0, Math.min(1440, Math.round(+CFG.coolMin || 0))); CFG.pumpPct = Math.max(0, Math.min(100, +CFG.pumpPct || 0)); CFG.resPct = Math.max(0, Math.min(100, Math.round(+CFG.resPct)));
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); if (BUD) BUD.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: новый SELL только если открытый интерес монеты за 15 мин падает${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""} (открытые позиции веду как обычно)` : "📉 Фильтр OI ВЫКЛ: SELL при любом открытом интересе", "info"); }
     saveCfg();
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });

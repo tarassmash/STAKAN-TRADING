@@ -79,6 +79,7 @@
     <h2>Пробой</h2>
     <div class="row"><label title="Диапазон = максимум и минимум последних N закрытых минутных свечей">Диапазон, мин</label><input type="number" id="lookback" min="3" max="120" step="1" /></div>
     <div class="row"><label title="Вход, когда цена ушла за максимум / минимум на столько %">Вход за уровнем, %</label><input type="number" id="buf" min="0" max="2" step="0.05" /></div>
+    <div class="row"><label title="Средний размер минутной свечи за диапазон. Чем больше — тем «бешенее» монета: быстро ходит туда-сюда на много. Спокойные монеты пропускаю, самые бешеные — первыми">Минутная свеча от, % («бешеность»)</label><input type="number" id="minAtr" min="0" max="5" step="0.05" /></div>
     <div class="row"><label title="Слишком узкий диапазон — шум, такие монеты пропускаю">Диапазон от, %</label><input type="number" id="minRange" min="0.1" step="0.1" /></div>
     <div class="row"><label title="Слишком широкий диапазон — монета уже улетела, пропускаю">Диапазон до, %</label><input type="number" id="maxRange" min="0.2" step="0.5" /></div>
 
@@ -94,7 +95,7 @@
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять ордера пробоя)</button>
-    <div class="note">Каждую минуту у самых подвижных монет считается диапазон последних минут. На бирже стоят условные маркет-ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп за пробитым уровнем</b> и <b>трейлинг-стоп</b>: прибыль бежит за ценой, убыток короткий. Доборов и усреднения нет.</div>
+    <div class="note">Берутся самые «бешеные» монеты — с самыми большими минутными свечами. Каждую минуту у них считается диапазон последних минут. На бирже стоят условные маркет-ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп за пробитым уровнем</b> и <b>трейлинг-стоп</b>: прибыль бежит за ценой, убыток короткий. Доборов и усреднения нет.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD.</div>
   </aside>
@@ -115,8 +116,8 @@
     <div class="panel">
       <h2>Кандидаты</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Монета</th><th>Диапазон</th><th>Макс / мин</th><th>Цена</th><th>За 1 ч</th><th>OI 15 мин</th><th>Оборот 24ч</th><th></th></tr></thead>
-        <tbody id="candBody"><tr><td colspan="8" class="mut">—</td></tr></tbody>
+        <thead><tr><th>Монета</th><th>Свеча 1м</th><th>Диапазон</th><th>Макс / мин</th><th>Цена</th><th>За 1 ч</th><th>OI 15 мин</th><th>Оборот 24ч</th><th></th></tr></thead>
+        <tbody id="candBody"><tr><td colspan="9" class="mut">—</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -136,7 +137,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "stopBuf", "trailStart", "trailGap", "oiPct"];
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) || +v === 0 ? "—" : String(+(+v).toPrecision(6));
 const sh = (s) => s.replace(/USDT$/, "");
@@ -191,8 +192,8 @@ function render() {
   const st = B.stat;
   $("stats").innerHTML = `<span>сканов <b>${st.scans}</b></span><span>пробоев <b>${st.entries}</b></span><span>в плюс <b class="up">${st.wins}</b></span><span>в минус <b class="dn">${st.losses}</b></span>`
     + `<span>на взводе <b>${B.rows.filter(r => !r.pos.length).length}</b></span>` + (B.nextScan != null ? `<span>скан через <b>${B.nextScan} с</b></span>` : "");
-  $("candBody").innerHTML = B.cand.map(x => `<tr><td><b>${esc(sh(x.sym))}</b>${x.armed ? " 🎯" : ""}</td><td>${x.range.toFixed(2)}%</td><td>${f(x.hi)} / ${f(x.lo)}</td><td>${f(x.last)}</td>`
-    + `<td class="${x.ch1h >= 0 ? "up" : "dn"}">${x.ch1h >= 0 ? "+" : ""}${x.ch1h.toFixed(2)}%</td><td class="${x.oi == null ? "mut" : x.oi > 0 ? "up" : "dn"}">${x.oi == null ? "—" : (x.oi >= 0 ? "+" : "") + x.oi.toFixed(2) + "%"}</td><td>${(x.turn / 1e6).toFixed(0)} M$</td><td class="mut">${esc(x.why)}</td></tr>`).join("") || '<tr><td colspan="8" class="mut">—</td></tr>';
+  $("candBody").innerHTML = B.cand.map(x => `<tr><td><b>${esc(sh(x.sym))}</b>${x.armed ? " 🎯" : ""}</td><td class="${x.atr >= (S.bot.cfg.minAtr || 0) ? "up" : "mut"}"><b>${(+x.atr || 0).toFixed(2)}%</b></td><td>${x.range.toFixed(2)}%</td><td>${f(x.hi)} / ${f(x.lo)}</td><td>${f(x.last)}</td>`
+    + `<td class="${x.ch1h >= 0 ? "up" : "dn"}">${x.ch1h >= 0 ? "+" : ""}${x.ch1h.toFixed(2)}%</td><td class="${x.oi == null ? "mut" : x.oi > 0 ? "up" : "dn"}">${x.oi == null ? "—" : (x.oi >= 0 ? "+" : "") + x.oi.toFixed(2) + "%"}</td><td>${(x.turn / 1e6).toFixed(0)} M$</td><td class="mut">${esc(x.why)}</td></tr>`).join("") || '<tr><td colspan="9" class="mut">—</td></tr>';
   $("log").innerHTML = B.log.map(([t, m, cls]) => `<div class="${esc(cls)}">[${new Date(t).toLocaleTimeString("ru-RU")}] ${esc(m)}</div>`).join("");
 }
 async function load() { try { S = await fetch("/api/state", { cache: "no-store" }).then(r => r.json()); render(); } catch (e) { /* следующий раз */ } }

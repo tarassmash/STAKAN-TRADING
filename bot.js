@@ -11,11 +11,11 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, maxPos: 5, maxCoins: 8, minTurn: 5, maxCand: 40, lookback: 15, buf: 0.1, minRange: 0.8, maxRange: 6, stopBuf: 0.5, trailStart: 1, trailGap: 0.5, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const DEF = { live: false, usdt: 5, lev: 10, maxPos: 5, maxCoins: 8, minTurn: 5, maxCand: 60, lookback: 15, buf: 0.1, minRange: 0.8, maxRange: 10, minAtr: 0.25, stopBuf: 0.5, trailStart: 1, trailGap: 0.5, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
 // ⚡ ТУРБО на пробоях: диапазон 5 мин, вход ближе, стоп ближе, трейлинг раньше и плотнее
-const TURBO = { lookback: 5, buf: 0.05, minRange: 0.4, maxRange: 4, stopBuf: 0.3, trailStart: 0.5, trailGap: 0.3 };
+const TURBO = { lookback: 5, buf: 0.05, minRange: 0.4, maxRange: 8, stopBuf: 0.3, trailStart: 0.5, trailGap: 0.3 };
 const TURBO_LOSS_PCT = 3;   // турбо выключается само при минусе 3 % депозита с момента включения
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "stopBuf", "trailStart", "trailGap", "oiPct"];
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
@@ -29,6 +29,7 @@ function create(host) {
   const old = lsGet("vg.cfg", {});
   const CFG = Object.assign({}, DEF, { live: !!old.live, oiOn: !!old.oiOn, oiPct: +old.oiPct || 0 }, lsGet("bo.cfg", {}));
   const saveCfg = () => lsSet("bo.cfg", CFG);
+  if (!lsGet("bo.crazy1", false)) { if (CFG.maxRange === 6) CFG.maxRange = 10; if (CFG.maxCand === 40) CFG.maxCand = 60; if (CFG.turboSave && CFG.turboSave.maxRange === 6) CFG.turboSave.maxRange = 10; if (CFG.turbo && CFG.maxRange === 4) CFG.maxRange = 8; saveCfg(); lsSet("bo.crazy1", true); }   // «бешеные» монеты: шире диапазон, больше кандидатов
   const STAT = Object.assign({ scans: 0, entries: 0, wins: 0, losses: 0, since: 0, realized: 0, closed: 0, realDone: 0, closedDone: 0, doneUntil: 0 }, lsGet("bo.stat", {}));
   const saveStat = () => lsSet("bo.stat", STAT);
   const OURS = new Set(lsGet("bo.syms", []));    // монеты, на которых этот бот ставил ордера пробоя
@@ -108,11 +109,12 @@ function create(host) {
           try {
             const k = await pub("/v5/market/kline", { category: "linear", symbol: x.symbol, interval: "1", limit: Math.round(CFG.lookback) + 1 });
             const rows = (k.list || []).slice(1).map(r => ({ h: +r[2], l: +r[3] }));   // без текущей свечи
+            const atr = rows.reduce((a, r) => a + (r.h / r.l - 1) * 100, 0) / Math.max(1, rows.length);   // средняя минутная свеча, % — насколько монета «бешеная»
             if (rows.length < Math.round(CFG.lookback)) return null;
             const hi = Math.max(...rows.map(r => r.h)), lo = Math.min(...rows.map(r => r.l)), range = (hi / lo - 1) * 100, last = +x.lastPrice;
             let oi = null;
             if (CFG.oiOn) { try { const o = await pub("/v5/market/open-interest", { category: "linear", symbol: x.symbol, intervalTime: "5min", limit: 4 }); const l = (o.list || []).map(r => +r.openInterest); if (l.length >= 2 && l[l.length - 1] > 0) oi = (l[0] / l[l.length - 1] - 1) * 100; } catch (e) { /* нет данных */ } }
-            return { sym: x.symbol, hi, lo, range, last, ch1h: +x.prevPrice1h > 0 ? (last / +x.prevPrice1h - 1) * 100 : 0, turn: +x.turnover24h, oi, mv: mv(x) };
+            return { sym: x.symbol, hi, lo, range, atr, last, ch1h: +x.prevPrice1h > 0 ? (last / +x.prevPrice1h - 1) * 100 : 0, turn: +x.turnover24h, oi, mv: mv(x) };
           } catch (e) { return null; }
         }));
         out.push(...part.filter(Boolean));
@@ -122,11 +124,12 @@ function create(host) {
       const oiOK = (x) => !CFG.oiOn || (x.oi != null && x.oi > 0 && x.oi >= Math.max(0, CFG.oiPct || 0));
       const blockedOI = [];
       const good = out.filter(x => {
+        if (x.atr < CFG.minAtr) return false;
         if (x.range < CFG.minRange || x.range > CFG.maxRange) return false;
         if (x.last >= x.hi || x.last <= x.lo) return false;
         if (!oiOK(x)) { blockedOI.push(short(x.sym) + (x.oi == null ? " (нет OI)" : ` OI ${x.oi >= 0 ? "+" : ""}${x.oi.toFixed(2)}%`)); return false; }
         return true;
-      }).sort((a, b) => b.mv - a.mv);
+      }).sort((a, b) => b.atr - a.atr);   // самые «бешеные» (крупные минутные свечи) — первыми
       if (CFG.oiOn) { const key = blockedOI.slice(0, 8).join(", "); if (key !== (scan.oiLogged ?? "")) { scan.oiLogged = key; if (key) log(`📉 Фильтр OI: открытый интерес не растёт — пробой не ставлю: ${key}${blockedOI.length > 8 ? " …" : ""}`, "info"); } }
       if (isLive()) await account();
       turboGuard(ACC.eq);
@@ -140,9 +143,9 @@ function create(host) {
       scan.full = !slots;
       const next = want.map(x => x.sym), removed = ARMED.filter(s => !next.includes(s)), added = next.filter(s => !ARMED.includes(s));
       ARMED = next;
-      CAND = out.sort((a, b) => b.mv - a.mv).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: next.includes(x.sym), why: next.includes(x.sym) ? "" : x.range < CFG.minRange ? "узкий" : x.range > CFG.maxRange ? "широкий" : (x.last >= x.hi || x.last <= x.lo) ? "уже вне" : !oiOK(x) ? "OI" : posOf(x.sym).length ? "позиция" : "лимит" }));
+      CAND = out.sort((a, b) => b.atr - a.atr).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, atr: x.atr, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: next.includes(x.sym), why: next.includes(x.sym) ? "" : x.atr < CFG.minAtr ? "спокойная" : x.range < CFG.minRange ? "узкий" : x.range > CFG.maxRange ? "широкий" : (x.last >= x.hi || x.last <= x.lo) ? "уже вне" : !oiOK(x) ? "OI" : posOf(x.sym).length ? "позиция" : "лимит" }));
       STAT.scans++; lastScanAt = now(); saveStat();
-      jlog("scan", { eq: ACC.eq, armed: next, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.ch1h.toFixed(2)]) });
+      jlog("scan", { eq: ACC.eq, armed: next, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.atr.toFixed(2), +x.ch1h.toFixed(2)]) });
       if (added.length || removed.length) log(`Скан: на взводе ${next.length} монет → ${next.map(short).join(", ") || "—"}${added.length ? " · + " + added.map(short).join(", ") : ""}${removed.length ? " · − " + removed.map(short).join(", ") : ""}`, "ok");
       for (const s of removed) await dropEntry(s);
       for (const x of want) { try { await arm(x); } catch (e) { log(`${short(x.sym)}: ордера пробоя: ${e.message}`, "err"); } }
@@ -301,7 +304,7 @@ function create(host) {
     if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }   // пока турбо ВКЛ, его параметры с формы не перетираются
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.maxPos = Math.max(1, Math.min(30, Math.round(CFG.maxPos))); CFG.maxCoins = Math.max(1, Math.min(40, Math.round(CFG.maxCoins)));
-    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.buf = Math.max(0, Math.min(2, CFG.buf)); CFG.minRange = Math.max(0.1, CFG.minRange); CFG.maxRange = Math.max(CFG.minRange + 0.1, CFG.maxRange);
+    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.buf = Math.max(0, Math.min(2, CFG.buf)); CFG.minRange = Math.max(0.1, CFG.minRange); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxRange = Math.max(CFG.minRange + 0.1, CFG.maxRange);
     CFG.stopBuf = Math.max(0.05, Math.min(10, CFG.stopBuf)); CFG.trailStart = Math.max(0, Math.min(20, CFG.trailStart)); CFG.trailGap = Math.max(0.05, Math.min(10, CFG.trailGap)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: только сигналы", CFG.live ? "err" : "info"); }

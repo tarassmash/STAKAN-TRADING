@@ -74,10 +74,6 @@
     <div class="note" id="btcInfo">—</div>
     <button class="btn sec" id="oiBtn" style="margin-top:8px">📉 SELL только при падении OI: ВЫКЛ</button>
     <div class="row"><label title="На сколько % открытый интерес монеты должен упасть за 15 мин, чтобы ставить SELL. 0 = любое падение">Падение OI за 15 мин, % (0 = любое)</label><input type="number" id="oiPct" min="0" max="50" step="0.1" /></div>
-    <div class="row"><label title="После закрытия позиции в минус (стоп) монета не торгуется столько минут. 0 = выкл">Кулдаун после стопа, мин (0 = выкл)</label><input type="number" id="coolMin" min="0" max="1440" step="10" /></div>
-    <div class="row"><label title="Монета выросла за 1 час на столько % и больше — шорт не открываю (упала — лонг не открываю). 0 = выкл">Фильтр пампа: рост за 1 ч, % (0 = выкл)</label><input type="number" id="pumpPct" min="0" max="100" step="0.5" /></div>
-    <div class="row"><label title="Какую часть запаса под доборы и возможный минус держать свободной. 100 = полный запас (депозит используется меньше), 0 = весь бюджет в заявках входа. Не хватит маржи на добор — бот снимет заявки входа или закроет позицию около нуля">Запас под доборы, % (100 = полный)</label><input type="number" id="resPct" min="0" max="100" step="5" /></div>
-    <div class="row"><label title="Стоп ставится так, чтобы одна позиция (с комиссиями) теряла не больше этой суммы. Доборы за этим стопом не ставятся. 0 = выкл">Макс. минус на позицию, USDT (0 = выкл)</label><input type="number" id="maxLossUsd" min="0" max="1000" step="0.5" /></div>
     <div class="note" id="oiInfo">—</div>
     <button class="btn sec" id="longBtn" style="margin-top:8px">↑ Лонги на дампах: —</button>
     <div class="note" id="longInfo">BUY-сетка снизу у падающих монет, доборы ниже, выход только в плюс трейлингом, стоп ниже последнего добора. Новые лонги не открываются, пока BTC в тренде вниз.</div>
@@ -153,7 +149,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct", "coolMin", "pumpPct", "resPct", "maxLossUsd"];
+const NUMS = ["trailGap", "gridTrail", "budgetPct", "maxCoins", "simEq", "minTurn", "maxCand", "levels", "step", "usdt", "lev", "delay", "take", "addStep", "maxAdds", "maxPos", "stopPct", "addMult", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) ? "—" : String(+(+v).toPrecision(6));
 let S = null, BUSY = false, DIRTY = false;

@@ -353,9 +353,28 @@ function create(host) {
     }
   }
   // добору не хватило маржи: доборы важнее новых входов — снимаем сетку входа с наименее волатильной монеты без позиции
+  // 💸 на добор нет маржи и снимать нечего: закрываю маркетом позицию, которая «светится нулём» (PnL ≥ −0.2 %, лучше в плюсе),
+  // и отдаю освободившуюся маржу на добор против пампа — резерв под доборы зря не лежит
+  const FREE_PCT = 0.2;
+  let freeBusyAt = 0;
+  async function freeFromFlat(sym) {
+    const cand = Object.values(C).filter(c => c.sym !== sym && c.pos && c.pos.size > 0 && OURS.has(c.sym) && TRADES[c.sym] && c.pos.avg > 0)
+      .map(c => ({ c, pct: c.pos.upnl / (c.pos.size * c.pos.avg) * 100 })).filter(x => x.pct >= -FREE_PCT).sort((a, b) => b.pct - a.pct);
+    if (!cand.length || now() - freeBusyAt < 5000) { log(`${sym}: ⚠ на добор не хватает маржи, а снимать уже нечего (нет позиций около нуля) — уменьшите лот / «% депозита» / число доборов`, "err"); return false; }
+    const { c, pct } = cand[0], L = c.pos.side === "Buy";
+    freeBusyAt = now();
+    try {
+      await post("/v5/order/create", { category: "linear", symbol: c.sym, side: L ? "Sell" : "Buy", orderType: "Market", qty: String(c.pos.size), reduceOnly: true, positionIdx: c.pos.idx, orderLinkId: "vg_fr" + now() + Math.floor(Math.random() * 1e4) });
+    } catch (e) { log(`${sym}: не смог закрыть ${c.sym} под добор: ${e.message}`, "err"); return false; }
+    if (TRADES[c.sym]) { TRADES[c.sym].freeExit = true; saveTrades(); }   // закрыто ради маржи, а не стопом — без кулдауна
+    ACTIVE = ACTIVE.filter(s => s !== c.sym);
+    log(`${sym}: 💸 на добор не хватало маржи — закрыл ${word(c.pos.side)} ${c.sym} около нуля (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%, ${c.pos.upnl >= 0 ? "+" : ""}${c.pos.upnl.toFixed(2)} USDT), маржу отдаю на добор`, "ok");
+    await sleep(1500);
+    return true;
+  }
   async function makeRoom(sym) {
     const victim = [...ACTIVE].reverse().find(s => s !== sym && !hasPos(s));
-    if (!victim) { log(`${sym}: ⚠ на добор не хватает маржи, а снимать уже нечего — уменьшите лот / «% депозита» / число доборов`, "err"); return false; }
+    if (!victim) return await freeFromFlat(sym);
     ACTIVE = ACTIVE.filter(s => s !== victim); await dropGrid(victim);
     log(`${sym}: на добор не хватало маржи — снял сетку входа ${victim}, ставлю добор`, "info");
     return true;
@@ -545,7 +564,7 @@ function create(host) {
     let pnl = simPnl;
     if (pnl == null && isLive()) { try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; } }
     const avg = pos ? pos.avg : tr.first, hold = (now() - tr.open) / 60000;
-    if (pnl != null && +pnl < 0 && !tr.usExit && CFG.coolMin > 0) { COOL[sym] = now() + CFG.coolMin * 60000; saveCool(); log(`${sym}: 🧊 закрыто в минус ${(+pnl).toFixed(2)} USDT (стоп) — ${CFG.coolMin} мин не торгую эту монету`, "err"); }
+    if (pnl != null && +pnl < 0 && !tr.usExit && !tr.freeExit && CFG.coolMin > 0) { COOL[sym] = now() + CFG.coolMin * 60000; saveCool(); log(`${sym}: 🧊 закрыто в минус ${(+pnl).toFixed(2)} USDT (стоп) — ${CFG.coolMin} мин не торгую эту монету`, "err"); }
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), avg, adverse: +((tr.side === "Buy" ? 1 - tr.minPx / avg : tr.maxPx / avg - 1) * 100).toFixed(2), best: +((tr.side === "Buy" ? tr.maxPx / avg - 1 : 1 - tr.minPx / avg) * 100).toFixed(2), pnl: pnl == null ? null : +(+pnl).toFixed(4) }));
     delete TRADES[sym]; saveTrades();
   }

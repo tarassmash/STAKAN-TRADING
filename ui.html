@@ -95,7 +95,7 @@
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять ордера пробоя)</button>
-    <div class="note">Берутся самые «бешеные» монеты — с самыми большими минутными свечами. Каждую минуту у них считается диапазон последних минут. На бирже стоят условные маркет-ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп за пробитым уровнем</b> и <b>трейлинг-стоп</b>: прибыль бежит за ценой, убыток короткий. Доборов и усреднения нет.</div>
+    <div class="note">Берутся самые «бешеные» монеты — с самыми большими минутными свечами. Каждую минуту у них считается диапазон последних минут. На бирже стоят условные маркет-ордера: <b>BUY</b> над максимумом и <b>SELL</b> под минимумом. Сработал один — второй снимается, сразу ставится <b>стоп-лимит за пробитым уровнем</b>, а бот ведёт <b>трейлинг</b>. Все выходы — <b>только лимитками</b> (не исполнилась — переставляется за ценой каждые 3 с), маркета на выходе нет. Доборов и усреднения нет.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD.</div>
   </aside>
@@ -182,7 +182,7 @@ function render() {
   $("coinsBody").innerHTML = B.rows.length ? B.rows.map(r => {
     const rng = r.hi && r.lo ? ((r.hi / r.lo - 1) * 100).toFixed(2) + "%" : "—";
     if (!r.pos.length) return `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td>${rng}</td><td><span class="up">↑ ${f(r.up)}</span> / <span class="dn">↓ ${f(r.dn)}</span></td><td class="mut" colspan="5">на взводе</td></tr>`;
-    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td>${rng}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td class="dn">${f(p.sl)}</td><td class="up">${p.ts ? f(p.ts) : "ждёт"}</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("");
+    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td>${rng}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td class="dn">${f(p.sl)}</td><td class="up">${p.trail ? f(p.trail) : "ждёт"}</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("");
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу монеты в диапазоне…" : "Нажмите «СТАРТ»"}</td></tr>`;
   { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";
     const set = (id, v) => { $(id).textContent = money(v); $(id).style.color = v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--text)"; $(id + "Box").className = "box" + (v > 0 ? " pos" : v < 0 ? " neg" : ""); };

@@ -2,8 +2,8 @@
 //  • раз в минуту: скан USDT-перпов Bybit — самые подвижные монеты (24ч / 1ч), оборот от minTurn млн $;
 //  • у каждой: диапазон последних lookback закрытых минутных свечей (максимум / минимум);
 //  • на бирже ставятся условные маркет-ордера на ПРОБОЙ в обе стороны: BUY выше максимума, SELL ниже минимума (+buf %);
-//  • пробой исполнен: второй ордер снимается, на бирже сразу стоп за пробитым уровнем (stopBuf %) и трейлинг-стоп
-//    (включается на +trailStart % от входа, идёт за ценой с отступом trailGap %) — прибыль бежит, убыток короткий;
+//  • пробой исполнен: второй ордер снимается, на бирже сразу СТОП-ЛИМИТ за пробитым уровнем (stopBuf %);
+//    трейлинг ведёт бот (с +trailStart % от входа, отступ trailGap %), выход — ЛИМИТКОЙ, которая переставляется за ценой. Маркета на выходе нет;
 //  • 📉 фильтр OI (опция): входить только если открытый интерес монеты за 15 мин растёт (пробой на новых деньгах);
 //  • ⚡ турбо: короткий диапазон, близкий стоп и быстрый трейлинг; само выключается при минусе 3 % депозита;
 //  • без доборов, без сеток, без усреднения. LIVE выкл — бот только показывает сигналы, ордеров нет.
@@ -198,7 +198,7 @@ function create(host) {
       if (!OURS.has(p.symbol)) continue;
       const key = p.symbol + "|" + p.side;
       seen[key] = { sym: p.symbol, side: p.side, size: +p.size, avg: +p.avgPrice, upnl: +p.unrealisedPnl || 0, idx: +p.positionIdx || 0, sl: +p.stopLoss || 0, ts: +p.trailingStop || 0, mark: +p.markPrice || 0 };
-      coin(p.symbol).last = +p.markPrice || coin(p.symbol).last;
+      if (!coin(p.symbol).last) coin(p.symbol).last = +p.markPrice;   // цена — последняя сделка (тикер), марк только если её нет
     }
     POS = seen; BUSY_SYMS = busy;
     for (const [key, p] of Object.entries(seen)) {
@@ -214,38 +214,64 @@ function create(host) {
       }
       tr.maxPx = Math.max(tr.maxPx, p.mark); tr.minPx = Math.min(tr.minPx, p.mark);
       if (!tr.protected) await protect(p, tr);
+      else await manage(p, tr);
     }
     for (const key of Object.keys(TRADES)) if (!seen[key]) await closeTrade(key);
   }
-  // стоп за пробитым уровнем + трейлинг-стоп на бирже
+  // стоп за пробитым уровнем — ЛИМИТНЫЙ (условная лимитка на бирже); трейлинг ведёт бот и выходит тоже ЛИМИТКОЙ. Маркета нет.
+  const SL_SLIP = 0.3;   // лимит стопа на 0.3 % хуже цены срабатывания — чтобы лимитка исполнилась на резком движении
   async function protect(p, tr) {
     const i = await inst(p.sym), L = p.side === "Buy", d = L ? 1 : -1;
     const level = tr.level || p.avg;
     const sl = rnd(level * (1 - d * CFG.stopBuf / 100), i.tick, L ? "down" : "up");
-    const dist = Math.max(+i.tick, p.avg * CFG.trailGap / 100), act = p.avg * (1 + d * CFG.trailStart / 100);
+    const slLim = rnd(+sl * (1 - d * SL_SLIP / 100), i.tick, L ? "down" : "up");
+    tr.sl = +sl; tr.slLim = +slLim; saveTrades();
     const mark = coin(p.sym).last || p.mark;
-    if (L ? mark <= +sl : mark >= +sl) {   // цена уже за стопом — выхожу сразу
-      try { await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Market", qty: String(p.size), reduceOnly: true, positionIdx: p.idx, orderLinkId: "bo_x" + now() }); log(`${short(p.sym)}: цена уже вернулась за уровень — закрываю маркетом`, "err"); }
-      catch (e) { log(`${short(p.sym)}: выход: ${e.message}`, "err"); }
-      tr.protected = true; saveTrades(); return;
-    }
-    const body = { category: "linear", symbol: p.sym, tpslMode: "Full", stopLoss: sl, slTriggerBy: "LastPrice", slOrderType: "Market", trailingStop: rnd(dist, i.tick, "up"), positionIdx: p.idx };
-    if (L ? mark < act : mark > act) body.activePrice = rnd(act, i.tick, L ? "up" : "down");
+    if (L ? mark <= +sl : mark >= +sl) { log(`${short(p.sym)}: цена уже вернулась за уровень — выхожу лимиткой`, "err"); tr.protected = true; saveTrades(); return exitLimit(p, tr, "стоп"); }
     try {
-      await post("/v5/position/trading-stop", body);
-      tr.protected = true; tr.sl = +sl; saveTrades();
-      log(`${short(p.sym)}: 🛡 стоп ${sl} (за уровнем ${fmt(level)}, −${(Math.abs(p.avg / sl - 1) * 100).toFixed(2)}% от входа) · трейлинг ${CFG.trailGap}% ${body.activePrice ? "с " + body.activePrice + " (+" + CFG.trailStart + "%)" : "сразу"}`, "info");
+      await post("/v5/position/trading-stop", { category: "linear", symbol: p.sym, tpslMode: "Partial", stopLoss: sl, slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: slLim, slSize: String(p.size), positionIdx: p.idx });
+      tr.protected = true; saveTrades();
+      log(`${short(p.sym)}: 🛡 стоп-лимит ${sl} → лимитка ${slLim} (за уровнем ${fmt(level)}, −${(Math.abs(p.avg / sl - 1) * 100).toFixed(2)}% от входа) · трейлинг ${CFG.trailGap}% с +${CFG.trailStart}% — выход лимиткой`, "info");
     } catch (e) {
       if (e.code === 34040) { tr.protected = true; saveTrades(); return; }
       tr.tries = (tr.tries || 0) + 1; saveTrades();
-      log(`${short(p.sym)}: стоп/трейлинг: ${e.message}${tr.tries >= 3 ? " — 3 попытки не вышло, закрываю маркетом" : ""}`, "err");
-      if (tr.tries >= 3) { try { await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Market", qty: String(p.size), reduceOnly: true, positionIdx: p.idx, orderLinkId: "bo_x" + now() }); } catch (er) { log(`${short(p.sym)}: выход: ${er.message}`, "err"); } tr.protected = true; saveTrades(); }
+      log(`${short(p.sym)}: стоп: ${e.message}${tr.tries >= 3 ? " — стоп на бирже не встал, бот сам выйдет лимиткой при касании " + sl : ""}`, "err");
+      if (tr.tries >= 3) { tr.protected = true; saveTrades(); }
     }
+  }
+  // выход ЛИМИТКОЙ reduce-only по текущей цене; не исполнилась — каждые 3 с переставляется за ценой
+  async function exitLimit(p, tr, why) {
+    const i = await inst(p.sym), L = p.side === "Buy", px = coin(p.sym).last || p.mark;
+    const price = rnd(px, i.tick, L ? "down" : "up");
+    if (tr.exitId) {
+      if (Math.abs(+price - tr.exitPx) < +i.tick / 2) return;
+      try { await post("/v5/order/amend", { category: "linear", symbol: p.sym, orderId: tr.exitId, price, qty: String(p.size) }); tr.exitPx = +price; saveTrades(); return; }
+      catch (e) { tr.exitId = null; }   // исполнилась / снята — ставлю заново
+    }
+    try {
+      const r = await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Limit", qty: String(p.size), price, timeInForce: "GTC", reduceOnly: true, positionIdx: p.idx, orderLinkId: "bo_x" + now() + Math.floor(Math.random() * 1e4) });
+      if (!tr.exitId && !tr.exitLogged) { tr.exitLogged = true; log(`${short(p.sym)}: 💰 ${why}: выход лимиткой ${L ? "SELL" : "BUY"} ${p.size} @ ${price} — веду за ценой, пока не исполнится`, why === "стоп" ? "err" : "ok"); }
+      tr.exitId = r.orderId; tr.exitPx = +price; saveTrades();
+    } catch (e) { log(`${short(p.sym)}: выход лимиткой: ${e.message}`, "err"); }
+  }
+  // каждые 3 с: трейлинг (бот), запасной стоп (если стоп-лимит на бирже не исполнился), ведение лимитки выхода
+  async function manage(p, tr) {
+    const L = p.side === "Buy", d = L ? 1 : -1, px = coin(p.sym).last || p.mark; if (!px) return;
+    const best = L ? tr.maxPx : tr.minPx;
+    if (!tr.trailOn && d * (best / tr.entry - 1) * 100 >= CFG.trailStart) { tr.trailOn = true; saveTrades(); log(`${short(p.sym)}: 🎯 трейлинг включён: ${L ? "максимум" : "минимум"} ${fmt(best)} (+${CFG.trailStart}% от входа), выход на откате ${CFG.trailGap}% — лимиткой`, "ok"); }
+    if (tr.trailOn) tr.trailLvl = best * (1 - d * CFG.trailGap / 100);
+    if (tr.exitId) return exitLimit(p, tr, tr.exitWhy || "выход");
+    if (tr.trailOn && (L ? px <= tr.trailLvl : px >= tr.trailLvl)) { tr.exitWhy = "трейлинг"; return exitLimit(p, tr, "трейлинг"); }
+    if (tr.sl && (L ? px <= tr.slLim : px >= tr.slLim)) {   // цена ушла дальше лимита стопа — стоп-лимит может не исполниться, догоняю лимиткой
+      if (!tr.slAt) { tr.slAt = now(); saveTrades(); return; }
+      if (now() - tr.slAt > 5000) { tr.exitWhy = "стоп"; return exitLimit(p, tr, "стоп"); }
+    } else if (tr.slAt) { tr.slAt = 0; saveTrades(); }
   }
   async function closeTrade(key) {
     const tr = TRADES[key]; if (!tr) return;
     let pnl = null;
     try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => (x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
+    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy")) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }   // хвосты: стоп-лимит / лимитка выхода
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
     log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ закрыто в плюс " + "+" + pnl.toFixed(2) + " USDT" : "🛑 закрыто в минус " + pnl.toFixed(2) + " USDT"} (${word(tr.side)}, ${hold.toFixed(0)} мин)`, pnl > 0 ? "ok" : "err");
@@ -392,7 +418,7 @@ function create(host) {
     const rows = syms.map(s => {
       const e = ENTRY[s] || {}, ps = posOf(s);
       return { sym: s, last: coin(s).last, hi: e.hi, lo: e.lo, up: e.Buy ? e.Buy.trig : null, dn: e.Sell ? e.Sell.trig : null,
-        pos: ps.map(p => ({ side: p.side, size: p.size, avg: p.avg, upnl: p.upnl, sl: p.sl, ts: p.ts })) };
+        pos: ps.map(p => { const tr = TRADES[p.sym + "|" + p.side] || {}; return { side: p.side, size: p.size, avg: p.avg, upnl: p.upnl, sl: tr.sl || p.sl, trail: tr.trailOn ? tr.trailLvl : null, exit: tr.exitPx || null }; }) };
     });
     const unreal = Object.values(POS).reduce((a, p) => a + (p.upnl || 0), 0), realized = STAT.realized || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: STAT.closed || 0 };

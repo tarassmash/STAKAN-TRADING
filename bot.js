@@ -169,14 +169,15 @@ function create(host) {
     if (!isLive()) { for (const sd of sides) e[sd] = { px: T[sd], qty: qtyFor(i, (T.Buy + T.Sell) / 2) }; return; }
     OURS.add(sym); saveOurs();
     if (!c.hedge) { if (!(await setHedge(sym))) return; }
-    if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; }
+    if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; c.levNow = +lev; }
     const drift = Math.max(+i.tick, ((T.Buy + T.Sell) / 2) * Math.max(0.02, CFG.off / 3) / 100);
     // ХЕДЖ ровно на тот же объём: открыта одна сторона — вторая входит на точно такое же количество монет;
     // обе пустые — обе лимитки на одно и то же количество (по середине стакана)
     // ХЕДЖ ВСЕГДА В БАЛАНСЕ: объём стороны = объём другой стороны. Меньшая сторона доливается до большей.
     // Обе пустые — обе лимитки на один объём, и залог на сторону не больше 45 % депозита, чтобы ОБЕ стороны точно влезли в маржу.
     const mid = (T.Buy + T.Sell) / 2, mine = (sd) => POS[sym + "|" + sd], other = (sd) => POS[sym + "|" + (sd === "Buy" ? "Sell" : "Buy")];
-    const lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.45) : CFG.usdt;
+    // залог на сторону: не больше 40 % депозита и не больше половины свободной маржи с запасом — ВСЕГДА хватит на вторую сторону хеджа
+    const lev = c.levNow || CFG.lev, lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.4, (mine("Buy") || mine("Sell")) ? Infinity : ACC.avail / 2.3) : CFG.usdt;
     const capQ = qtyFor(i, mid, lot), locked = !mine("Buy") && !mine("Sell") && ((e.Buy && e.Buy.qty) || (e.Sell && e.Sell.qty));
     const base = locked ? Math.min(locked, capQ) : capQ;   // обе стороны одного объёма и никогда больше лимита — иначе хедж потом не влезет в маржу
     const qtyOf = (sd) => {
@@ -185,18 +186,27 @@ function create(host) {
       return m ? 0 : base;
     };
     for (const side of sides) {
-      const px = T[side], o = e[side];
+      const hedgeNow = !!other(side) && !mine(side);   // хедж к открытой позиции — сразу на лучшую цену стакана, чтобы исполнился быстрее (всё равно мейкер)
+      const px = hedgeNow ? +rnd(side === "Sell" ? c.ask : c.bid, i.tick, side === "Sell" ? "up" : "down") : T[side], o = e[side];
       if (o && o.id && !OPEN.has(o.id)) e[side] = null;   // исполнилась или биржа сняла PostOnly (цена прошла сквозь)
       const cur = e[side], qty = qtyOf(side);
       if (!(qty >= i.minQty)) { if (cur && cur.id) await cancel(sym, cur.id); e[side] = null; continue; }   // эта сторона уже в балансе
-      if (isLive() && ACC.avail < qty * px / CFG.lev * 1.05) {   // маржи не хватит — не долбим биржу ошибками
-        if (cur && cur.id) { await cancel(sym, cur.id); e[side] = null; }
+      if (isLive() && !(cur && cur.id) && ACC.avail < qty * px / lev * 1.05) {   // маржи не хватит
+        // хедж к открытой позиции не помещается — поднимаю плечо монеты (до максимума биржи): маржа открытой позиции уменьшается, хедж влезает
+        if (other(side) && lev < Math.min(i.maxLev, 50) && now() - (c.levTry || 0) > 10000) {
+          c.levTry = now();
+          const N = qty * px, need = 2.1 * N / Math.max(0.01, ACC.avail + N / lev);   // минимальное плечо, при котором хедж ровно влезает (маржа открытой стороны тоже уменьшается)
+          const nl = Math.min(Math.min(i.maxLev, 50), Math.max(lev + 1, Math.ceil(need)));
+          try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: String(nl), sellLeverage: String(nl) }); c.levNow = nl; log(`${short(sym)}: хедж не помещался в маржу — плечо монеты поднято ${lev}→${nl}, ставлю ${side === "Buy" ? "лонг" : "шорт"} ${qty} на такой же объём`, "ok"); await account(); }
+          catch (er) { if (er.code === 110043) c.levNow = nl; else log(`${short(sym)}: плечо ${nl}: ${er.message}`, "err"); }
+          continue;
+        }
         if (now() - (quote.warnAt || 0) > 60000) { quote.warnAt = now(); log(`${short(sym)}: на ${side === "Buy" ? "лонг" : "шорт"} ${qty} нужно ~${(qty * px / CFG.lev).toFixed(2)} USDT маржи, свободно ${ACC.avail.toFixed(2)} — хедж не помещается. Уменьшите залог или увеличьте плечо`, "err"); }
         continue;
       }
       if (cur && cur.id && Math.abs(cur.qty - qty) > 1e-12) { await cancel(sym, cur.id); e[side] = null; }   // объём должен совпадать с другой стороной
       else if (cur && cur.id) {
-        if (Math.abs(cur.px - px) < drift) continue;
+        if (Math.abs(cur.px - px) < (hedgeNow ? +i.tick / 2 : drift)) continue;
         try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: cur.id, price: String(px) }); cur.px = px; }
         catch (er) { await cancel(sym, cur.id); e[side] = null; }
         continue;

@@ -228,7 +228,7 @@ function create(host) {
     const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
     const R = roles(sym), e = ENTRY[sym] || {};
     if (!R.first) {   // цикла нет — две лимитки вокруг цены, какая исполнится первой
-      if (CY.bank || CY.first) { CY.first = null; CY.bank = 0; CY.hedges = 0; saveCy(); }
+      if (CY.bank || CY.first) { CY.first = null; CY.bank = 0; CY.hedges = 0; CY.hedgeCool = 0; CY.lastHedgeAdv = 0; saveCy(); }
       const mid = (T.Buy + T.Sell) / 2, lev = c.levNow || CFG.lev;
       // первая позиция такого размера, чтобы она + хедж ×hedgeMult ТОЧНО влезли в маржу
       const k = 1 + CFG.hedgeMult, lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.85 / k, ACC.avail / (k + 0.3)) : CFG.usdt;
@@ -238,7 +238,10 @@ function create(host) {
     const F = R.first, hs = opp(R.fs), adv = advPct(F);
     const need = +rnd(CFG.hedgeMult * F.size - (R.hedge ? R.hedge.size : 0), i.step, "down");
     const pl = { Buy: null, Sell: null };
-    if (need >= i.minQty && (R.hedge || adv >= CFG.hedgeAt)) {   // хедж ×N по лучшей цене стакана
+    // после защитного выхода хеджа — новый хедж не сразу на том же месте: пауза 60 с или цена ушла дальше прошлого хеджа
+    const cool = !R.hedge && CY.hedgeCool && now() - CY.hedgeCool < 60000 && adv < (CY.lastHedgeAdv || 0) + CFG.hedgeAt / 2;
+    if (need >= i.minQty && !cool && (R.hedge || adv >= CFG.hedgeAt)) {
+      if (!R.hedge) CY.lastHedgeAdv = adv;   // хедж ×N по лучшей цене стакана
       pl[hs] = { qty: need, px: +rnd(hs === "Sell" ? c.ask : c.bid, i.tick, hs === "Sell" ? "up" : "down"), tight: true };
       if (!R.hedge && !(e[hs] && e[hs].id) && now() - (plan.logAt || 0) > 30000) { plan.logAt = now(); log(`${short(sym)}: ⚠ первая ${word(R.fs)} против на ${adv.toFixed(2)}% — включаю ХЕДЖ ${word(hs)} ×${CFG.hedgeMult} = ${need}`, "err"); }
     }
@@ -309,7 +312,15 @@ function create(host) {
       }
       if (tr.mode === "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym && t.mode === "вместе") t.mode = "тейк"; saveTrades(); }   // цена ушла обратно — снова ждём
       if (isFirst) return null;   // пока хедж открыт, первая сама не выходит
-      return maker(tr.entry * (1 + d * CFG.tp / 100));   // хедж: свой тейк +tp %
+      // хедж: свой тейк +tp %. НИКОГДА НЕ ОТДАЁТ ВЗЯТОЕ: был в плюсе ≥ tp/2, а цена пошла назад к входу — выхожу с минимальным плюсом;
+      // висит дольше maxHold мин — тоже минимальный плюс. Минус ×2 на хедже не копится.
+      const px = c.last || p.mark, fav = L ? (tr.maxPx / tr.entry - 1) * 100 : (1 - tr.minPx / tr.entry) * 100, now_ = d * (px / tr.entry - 1) * 100;
+      const held = (now() - tr.open) / 60000;
+      let m = tr.mode;
+      if (m === "тейк" && fav >= CFG.tp / 2 && now_ <= Math.max(2 * MIN_PLUS, fav / 3)) m = "защита";
+      else if (m === "тейк" && held >= CFG.maxHold) m = "мин. плюс";
+      if (m !== tr.mode) { tr.mode = m; CY.hedgeCool = now(); saveCy(); log(`${short(p.sym)}: ${m === "защита" ? `🛡 хедж был в плюсе +${fav.toFixed(2)}%, цена пошла назад — закрываю его с минимальным плюсом, банк не отдаю` : `⏱ хедж висит ${held.toFixed(0)} мин — выход с минимальным плюсом`}`, "info"); saveTrades(); }
+      return maker(tr.entry * (1 + d * (m === "тейк" ? CFG.tp : MIN_PLUS) / 100));
     }
     // одна позиция: тейк (или мин. плюс после maxHold), банк хеджей приближает выход
     const held = (now() - tr.open) / 60000;

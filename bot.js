@@ -1,20 +1,21 @@
-// ЩУКИН · ХЕДЖ НА ОДНОЙ МОНЕТЕ — серверный движок, торгует 24/7. ТОЛЬКО PostOnly-лимитки (мейкер), маркета нет.
-//  • раз в минуту скан: выбирается ОДНА самая волатильная монета (крупные минутные свечи, узкий спред, оборот от minTurn млн $).
-//    Монета меняется, только когда по ней нет открытых позиций;
-//  • на монете включается режим ХЕДЖ Bybit: лонг и шорт живут одновременно и независимо;
-//  • ЛОНГ-сторона: BUY-лимитка ниже цены → исполнилась → тейк SELL-лимиткой на +tp % → закрылась → снова BUY;
-//  • ШОРТ-сторона: SELL-лимитка выше цены → исполнилась → тейк BUY-лимиткой на −tp % → закрылась → снова SELL;
-//    куда бы цена ни пошла, одна из сторон собирает тейки; вторая ждёт возврата цены;
-//  • ВЫХОД ТОЛЬКО В ПЛЮС: стопа нет. Позиция держится дольше maxHold мин — тейк опускается до минимального плюса (вход + комиссии);
-//  • 📉 фильтр OI (опция), ⚡ турбо (ближе вход, короче тейк).
+// ЩУКИН · ПЕРВАЯ ПОЗИЦИЯ + ХЕДЖ ×2 НА ОДНОЙ МОНЕТЕ — серверный движок 24/7. ТОЛЬКО PostOnly-лимитки (мейкер), маркета нет.
+//  • раз в минуту скан: ОДНА самая волатильная монета (крупные минутные свечи, узкий спред). Меняется, только когда по ней нет позиций;
+//  • режим ХЕДЖ Bybit (лонг и шорт одновременно);
+//  • вход: BUY-лимитка ниже цены и SELL-лимитка выше. Какая исполнилась первой — это ПЕРВАЯ позиция, вторая лимитка снимается;
+//  • первая в плюс — тейк лимиткой +tp % (после maxHold мин — минимальный плюс);
+//  • первая ушла в минус на hedgeAt % — включается ХЕДЖ в обратную сторону объёмом hedgeMult × первая (по умолчанию ×2), по лучшей цене стакана;
+//  • пока хедж открыт: тейк первой снят; хедж берёт свой тейк +tp % → прибыль хеджа копится в «банк» цикла, при новом уходе цены — хедж снова;
+//    как только первая + хедж + банк в плюсе (с комиссиями) — закрываю ОБЕ лимитками;
+//  • первая закрывается без хеджа по цене, где её PnL + банк ≥ минимальный плюс — банк хеджей подтягивает её выход ближе;
+//  • ВЫХОД ТОЛЬКО В ПЛЮС по циклу: стопа нет.
 "use strict";
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const DEF = { live: false, usdt: 5, lev: 10, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, hedgeAt: 0.5, hedgeMult: 2, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
 const TURBO = { off: 0.05, tp: 0.2, maxHold: 5 };
 const TURBO_LOSS_PCT = 3;
-const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
+const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "hedgeAt", "hedgeMult", "oiPct"];
 const FEE = 0.02;   // мейкер Bybit, % за сторону
 const MIN_PLUS = 2.5 * FEE;   // минимальный плюс выхода, % от входа: покрывает комиссии входа и выхода
 
@@ -82,6 +83,8 @@ function create(host) {
   const C = {};   // sym -> { hedge, lev, last, bid, ask }
   const coin = (sym) => C[sym] || (C[sym] = { sym, hedge: null, lev: false, last: 0, bid: 0, ask: 0 });
   let POS = {}, BUSY_SYMS = new Set(), OPEN = new Map();   // OPEN: orderId -> ордер с биржи
+  const CY = lsGet("hd.cy", { first: null, bank: 0, hedges: 0 });   // цикл: первая сторона, банк прибыли хеджей
+  const saveCy = () => lsSet("hd.cy", CY);
   let COIN = lsGet("hd.coin", ""), CAND = [], scanning = false, fastBusy = false, scanTimer = null, fastTimer = null, lastScanAt = 0, ACC = { eq: 0, avail: 0 };
   const posOf = (sym) => Object.values(POS).filter(p => p.sym === sym);
   const ourOpen = () => Object.keys(TRADES).length;
@@ -163,50 +166,37 @@ function create(host) {
     const mid = (c.bid + c.ask) / 2;
     return { Buy: +rnd(Math.min(c.bid, mid * (1 - CFG.off / 100)), i.tick, "down"), Sell: +rnd(Math.max(c.ask, mid * (1 + CFG.off / 100)), i.tick, "up") };
   }
-  async function quote(sym, sides) {
+  // ставит / ведёт лимитки входа по плану: plan[side] = { qty, px } или null (снять)
+  async function place(sym, plan, why) {
     const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
     const e = ENTRY[sym] || (ENTRY[sym] = {});
-    if (!isLive()) { for (const sd of sides) e[sd] = { px: T[sd], qty: qtyFor(i, (T.Buy + T.Sell) / 2) }; return; }
+    if (!isLive()) { for (const sd of ["Buy", "Sell"]) e[sd] = plan[sd] ? { px: plan[sd].px, qty: plan[sd].qty } : null; return; }
     OURS.add(sym); saveOurs();
     if (!c.hedge) { if (!(await setHedge(sym))) return; }
-    if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; c.levNow = +lev; }
-    const drift = Math.max(+i.tick, ((T.Buy + T.Sell) / 2) * Math.max(0.02, CFG.off / 3) / 100);
-    // ХЕДЖ ровно на тот же объём: открыта одна сторона — вторая входит на точно такое же количество монет;
-    // обе пустые — обе лимитки на одно и то же количество (по середине стакана)
-    // ХЕДЖ ВСЕГДА В БАЛАНСЕ: объём стороны = объём другой стороны. Меньшая сторона доливается до большей.
-    // Обе пустые — обе лимитки на один объём, и залог на сторону не больше 45 % депозита, чтобы ОБЕ стороны точно влезли в маржу.
-    const mid = (T.Buy + T.Sell) / 2, mine = (sd) => POS[sym + "|" + sd], other = (sd) => POS[sym + "|" + (sd === "Buy" ? "Sell" : "Buy")];
-    // залог на сторону: не больше 40 % депозита и не больше половины свободной маржи с запасом — ВСЕГДА хватит на вторую сторону хеджа
-    const lev = c.levNow || CFG.lev, lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.4, (mine("Buy") || mine("Sell")) ? Infinity : ACC.avail / 2.3) : CFG.usdt;
-    const capQ = qtyFor(i, mid, lot), locked = !mine("Buy") && !mine("Sell") && ((e.Buy && e.Buy.qty) || (e.Sell && e.Sell.qty));
-    const base = locked ? Math.min(locked, capQ) : capQ;   // обе стороны одного объёма и никогда больше лимита — иначе хедж потом не влезет в маржу
-    const qtyOf = (sd) => {
-      const m = mine(sd), o = other(sd);
-      if (o) return +rnd(Math.max(0, o.size - (m ? m.size : 0)), i.step, "down");   // догнать другую сторону до точно такого же объёма
-      return m ? 0 : base;
-    };
-    for (const side of sides) {
-      const hedgeNow = !!other(side) && !mine(side);   // хедж к открытой позиции — сразу на лучшую цену стакана, чтобы исполнился быстрее (всё равно мейкер)
-      const px = hedgeNow ? +rnd(side === "Sell" ? c.ask : c.bid, i.tick, side === "Sell" ? "up" : "down") : T[side], o = e[side];
-      if (o && o.id && !OPEN.has(o.id)) e[side] = null;   // исполнилась или биржа сняла PostOnly (цена прошла сквозь)
-      const cur = e[side], qty = qtyOf(side);
-      if (!(qty >= i.minQty)) { if (cur && cur.id) await cancel(sym, cur.id); e[side] = null; continue; }   // эта сторона уже в балансе
-      if (isLive() && !(cur && cur.id) && ACC.avail < qty * px / lev * 1.05) {   // маржи не хватит
-        // хедж к открытой позиции не помещается — поднимаю плечо монеты (до максимума биржи): маржа открытой позиции уменьшается, хедж влезает
-        if (other(side) && lev < Math.min(i.maxLev, 50) && now() - (c.levTry || 0) > 10000) {
+    if (!c.lev) { const lv = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lv, sellLeverage: lv }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; c.levNow = +lv; }
+    const lev = c.levNow || CFG.lev, drift = Math.max(+i.tick, ((T.Buy + T.Sell) / 2) * Math.max(0.02, CFG.off / 3) / 100);
+    for (const side of ["Buy", "Sell"]) {
+      const o = e[side];
+      if (o && o.id && !OPEN.has(o.id)) e[side] = null;   // исполнилась или биржа сняла PostOnly
+      const cur = e[side], want = plan[side];
+      if (!want || !(want.qty >= i.minQty)) { if (cur && cur.id) await cancel(sym, cur.id); e[side] = null; continue; }
+      const qty = want.qty, px = want.px, tight = !!want.tight;
+      if (!(cur && cur.id) && ACC.avail < qty * px / lev * 1.05) {   // маржи не хватит
+        const hasPos = POS[sym + "|Buy"] || POS[sym + "|Sell"];
+        if (hasPos && lev < Math.min(i.maxLev, 50) && now() - (c.levTry || 0) > 10000) {   // поднимаю плечо монеты ровно настолько, чтобы хедж влез
           c.levTry = now();
-          const N = qty * px, need = 2.1 * N / Math.max(0.01, ACC.avail + N / lev);   // минимальное плечо, при котором хедж ровно влезает (маржа открытой стороны тоже уменьшается)
-          const nl = Math.min(Math.min(i.maxLev, 50), Math.max(lev + 1, Math.ceil(need)));
-          try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: String(nl), sellLeverage: String(nl) }); c.levNow = nl; log(`${short(sym)}: хедж не помещался в маржу — плечо монеты поднято ${lev}→${nl}, ставлю ${side === "Buy" ? "лонг" : "шорт"} ${qty} на такой же объём`, "ok"); await account(); }
+          const open = Object.values(POS).filter(p => p.sym === sym).reduce((a, p) => a + p.size * p.mark, 0), N = qty * px;
+          const nl = Math.min(Math.min(i.maxLev, 50), Math.max(lev + 1, Math.ceil(1.05 * (N + open) / Math.max(0.01, ACC.avail + open / lev))));
+          try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: String(nl), sellLeverage: String(nl) }); c.levNow = nl; log(`${short(sym)}: ${why || "вход"} не помещался в маржу — плечо монеты ${lev}→${nl}`, "ok"); await account(); }
           catch (er) { if (er.code === 110043) c.levNow = nl; else log(`${short(sym)}: плечо ${nl}: ${er.message}`, "err"); }
           continue;
         }
-        if (now() - (quote.warnAt || 0) > 60000) { quote.warnAt = now(); log(`${short(sym)}: на ${side === "Buy" ? "лонг" : "шорт"} ${qty} нужно ~${(qty * px / CFG.lev).toFixed(2)} USDT маржи, свободно ${ACC.avail.toFixed(2)} — хедж не помещается. Уменьшите залог или увеличьте плечо`, "err"); }
+        if (now() - (place.warnAt || 0) > 60000) { place.warnAt = now(); log(`${short(sym)}: на ${side === "Buy" ? "лонг" : "шорт"} ${qty} нужно ~${(qty * px / lev).toFixed(2)} USDT маржи, свободно ${ACC.avail.toFixed(2)} — не помещается`, "err"); }
         continue;
       }
-      if (cur && cur.id && Math.abs(cur.qty - qty) > 1e-12) { await cancel(sym, cur.id); e[side] = null; }   // объём должен совпадать с другой стороной
+      if (cur && cur.id && Math.abs(cur.qty - qty) > 1e-12) { await cancel(sym, cur.id); e[side] = null; }
       else if (cur && cur.id) {
-        if (Math.abs(cur.px - px) < (hedgeNow ? +i.tick / 2 : drift)) continue;
+        if (Math.abs(cur.px - px) < (tight ? +i.tick / 2 : drift)) continue;
         try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: cur.id, price: String(px) }); cur.px = px; }
         catch (er) { await cancel(sym, cur.id); e[side] = null; }
         continue;
@@ -215,13 +205,44 @@ function create(host) {
       try {
         const r = await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", price: String(px), timeInForce: "PostOnly", qty: String(qty), positionIdx: idxFor(c, side), orderLinkId: linkId("e") });
         e[side] = { id: r.orderId, px, qty };
-        OPEN.set(r.orderId, { orderId: r.orderId });   // до следующего опроса считаю живой
+        OPEN.set(r.orderId, { orderId: r.orderId });
       } catch (er) {
         if (er.code === 10001 && /position idx/i.test(er.message || "")) { c.hedge = !c.hedge; log(`${short(sym)}: режим позиций Bybit другой — переключаюсь`, "info"); }
         else log(`${short(sym)}: вход ${side === "Buy" ? "BUY" : "SELL"} @ ${px}: ${er.message}`, "err");
       }
     }
     saveEntry();
+  }
+  const opp = (sd) => (sd === "Buy" ? "Sell" : "Buy");
+  const advPct = (p) => { const px = coin(p.sym).last || p.mark; return -(p.side === "Buy" ? 1 : -1) * (px / p.avg - 1) * 100; };   // насколько позиция против, %
+  // кто первая, кто хедж
+  function roles(sym) {
+    const B = POS[sym + "|Buy"], S = POS[sym + "|Sell"];
+    if (!B && !S) return { first: null, hedge: null };
+    let f = CY.first && POS[sym + "|" + CY.first] ? CY.first : null;
+    if (!f) { f = B && S ? (B.size <= S.size ? "Buy" : "Sell") : B ? "Buy" : "Sell"; CY.first = f; saveCy(); }
+    return { first: POS[sym + "|" + f], hedge: POS[sym + "|" + opp(f)] || null, fs: f };
+  }
+  // план входов на тик
+  async function plan(sym) {
+    const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
+    const R = roles(sym), e = ENTRY[sym] || {};
+    if (!R.first) {   // цикла нет — две лимитки вокруг цены, какая исполнится первой
+      if (CY.bank || CY.first) { CY.first = null; CY.bank = 0; CY.hedges = 0; saveCy(); }
+      const mid = (T.Buy + T.Sell) / 2, lev = c.levNow || CFG.lev;
+      // первая позиция такого размера, чтобы она + хедж ×hedgeMult ТОЧНО влезли в маржу
+      const k = 1 + CFG.hedgeMult, lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.85 / k, ACC.avail / (k + 0.3)) : CFG.usdt;
+      const capQ = qtyFor(i, mid, lot), locked = (e.Buy && e.Buy.qty) || (e.Sell && e.Sell.qty), q = locked ? Math.min(locked, capQ) : capQ;
+      return place(sym, { Buy: { qty: q, px: T.Buy }, Sell: { qty: q, px: T.Sell } }, "вход");
+    }
+    const F = R.first, hs = opp(R.fs), adv = advPct(F);
+    const need = +rnd(CFG.hedgeMult * F.size - (R.hedge ? R.hedge.size : 0), i.step, "down");
+    const pl = { Buy: null, Sell: null };
+    if (need >= i.minQty && (R.hedge || adv >= CFG.hedgeAt)) {   // хедж ×N по лучшей цене стакана
+      pl[hs] = { qty: need, px: +rnd(hs === "Sell" ? c.ask : c.bid, i.tick, hs === "Sell" ? "up" : "down"), tight: true };
+      if (!R.hedge && !(e[hs] && e[hs].id) && now() - (plan.logAt || 0) > 30000) { plan.logAt = now(); log(`${short(sym)}: ⚠ первая ${word(R.fs)} против на ${adv.toFixed(2)}% — включаю ХЕДЖ ${word(hs)} ×${CFG.hedgeMult} = ${need}`, "err"); }
+    }
+    return place(sym, pl, "хедж ×" + CFG.hedgeMult);
   }
   async function cancel(sym, id) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: id }); } catch (e) { /* уже нет */ } OPEN.delete(id); }
   async function dropEntry(sym, only) {
@@ -256,7 +277,7 @@ function create(host) {
       if (!tr) {
         tr = TRADES[key] = { sym: p.sym, side: p.side, open: now(), entry: p.avg, qty: p.size, maxPx: p.mark, minPx: p.mark, mode: "тейк", cfg: { off: CFG.off, tp: CFG.tp, maxHold: CFG.maxHold, turbo: !!CFG.turbo } };
         STAT.entries++; saveStat(); saveTrades();
-        log(`${short(p.sym)}: ${p.side === "Buy" ? "🟢 лонг" : "🔴 шорт"} ${p.size} @ ${fmt(p.avg)} — тейк ${p.side === "Buy" ? "+" : "−"}${CFG.tp}% лимиткой, выход только в плюс · другая сторона работает дальше`, "ok");
+        log(`${short(p.sym)}: ${p.side === "Buy" ? "🟢 лонг" : "🔴 шорт"} ${p.size} @ ${fmt(p.avg)} ${CY.first && CY.first !== p.side ? `— ХЕДЖ ×${CFG.hedgeMult}, тейк ${CFG.tp}%` : "— первая позиция, тейк " + CFG.tp + "%, хедж ×" + CFG.hedgeMult + " при −" + CFG.hedgeAt + "%"}`, "ok");
         jlog("entry", { sym: p.sym, side: p.side, px: p.avg, qty: p.size });
         if (ENTRY[p.sym] && ENTRY[p.sym][p.side] && !OPEN.has(ENTRY[p.sym][p.side].id)) { ENTRY[p.sym][p.side] = null; saveEntry(); }
       }
@@ -274,14 +295,29 @@ function create(host) {
     try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: p.sym, orderFilter: "StopOrder" })).list || []; for (const x of o) if (x.triggerPrice && +x.triggerPrice > 0 && /Stop/i.test(x.stopOrderType || "") && (!+x.positionIdx || +x.positionIdx === p.idx)) await cancel(p.sym, x.orderId); } catch (e) { /* нет */ }
     tr.slOff = true; saveTrades();
   }
-  // цена лимитки выхода: тейк, а после maxHold мин — минимальный плюс. НИКОГДА не хуже входа + комиссии.
+  // цена лимитки выхода (null = выхода сейчас нет). НИКОГДА не в минус по циклу: первая + хедж + банк ≥ комиссии.
   function exitPrice(p, tr, i) {
-    const L = p.side === "Buy", d = L ? 1 : -1, c = coin(p.sym), held = (now() - tr.open) / 60000;
-    if (tr.mode !== "мин. плюс" && held >= CFG.maxHold) { tr.mode = "мин. плюс"; log(`${short(p.sym)}: ⏱ держу ${held.toFixed(0)} мин — тейк опускаю до минимального плюса +${MIN_PLUS}% (жду возврата цены, в минус не выхожу)`, "info"); saveTrades(); }
-    const goal = tr.entry * (1 + d * (tr.mode === "мин. плюс" ? MIN_PLUS : CFG.tp) / 100);
-    const best = L ? c.ask : c.bid;   // цена ушла дальше тейка — выхожу по лучшей мейкерской цене, но не хуже цели
-    const want = best ? (L ? Math.max(goal, best) : Math.min(goal, best)) : goal;
-    return rnd(want, i.tick, L ? "up" : "down");
+    const L = p.side === "Buy", d = L ? 1 : -1, c = coin(p.sym), best = L ? c.ask : c.bid;
+    const R = roles(p.sym), isFirst = R.fs === p.side;
+    const maker = (goal) => rnd(best ? (L ? Math.max(goal, best) : Math.min(goal, best)) : goal, i.tick, L ? "up" : "down");
+    if (R.first && R.hedge) {
+      const fee = (R.first.size * R.first.mark + R.hedge.size * R.hedge.mark) * (2 * FEE + 0.03) / 100;
+      const sum = R.first.upnl + R.hedge.upnl + CY.bank;
+      if (sum >= fee || (tr.mode === "вместе" && sum >= fee / 3)) {   // цикл в плюсе — закрываю ОБЕ по лучшей цене стакана
+        if (tr.mode !== "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym) t.mode = "вместе"; log(`${short(p.sym)}: ✅ первая + хедж + банк = ${sum >= 0 ? "+" : ""}${sum.toFixed(3)} USDT — закрываю обе лимитками`, "ok"); saveTrades(); }
+        return rnd(best || (c.last || p.mark), i.tick, L ? "up" : "down");
+      }
+      if (tr.mode === "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym && t.mode === "вместе") t.mode = "тейк"; saveTrades(); }   // цена ушла обратно — снова ждём
+      if (isFirst) return null;   // пока хедж открыт, первая сама не выходит
+      return maker(tr.entry * (1 + d * CFG.tp / 100));   // хедж: свой тейк +tp %
+    }
+    // одна позиция: тейк (или мин. плюс после maxHold), банк хеджей приближает выход
+    const held = (now() - tr.open) / 60000;
+    if (tr.mode === "тейк" && held >= CFG.maxHold) { tr.mode = "мин. плюс"; log(`${short(p.sym)}: ⏱ держу ${held.toFixed(0)} мин — тейк до минимального плюса`, "info"); saveTrades(); }
+    if (tr.mode === "вместе") tr.mode = "мин. плюс";
+    const pct = tr.mode === "мин. плюс" || CY.bank ? MIN_PLUS : CFG.tp;
+    const goal = tr.entry * (1 + d * pct / 100) - d * (CY.bank > 0 ? CY.bank : 0) / Math.max(1e-9, p.size);
+    return maker(L ? Math.max(goal, tr.entry * (1 - 50 / 100)) : Math.min(goal, tr.entry * 1.5));
   }
   async function manage(p, tr) {
     if (!isLive()) return;
@@ -289,6 +325,7 @@ function create(host) {
     if (!(p.size >= i.minQty)) return;
     const price = exitPrice(p, tr, i);
     const o = tr.exitId && OPEN.get(tr.exitId);
+    if (price == null) { if (o) await cancel(p.sym, tr.exitId); tr.exitId = null; return; }
     if (o) {
       const left = o.leavesQty != null ? +o.leavesQty : +o.qty;
       if (Math.abs(left - p.size) > 1e-12) { await cancel(p.sym, tr.exitId); tr.exitId = null; }   // позиция выросла / частично закрылась — переставляю на весь размер
@@ -307,6 +344,9 @@ function create(host) {
     try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy") && (!+x.positionIdx || +x.positionIdx === (tr.side === "Buy" ? 1 : 2))) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
+    const rest = Object.values(POS).some(p => p.sym === tr.sym);
+    if (rest && pnl != null) { CY.bank = +(CY.bank + pnl).toFixed(4); if (tr.side !== CY.first) CY.hedges++; saveCy(); log(`${short(tr.sym)}: 🏦 банк цикла ${CY.bank >= 0 ? "+" : ""}${CY.bank.toFixed(3)} USDT — выход первой ближе`, "ok"); }
+    if (!rest) { CY.first = null; CY.bank = 0; CY.hedges = 0; saveCy(); }
     log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ +" + pnl.toFixed(3) + " USDT" : "🛑 " + pnl.toFixed(3) + " USDT"} (${word(tr.side)}, ${tr.mode}, ${hold.toFixed(1)} мин)`, pnl > 0 ? "ok" : "err");
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), best: +((L ? tr.maxPx / tr.entry - 1 : 1 - tr.minPx / tr.entry) * 100).toFixed(2), adverse: +((L ? 1 - tr.minPx / tr.entry : tr.maxPx / tr.entry - 1) * 100).toFixed(2), pnl: pnl == null ? null : +pnl.toFixed(4) }));
     delete TRADES[key]; saveTrades(); saveStat();
@@ -348,10 +388,10 @@ function create(host) {
         await pollPositions();
         if (running && COIN) {
           if (now() - (fast.accAt || 0) > 6000) { fast.accAt = now(); await account(); }
-          try { await quote(COIN, ["Buy", "Sell"]); } catch (e) { log(`${short(COIN)}: вход: ${e.message}`, "err"); }
+          try { await plan(COIN); } catch (e) { log(`${short(COIN)}: вход: ${e.message}`, "err"); }
         }
         await refreshRealized();
-      } else if (running && COIN) { try { await quote(COIN, ["Buy", "Sell"]); } catch (e) { /* следующий раз */ } }
+      } else if (running && COIN) { try { await plan(COIN); } catch (e) { /* следующий раз */ } }
     } catch (e) { log("Опрос: " + e.message, "err"); }
     finally { fastBusy = false; }
   }
@@ -368,7 +408,7 @@ function create(host) {
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev)));
     CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxSpread = Math.max(0.005, Math.min(1, +CFG.maxSpread || 0.08));
-    CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
+    CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.hedgeAt = Math.max(0.05, Math.min(20, +CFG.hedgeAt || 0.5)); CFG.hedgeMult = Math.max(1, Math.min(5, +CFG.hedgeMult || 2)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: только сигналы", CFG.live ? "err" : "info"); }
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: вход только если открытый интерес за 15 мин растёт${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""}` : "📉 Фильтр OI ВЫКЛ", "info"); }
@@ -407,7 +447,7 @@ function create(host) {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("bo.running", true);
     if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
-    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: хедж на одной самой волатильной монете — лонг и шорт одновременно, только PostOnly-лимитки · залог ${CFG.usdt} USDT × ${CFG.lev} на сторону · вход ${CFG.off}% от цены · тейк +${CFG.tp}% · выход только в плюс · мин. плюс через ${CFG.maxHold} мин${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
+    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: одна самая волатильная монета · первая позиция + хедж ×${CFG.hedgeMult} при −${CFG.hedgeAt}% · только PostOnly-лимитки · залог ${CFG.usdt} USDT × ${CFG.lev} · вход ${CFG.off}% от цены · тейк +${CFG.tp}% · выход только в плюс · мин. плюс через ${CFG.maxHold} мин${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
     jlog("start", { cfg: CFG });
     schedule();
     await scan().catch(() => {});
@@ -458,7 +498,7 @@ function create(host) {
     const unreal = Object.values(POS).reduce((a, p) => a + (p.upnl || 0), 0), realized = STAT.realized || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: STAT.closed || 0 };
     return { turbo: { on: !!CFG.turbo, from: CFG.turboFrom || 0, pnl: CFG.turbo ? turboPnl() : 0, lossPct: TURBO_LOSS_PCT, preset: TURBO }, oi: { on: CFG.oiOn, pct: CFG.oiPct },
-      open: ourOpen(), coin: COIN, pnl, acc: ACC, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+      open: ourOpen(), coin: COIN, cy: CY, pnl, acc: ACC, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   const wasRunning = running;

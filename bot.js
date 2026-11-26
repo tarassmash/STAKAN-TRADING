@@ -286,6 +286,7 @@ function create(host) {
   async function manage(p, tr) {
     if (!isLive()) return;
     const i = await inst(p.sym), L = p.side === "Buy";
+    if (!(p.size >= i.minQty)) return;
     const price = exitPrice(p, tr, i);
     const o = tr.exitId && OPEN.get(tr.exitId);
     if (o) {
@@ -302,7 +303,7 @@ function create(host) {
   async function closeTrade(key) {
     const tr = TRADES[key]; if (!tr) return;
     let pnl = null;
-    try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => (x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
+    try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => ((x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side) && +x.updatedTime >= tr.open && !(tr.pnlIds || []).includes(x.orderId)).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
     try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy") && (!+x.positionIdx || +x.positionIdx === (tr.side === "Buy" ? 1 : 2))) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }

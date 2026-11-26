@@ -221,6 +221,7 @@ function create(host) {
     if (!B && !S) return { first: null, hedge: null };
     let f = CY.first && POS[sym + "|" + CY.first] ? CY.first : null;
     if (!f) { f = B && S ? (B.size <= S.size ? "Buy" : "Sell") : B ? "Buy" : "Sell"; CY.first = f; saveCy(); }
+    if (!CY.base) { CY.base = POS[sym + "|" + f].size; saveCy(); }   // базовый объём цикла = первая позиция
     return { first: POS[sym + "|" + f], hedge: POS[sym + "|" + opp(f)] || null, fs: f };
   }
   // план входов на тик
@@ -228,7 +229,7 @@ function create(host) {
     const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
     const R = roles(sym), e = ENTRY[sym] || {};
     if (!R.first) {   // цикла нет — две лимитки вокруг цены, какая исполнится первой
-      if (CY.bank || CY.first) { CY.first = null; CY.bank = 0; CY.hedges = 0; CY.hedgeCool = 0; CY.lastHedgeAdv = 0; saveCy(); }
+      if (CY.bank || CY.first || CY.base) { CY.first = null; CY.bank = 0; CY.hedges = 0; CY.hedgeCool = 0; CY.lastHedgeAdv = 0; CY.base = 0; saveCy(); }
       const mid = (T.Buy + T.Sell) / 2, lev = c.levNow || CFG.lev;
       // первая позиция такого размера, чтобы она + хедж ×hedgeMult ТОЧНО влезли в маржу
       const k = 1 + CFG.hedgeMult, lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.85 / k, ACC.avail / (k + 0.3)) : CFG.usdt;
@@ -236,7 +237,8 @@ function create(host) {
       return place(sym, { Buy: { qty: q, px: T.Buy }, Sell: { qty: q, px: T.Sell } }, "вход");
     }
     const F = R.first, hs = opp(R.fs), adv = advPct(F);
-    const need = +rnd(CFG.hedgeMult * F.size - (R.hedge ? R.hedge.size : 0), i.step, "down");
+    // хедж = hedgeMult × БАЗОВЫЙ объём цикла (а не текущей позиции) — без лавины ×2, ×4, ×8…
+    const need = +rnd(CFG.hedgeMult * CY.base - (R.hedge ? R.hedge.size : 0), i.step, "down");
     const pl = { Buy: null, Sell: null };
     // после защитного выхода хеджа — новый хедж не сразу на том же месте: пауза 60 с или цена ушла дальше прошлого хеджа
     const cool = !R.hedge && CY.hedgeCool && now() - CY.hedgeCool < 60000 && adv < (CY.lastHedgeAdv || 0) + CFG.hedgeAt / 2;
@@ -357,7 +359,7 @@ function create(host) {
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
     const rest = Object.values(POS).some(p => p.sym === tr.sym);
     if (rest && pnl != null) { CY.bank = +(CY.bank + pnl).toFixed(4); if (tr.side !== CY.first) CY.hedges++; saveCy(); log(`${short(tr.sym)}: 🏦 банк цикла ${CY.bank >= 0 ? "+" : ""}${CY.bank.toFixed(3)} USDT — выход первой ближе`, "ok"); }
-    if (!rest) { CY.first = null; CY.bank = 0; CY.hedges = 0; saveCy(); }
+    if (!rest) { CY.first = null; CY.bank = 0; CY.hedges = 0; CY.base = 0; saveCy(); }
     log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ +" + pnl.toFixed(3) + " USDT" : "🛑 " + pnl.toFixed(3) + " USDT"} (${word(tr.side)}, ${tr.mode}, ${hold.toFixed(1)} мин)`, pnl > 0 ? "ok" : "err");
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), best: +((L ? tr.maxPx / tr.entry - 1 : 1 - tr.minPx / tr.entry) * 100).toFixed(2), adverse: +((L ? 1 - tr.minPx / tr.entry : tr.maxPx / tr.entry - 1) * 100).toFixed(2), pnl: pnl == null ? null : +pnl.toFixed(4) }));
     delete TRADES[key]; saveTrades(); saveStat();

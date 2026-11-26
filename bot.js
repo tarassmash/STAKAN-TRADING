@@ -12,10 +12,10 @@
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, hedgeAt: 0.5, hedgeMult: 2, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const DEF = { live: false, usdt: 5, lev: 10, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, hedgeAt: 0.5, hedgeMult: 2, trail: 0.5, unload: true, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
 const TURBO = { off: 0.05, tp: 0.2, maxHold: 5 };
 const TURBO_LOSS_PCT = 3;
-const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "hedgeAt", "hedgeMult", "oiPct"];
+const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "hedgeAt", "hedgeMult", "trail", "oiPct"];
 const FEE = 0.02;   // мейкер Bybit, % за сторону
 const MIN_PLUS = 2.5 * FEE;   // минимальный плюс выхода, % от входа: покрывает комиссии входа и выхода
 
@@ -238,7 +238,9 @@ function create(host) {
     }
     const F = R.first, hs = opp(R.fs), adv = advPct(F);
     // хедж = hedgeMult × БАЗОВЫЙ объём цикла (а не текущей позиции) — без лавины ×2, ×4, ×8…
-    const need = +rnd(CFG.hedgeMult * CY.base - (R.hedge ? R.hedge.size : 0), i.step, "down");
+    const ht = R.hedge && TRADES[sym + "|" + hs];
+    if (ht && !ht.full && Math.abs(R.hedge.size - CFG.hedgeMult * CY.base) <= +i.step) { ht.full = true; saveTrades(); }
+    const need = ht && ht.full ? 0 : +rnd(CFG.hedgeMult * CY.base - (R.hedge ? R.hedge.size : 0), i.step, "down");   // набранный хедж не доливаю — половина уже в тейке, вторая бежит
     const pl = { Buy: null, Sell: null };
     // после защитного выхода хеджа — новый хедж не сразу на том же месте: пауза 60 с или цена ушла дальше прошлого хеджа
     const cool = !R.hedge && CY.hedgeCool && now() - CY.hedgeCool < 60000 && adv < (CY.lastHedgeAdv || 0) + CFG.hedgeAt / 2;
@@ -286,6 +288,7 @@ function create(host) {
         jlog("entry", { sym: p.sym, side: p.side, px: p.avg, qty: p.size });
         if (ENTRY[p.sym] && ENTRY[p.sym][p.side] && !OPEN.has(ENTRY[p.sym][p.side].id)) { ENTRY[p.sym][p.side] = null; saveEntry(); }
       }
+      if (tr.qty > p.size + 1e-12 && isLive()) await partialClosed(p, tr);   // часть позиции закрылась лимиткой
       tr.entry = p.avg; tr.qty = p.size;
       const px = coin(p.sym).last || p.mark;
       tr.maxPx = Math.max(tr.maxPx, px); tr.minPx = Math.min(tr.minPx, px);
@@ -294,71 +297,110 @@ function create(host) {
     }
     for (const key of Object.keys(TRADES)) if (!seen[key]) await closeTrade(key);
   }
+  // закрытый PnL сделки, ещё не учтённый (частичные закрытия считаются сразу, в банк цикла)
+  async function realizedNew(tr) {
+    const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 100 });
+    const xs = (r.list || []).filter(x => ((x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side) && +x.updatedTime >= tr.open && !(tr.pnlIds || []).includes(x.orderId + ":" + x.updatedTime));
+    return { sum: xs.reduce((a, x) => a + (+x.closedPnl || 0), 0), ids: xs.map(x => x.orderId + ":" + x.updatedTime) };
+  }
+  async function partialClosed(p, tr) {
+    try {
+      const r = await realizedNew(tr); if (!r.ids.length) return;
+      tr.pnlIds = (tr.pnlIds || []).concat(r.ids).slice(-200); tr.partPnl = +((tr.partPnl || 0) + r.sum).toFixed(4);
+      CY.bank = +(CY.bank + r.sum).toFixed(4); saveCy(); saveTrades();
+      const isFirst = CY.first === p.side;
+      log(`${short(p.sym)}: ${isFirst ? "📉 разгрузка первой" : "✂ часть хеджа в тейк"} ${r.sum >= 0 ? "+" : ""}${r.sum.toFixed(3)} USDT · осталось ${p.size} · 🏦 банк ${CY.bank >= 0 ? "+" : ""}${CY.bank.toFixed(3)}`, r.sum >= 0 ? "ok" : "info");
+      jlog("part", { sym: p.sym, side: p.side, pnl: r.sum, left: p.size, bank: CY.bank });
+    } catch (e) { /* в следующий раз */ }
+  }
   // выход только в плюс: стоп на бирже по позиции снимаю (если остался от старой версии)
   async function noStop(p, tr) {
     try { await post("/v5/position/trading-stop", { category: "linear", symbol: p.sym, tpslMode: "Full", stopLoss: "0", positionIdx: p.idx }); } catch (e) { /* стопа и не было */ }
     try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: p.sym, orderFilter: "StopOrder" })).list || []; for (const x of o) if (x.triggerPrice && +x.triggerPrice > 0 && /Stop/i.test(x.stopOrderType || "") && (!+x.positionIdx || +x.positionIdx === p.idx)) await cancel(p.sym, x.orderId); } catch (e) { /* нет */ }
     tr.slOff = true; saveTrades();
   }
-  // цена лимитки выхода (null = выхода сейчас нет). НИКОГДА не в минус по циклу: первая + хедж + банк ≥ комиссии.
-  function exitPrice(p, tr, i) {
-    const L = p.side === "Buy", d = L ? 1 : -1, c = coin(p.sym), best = L ? c.ask : c.bid;
+  // лимитка выхода: { price, qty } или null (выхода сейчас нет). НИКОГДА не в минус по циклу.
+  function exitPlan(p, tr, i) {
+    const L = p.side === "Buy", d = L ? 1 : -1, c = coin(p.sym), best = L ? c.ask : c.bid, px = c.last || p.mark;
     const R = roles(p.sym), isFirst = R.fs === p.side;
     const maker = (goal) => rnd(best ? (L ? Math.max(goal, best) : Math.min(goal, best)) : goal, i.tick, L ? "up" : "down");
+    const now_ = d * (px / tr.entry - 1) * 100, fav = L ? (tr.maxPx / tr.entry - 1) * 100 : (1 - tr.minPx / tr.entry) * 100;
     if (R.first && R.hedge) {
       const fee = (R.first.size * R.first.mark + R.hedge.size * R.hedge.mark) * (2 * FEE + 0.03) / 100;
       const sum = R.first.upnl + R.hedge.upnl + CY.bank;
       if (sum >= fee || (tr.mode === "вместе" && sum >= fee / 3)) {   // цикл в плюсе — закрываю ОБЕ по лучшей цене стакана
         if (tr.mode !== "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym) t.mode = "вместе"; log(`${short(p.sym)}: ✅ первая + хедж + банк = ${sum >= 0 ? "+" : ""}${sum.toFixed(3)} USDT — закрываю обе лимитками`, "ok"); saveTrades(); }
-        return rnd(best || (c.last || p.mark), i.tick, L ? "up" : "down");
+        return { price: rnd(best || px, i.tick, L ? "up" : "down"), qty: p.size };
       }
-      if (tr.mode === "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym && t.mode === "вместе") t.mode = "тейк"; saveTrades(); }   // цена ушла обратно — снова ждём
-      if (isFirst) return null;   // пока хедж открыт, первая сама не выходит
-      // хедж: свой тейк +tp %. НИКОГДА НЕ ОТДАЁТ ВЗЯТОЕ: был в плюсе ≥ tp/2, а цена пошла назад к входу — выхожу с минимальным плюсом;
-      // висит дольше maxHold мин — тоже минимальный плюс. Минус ×2 на хедже не копится.
-      const px = c.last || p.mark, fav = L ? (tr.maxPx / tr.entry - 1) * 100 : (1 - tr.minPx / tr.entry) * 100, now_ = d * (px / tr.entry - 1) * 100;
-      const held = (now() - tr.open) / 60000;
+      if (tr.mode === "вместе") { for (const t of Object.values(TRADES)) if (t.sym === p.sym && t.mode === "вместе") t.mode = "тейк"; saveTrades(); }
+      if (isFirst) {
+        // 📉 РАЗГРУЗКА: банк хеджей покрывает минус части первой — эту часть закрываю лимиткой (первая меньше, риск меньше)
+        if (!CFG.unload || !(CY.bank > 0) || now_ >= 0) return null;
+        const lossPerCoin = Math.abs(px - tr.entry) + px * (2 * FEE) / 100;
+        let q = +rnd(Math.min(p.size, CY.bank * 0.95 / lossPerCoin), i.step, "down");
+        if (p.size - q < i.minQty) q = p.size;
+        if (!(q >= i.minQty) || q < p.size * 0.1) return null;   // слишком мелко — копим банк дальше
+        if (tr.mode !== "разгрузка") { tr.mode = "разгрузка"; saveTrades(); log(`${short(p.sym)}: 📉 банк +${CY.bank.toFixed(3)} покрывает минус ${q} из ${p.size} первой — закрываю эту часть лимиткой`, "ok"); }
+        return { price: rnd(best || px, i.tick, L ? "up" : "down"), qty: q };
+      }
+      if (tr.mode === "разгрузка") tr.mode = "тейк";
+      // ХЕДЖ: половина — тейк +tp % (в банк), вторая половина — бегун за трендом с трейлингом trail %.
+      const held = (now() - tr.open) / 60000, full = R.first && Math.abs(p.size - CFG.hedgeMult * (CY.base || R.first.size)) <= +i.step;
+      if (full && !tr.runQty) { tr.runQty = +rnd(p.size / 2, i.step, "down"); saveTrades(); }
+      const run = tr.runQty && tr.runQty >= i.minQty ? tr.runQty : 0;
       let m = tr.mode;
-      if (m === "тейк" && fav >= CFG.tp / 2 && now_ <= Math.max(2 * MIN_PLUS, fav / 3)) m = "защита";
-      else if (m === "тейк" && held >= CFG.maxHold) m = "мин. плюс";
-      if (m !== tr.mode) { tr.mode = m; CY.hedgeCool = now(); saveCy(); log(`${short(p.sym)}: ${m === "защита" ? `🛡 хедж был в плюсе +${fav.toFixed(2)}%, цена пошла назад — закрываю его с минимальным плюсом, банк не отдаю` : `⏱ хедж висит ${held.toFixed(0)} мин — выход с минимальным плюсом`}`, "info"); saveTrades(); }
-      return maker(tr.entry * (1 + d * (m === "тейк" ? CFG.tp : MIN_PLUS) / 100));
+      if ((m === "тейк" || m === "бегун") && fav >= CFG.tp / 2 && now_ <= Math.max(2 * MIN_PLUS, fav / 3) && !(m === "бегун" && fav >= CFG.tp)) m = "защита";
+      else if (m === "тейк" && held >= CFG.maxHold && fav < CFG.tp) m = "мин. плюс";
+      if (m !== tr.mode && (m === "защита" || m === "мин. плюс")) { CY.hedgeCool = now(); saveCy(); log(`${short(p.sym)}: ${m === "защита" ? `🛡 хедж был в плюсе +${fav.toFixed(2)}%, цена пошла назад — закрываю с минимальным плюсом, банк не отдаю` : `⏱ хедж висит ${held.toFixed(0)} мин — выход с минимальным плюсом`}`, "info"); }
+      tr.mode = m;
+      if (m === "защита" || m === "мин. плюс") return { price: maker(tr.entry * (1 + d * MIN_PLUS / 100)), qty: p.size };
+      if (run && p.size > run + 1e-12) return { price: maker(tr.entry * (1 + d * CFG.tp / 100)), qty: +rnd(p.size - run, i.step, "down") };   // первая половина — тейк
+      if (run) {   // бегун: держу, пока тренд идёт; откат от пика на trail % — выход лимиткой (не ниже входа + комиссии)
+        if (tr.mode !== "бегун") { tr.mode = "бегун"; saveTrades(); log(`${short(p.sym)}: 🏃 половина хеджа в тейке, вторая (${p.size}) бежит за трендом, трейлинг ${CFG.trail}%`, "ok"); }
+        const peak = L ? tr.maxPx : tr.minPx, back = d * (peak / px - 1) * 100;
+        if (back >= CFG.trail && now_ >= MIN_PLUS * 2) return { price: rnd(best || px, i.tick, L ? "up" : "down"), qty: p.size };   // откат от пика — забираю
+        if (now_ <= 3 * MIN_PLUS) return { price: maker(tr.entry * (1 + d * MIN_PLUS / 100)), qty: p.size };   // прибыль почти вся ушла — выход с мин. плюсом, в минус бегун не уходит
+        return null;
+      }
+      return { price: maker(tr.entry * (1 + d * CFG.tp / 100)), qty: p.size };   // хедж ещё добирается — тейк на всё
     }
     // одна позиция: тейк (или мин. плюс после maxHold), банк хеджей приближает выход
     const held = (now() - tr.open) / 60000;
+    if (["вместе", "разгрузка", "бегун", "защита"].includes(tr.mode)) tr.mode = "мин. плюс";
     if (tr.mode === "тейк" && held >= CFG.maxHold) { tr.mode = "мин. плюс"; log(`${short(p.sym)}: ⏱ держу ${held.toFixed(0)} мин — тейк до минимального плюса`, "info"); saveTrades(); }
-    if (tr.mode === "вместе") tr.mode = "мин. плюс";
     const pct = tr.mode === "мин. плюс" || CY.bank ? MIN_PLUS : CFG.tp;
     const goal = tr.entry * (1 + d * pct / 100) - d * (CY.bank > 0 ? CY.bank : 0) / Math.max(1e-9, p.size);
-    return maker(L ? Math.max(goal, tr.entry * (1 - 50 / 100)) : Math.min(goal, tr.entry * 1.5));
+    return { price: maker(L ? Math.max(goal, tr.entry * 0.5) : Math.min(goal, tr.entry * 1.5)), qty: p.size };
   }
   async function manage(p, tr) {
     if (!isLive()) return;
     const i = await inst(p.sym), L = p.side === "Buy";
     if (!(p.size >= i.minQty)) return;
-    const price = exitPrice(p, tr, i);
+    const x = exitPlan(p, tr, i);
     const o = tr.exitId && OPEN.get(tr.exitId);
-    if (price == null) { if (o) await cancel(p.sym, tr.exitId); tr.exitId = null; return; }
+    if (!x || !(x.qty >= i.minQty)) { if (o) await cancel(p.sym, tr.exitId); tr.exitId = null; return; }
+    const price = x.price, qty = Math.min(x.qty, p.size);
     if (o) {
       const left = o.leavesQty != null ? +o.leavesQty : +o.qty;
-      if (Math.abs(left - p.size) > 1e-12) { await cancel(p.sym, tr.exitId); tr.exitId = null; }   // позиция выросла / частично закрылась — переставляю на весь размер
+      if (Math.abs(left - qty) > 1e-12) { await cancel(p.sym, tr.exitId); tr.exitId = null; }   // объём выхода изменился — переставляю
       else if (Math.abs(+price - tr.exitPx) < +i.tick / 2) return;
       else { try { await post("/v5/order/amend", { category: "linear", symbol: p.sym, orderId: tr.exitId, price }); tr.exitPx = +price; saveTrades(); return; } catch (e) { await cancel(p.sym, tr.exitId); tr.exitId = null; } }
     }
     try {
-      const r = await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Limit", qty: String(p.size), price, timeInForce: "PostOnly", reduceOnly: true, positionIdx: p.idx, orderLinkId: linkId("x") });
-      tr.exitId = r.orderId; tr.exitPx = +price; OPEN.set(r.orderId, { orderId: r.orderId, qty: String(p.size), leavesQty: String(p.size) }); saveTrades();
+      const r = await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Limit", qty: String(qty), price, timeInForce: "PostOnly", reduceOnly: true, positionIdx: p.idx, orderLinkId: linkId("x") });
+      tr.exitId = r.orderId; tr.exitPx = +price; OPEN.set(r.orderId, { orderId: r.orderId, qty: String(qty), leavesQty: String(qty) }); saveTrades();
     } catch (e) { log(`${short(p.sym)}: лимитка выхода: ${e.message}`, "err"); }
   }
   async function closeTrade(key) {
     const tr = TRADES[key]; if (!tr) return;
     let pnl = null;
-    try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => ((x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side) && +x.updatedTime >= tr.open && !(tr.pnlIds || []).includes(x.orderId)).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
+    let rem = null;
+    try { rem = (await realizedNew(tr)).sum; pnl = rem + (tr.partPnl || 0); } catch (e) { pnl = null; }
     try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy") && (!+x.positionIdx || +x.positionIdx === (tr.side === "Buy" ? 1 : 2))) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
     const rest = Object.values(POS).some(p => p.sym === tr.sym);
-    if (rest && pnl != null) { CY.bank = +(CY.bank + pnl).toFixed(4); if (tr.side !== CY.first) CY.hedges++; saveCy(); log(`${short(tr.sym)}: 🏦 банк цикла ${CY.bank >= 0 ? "+" : ""}${CY.bank.toFixed(3)} USDT — выход первой ближе`, "ok"); }
+    if (rest && rem != null) { CY.bank = +(CY.bank + rem).toFixed(4); if (tr.side !== CY.first) CY.hedges++; saveCy(); log(`${short(tr.sym)}: 🏦 банк цикла ${CY.bank >= 0 ? "+" : ""}${CY.bank.toFixed(3)} USDT — выход первой ближе`, "ok"); }
     if (!rest) { CY.first = null; CY.bank = 0; CY.hedges = 0; CY.base = 0; saveCy(); }
     log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ +" + pnl.toFixed(3) + " USDT" : "🛑 " + pnl.toFixed(3) + " USDT"} (${word(tr.side)}, ${tr.mode}, ${hold.toFixed(1)} мин)`, pnl > 0 ? "ok" : "err");
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), best: +((L ? tr.maxPx / tr.entry - 1 : 1 - tr.minPx / tr.entry) * 100).toFixed(2), adverse: +((L ? 1 - tr.minPx / tr.entry : tr.maxPx / tr.entry - 1) * 100).toFixed(2), pnl: pnl == null ? null : +pnl.toFixed(4) }));
@@ -421,9 +463,10 @@ function create(host) {
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
     CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev)));
     CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxSpread = Math.max(0.005, Math.min(1, +CFG.maxSpread || 0.08));
-    CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.hedgeAt = Math.max(0.05, Math.min(20, +CFG.hedgeAt || 0.5)); CFG.hedgeMult = Math.max(1, Math.min(5, +CFG.hedgeMult || 2)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
+    CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.hedgeAt = Math.max(0.05, Math.min(20, +CFG.hedgeAt || 0.5)); CFG.hedgeMult = Math.max(1, Math.min(5, +CFG.hedgeMult || 2)); CFG.trail = Math.max(0.1, Math.min(5, +CFG.trail || 0.5)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: только сигналы", CFG.live ? "err" : "info"); }
+    if (typeof o.unload === "boolean" && o.unload !== CFG.unload) { CFG.unload = o.unload; ch.push("unload"); }
     if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: вход только если открытый интерес за 15 мин растёт${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""}` : "📉 Фильтр OI ВЫКЛ", "info"); }
     saveCfg();
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });

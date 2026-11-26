@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Щукин · микро-ходы 24/7</title>
+<title>Щукин · хедж 24/7</title>
 <style>
   :root { --bg:#0b0e11; --panel:#12161c; --border:#2b3139; --text:#eaecef; --muted:#848e9c; --green:#0ecb81; --red:#f6465d; --yellow:#f0b90b; --violet:#a855f7; }
   * { box-sizing: border-box; }
@@ -49,7 +49,7 @@
 </head>
 <body>
 <header>
-  <h1>Щукин · <span>микро-ходы</span> в обе стороны, только лимитки <small style="font-size:.7rem;color:var(--muted);font-weight:400">· сервер 24/7</small></h1>
+  <h1>Щукин · <span>хедж</span> на одной монете, тейки в обе стороны <small style="font-size:.7rem;color:var(--muted);font-weight:400">· сервер 24/7</small></h1>
   <div style="display:flex;gap:8px"><span class="badge" id="modeBadge">СИГНАЛЫ</span><span class="badge" id="runBadge">СТОП</span></div>
 </header>
 
@@ -71,8 +71,6 @@
     <div class="note" id="oiInfo">—</div>
 
     <h2>Монеты</h2>
-    <div class="row"><label>Монет на взводе максимум</label><input type="number" id="maxCoins" min="1" max="40" step="1" /></div>
-    <div class="row"><label>Открытых позиций максимум</label><input type="number" id="maxPos" min="1" max="30" step="1" /></div>
     <div class="row"><label>Оборот за 24ч от, млн $</label><input type="number" id="minTurn" min="0" step="1" /></div>
     <div class="row"><label>Проверять кандидатов</label><input type="number" id="maxCand" min="10" max="100" step="5" /></div>
 
@@ -82,7 +80,7 @@
     <div class="row"><label title="Разница между лучшей покупкой и продажей в стакане. Широкий спред — монету пропускаю">Спред до, %</label><input type="number" id="maxSpread" min="0.005" max="1" step="0.01" /></div>
 
     <h2>Сделка</h2>
-    <div class="row"><label>Залог на сделку, USDT</label><input type="number" id="usdt" min="1" step="1" /></div>
+    <div class="row"><label>Залог на сторону, USDT</label><input type="number" id="usdt" min="1" step="1" /></div>
     <div class="row"><label>Плечо</label><input type="number" id="lev" min="1" max="50" step="1" /></div>
     <div class="note" id="riskInfo">—</div>
 
@@ -93,7 +91,7 @@
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять лимитки входа)</button>
-    <div class="note">Маркета нет вообще — <b>все ордера PostOnly-лимитки</b> (только мейкер, комиссия 0.02%). Берутся самые «бешеные» монеты. У каждой стоят <b>BUY ниже цены и SELL выше цены</b>, каждые 3 с едут за ценой — куда бы цена ни дёрнулась, одна исполнится. Сразу ставится <b>тейк лимиткой</b>. <b>Выход только в плюс</b>: стопа нет ни у бота, ни на бирже. Висит дольше «мин. плюс через» — тейк опускается до входа + комиссии и ждёт возврата цены. Пока открыто «позиций максимум», новых входов нет.</div>
+    <div class="note">Бот торгует <b>одну самую волатильную монету</b> в режиме <b>ХЕДЖ</b>: лонг и шорт одновременно и независимо. <b>Лонг</b>: BUY-лимитка ниже цены → тейк выше. <b>Шорт</b>: SELL-лимитка выше цены → тейк ниже. Тейк закрылся — сторона сразу входит снова. Куда бы цена ни пошла, одна сторона собирает тейки, вторая ждёт возврата цены. <b>Все ордера — PostOnly-лимитки</b>, маркета нет. <b>Выход только в плюс</b>, стопа нет; висит дольше «мин. плюс через» — тейк опускается до входа + комиссии. Монета меняется, только когда по ней нет позиций.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD.</div>
   </aside>
@@ -135,7 +133,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
+const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) || +v === 0 ? "—" : String(+(+v).toPrecision(6));
 const sh = (s) => s.replace(/USDT$/, "");
@@ -172,7 +170,7 @@ function render() {
     $("turboInfo").innerHTML = t.on ? `<span class="up">⚡ работает ${Math.round((Date.now() - t.from) / 60000)} мин · за турбо ${t.pnl >= 0 ? "+" : ""}${(+t.pnl || 0).toFixed(2)} USDT</span><br>${what}` : "Короче ходы: " + what; }
   { const oi = B.oi || {}; $("oiBtn").textContent = "📉 Вход только при росте OI: " + (oi.on ? "ВКЛ" : "ВЫКЛ"); lit($("oiBtn"), oi.on);
     $("oiInfo").innerHTML = oi.on ? `<span class="up">✓ вход только если открытый интерес за 15 мин растёт${oi.pct > 0 ? " на " + oi.pct + "%+" : ""}</span> ` : "выкл — вход при любом OI"; }
-  { const n = c.usdt * c.lev, win = n * (c.tp - 0.04) / 100; $("riskInfo").innerHTML = `позиция ≈ <b>${n.toFixed(0)} USDT</b> · тейк ≈ <b class="up">+${win.toFixed(2)} USDT</b> · <b>стопа нет — выход только в плюс</b>; позиция против ждёт возврата цены`; }
+  { const n = c.usdt * c.lev, win = n * (c.tp - 0.04) / 100; $("riskInfo").innerHTML = `позиция ≈ <b>${n.toFixed(0)} USDT</b> · тейк ≈ <b class="up">+${win.toFixed(2)} USDT</b> · <b>стопа нет — выход только в плюс</b>; позиция против ждёт возврата цены · максимум 2 позиции (лонг + шорт) ≈ ${(2 * n).toFixed(0)} USDT`; }
   $("equity").textContent = S.acc.equity != null ? (+S.acc.equity).toFixed(2) + " (свободно " + (+S.acc.available || 0).toFixed(2) + ")" : (S.acc.err ? "ошибка" : "—");
   $("modeBadge").textContent = B.live ? "LIVE" : "СИГНАЛЫ"; $("modeBadge").className = "badge" + (B.live ? " live" : "");
   $("runBadge").textContent = B.running ? "РАБОТАЕТ 24/7" : "СТОП"; $("runBadge").className = "badge" + (B.running ? " on" : "");
@@ -180,7 +178,8 @@ function render() {
   $("coinsBody").innerHTML = B.rows.length ? B.rows.map(r => {
     const ba = `${f(r.bid)} / ${f(r.ask)}`;
     if (!r.pos.length) return `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td><span class="up">${f(r.buy)}</span> / <span class="dn">${f(r.sell)}</span></td><td class="mut" colspan="5">ждёт исполнения</td></tr>`;
-    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td>${f(p.exit)}</td><td class="mut">${esc(p.mode)} · ${p.held} мин</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("");
+    const wait = (r.buy || r.sell) ? `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td><span class="up">${f(r.buy)}</span> / <span class="dn">${f(r.sell)}</span></td><td class="mut" colspan="5">${r.buy ? "лонг" : "шорт"}-сторона ждёт входа</td></tr>` : "";
+    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td>${f(p.exit)}</td><td class="mut">${esc(p.mode)} · ${p.held} мин</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("") + wait;
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу подвижные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
   { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";
     const set = (id, v) => { $(id).textContent = money(v); $(id).style.color = v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--text)"; $(id + "Box").className = "box" + (v > 0 ? " pos" : v < 0 ? " neg" : ""); };
@@ -189,7 +188,7 @@ function render() {
     $("pnlUnSub").textContent = `позиций открыто: ${B.open}`; }
   const st = B.stat;
   $("stats").innerHTML = `<span>сканов <b>${st.scans}</b></span><span>входов <b>${st.entries}</b></span><span>в плюс <b class="up">${st.wins}</b></span><span>в минус <b class="dn">${st.losses}</b></span>`
-    + `<span>на взводе <b>${B.rows.filter(r => !r.pos.length).length}</b></span>` + (B.nextScan != null ? `<span>скан через <b>${B.nextScan} с</b></span>` : "");
+    + `<span>монета <b>${esc(sh(B.coin || "—"))}</b></span>` + (B.nextScan != null ? `<span>скан через <b>${B.nextScan} с</b></span>` : "");
   $("candBody").innerHTML = B.cand.map(x => `<tr><td><b>${esc(sh(x.sym))}</b>${x.armed ? " 🎯" : ""}</td><td class="${x.atr >= (S.bot.cfg.minAtr || 0) ? "up" : "mut"}"><b>${(+x.atr || 0).toFixed(2)}%</b></td><td>${(+x.spread || 0).toFixed(3)}%</td><td>${f(x.hi)} / ${f(x.lo)}</td><td>${f(x.last)}</td>`
     + `<td class="${x.ch1h >= 0 ? "up" : "dn"}">${x.ch1h >= 0 ? "+" : ""}${x.ch1h.toFixed(2)}%</td><td class="${x.oi == null ? "mut" : x.oi > 0 ? "up" : "dn"}">${x.oi == null ? "—" : (x.oi >= 0 ? "+" : "") + x.oi.toFixed(2) + "%"}</td><td>${(x.turn / 1e6).toFixed(0)} M$</td><td class="mut">${esc(x.why)}</td></tr>`).join("") || '<tr><td colspan="9" class="mut">—</td></tr>';
   $("log").innerHTML = B.log.map(([t, m, cls]) => `<div class="${esc(cls)}">[${new Date(t).toLocaleTimeString("ru-RU")}] ${esc(m)}</div>`).join("");
@@ -198,7 +197,7 @@ async function load() { try { S = await fetch("/api/state", { cache: "no-store" 
 
 document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
 $("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
-$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nМикро-ходы в обе стороны только PostOnly-лимитками: до ${c.maxCoins} монет, до ${c.maxPos} позиций, залог ${c.usdt} USDT × плечо ${c.lev}, тейк +${c.tp}%, выход только в плюс (без стопа).` : null); };
+$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nХедж на одной самой волатильной монете: лонг и шорт одновременно, только PostOnly-лимитки, залог ${c.usdt} USDT × плечо ${c.lev} на каждую сторону, тейк ${c.tp}%, выход только в плюс (без стопа).` : null); };
 $("stopBtn").onclick = () => act("stop", "Остановить? Лимитки входа снимутся, открытые позиции бот доведёт до выхода в плюс лимитками.");
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");

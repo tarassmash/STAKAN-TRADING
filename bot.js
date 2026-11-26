@@ -1,20 +1,20 @@
-// ЩУКИН · МИКРО-ХОДЫ — серверный движок, торгует 24/7. ТОЛЬКО PostOnly-лимитки (всегда мейкер), маркета нет вообще.
-//  • раз в минуту: скан USDT-перпов Bybit — самые «бешеные» монеты (крупные минутные свечи), оборот от minTurn млн $, узкий спред;
-//  • у каждой монеты на взводе стоят ДВЕ лимитки PostOnly: BUY ниже цены и SELL выше цены (на off % от середины стакана),
-//    каждые 3 с переставляются за ценой — куда бы цена ни дёрнулась, одна из них исполнится;
-//  • исполнилась одна — вторая снимается, сразу ставится тейк лимиткой PostOnly на +tp % от входа;
-//  • ВЫХОД ТОЛЬКО В ПЛЮС: стопа нет ни у бота, ни на бирже. Лимитка выхода никогда не ниже входа + комиссии;
-//  • держим дольше maxHold мин — тейк опускается до минимального плюса (вход + комиссии), ждёт возврата цены;
-//  • 📉 фильтр OI (опция): ставить вход, только если открытый интерес за 15 мин растёт;
-//  • ⚡ турбо: ближе вход, короче тейк; само выключается при минусе 3 % депозита.
+// ЩУКИН · ХЕДЖ НА ОДНОЙ МОНЕТЕ — серверный движок, торгует 24/7. ТОЛЬКО PostOnly-лимитки (мейкер), маркета нет.
+//  • раз в минуту скан: выбирается ОДНА самая волатильная монета (крупные минутные свечи, узкий спред, оборот от minTurn млн $).
+//    Монета меняется, только когда по ней нет открытых позиций;
+//  • на монете включается режим ХЕДЖ Bybit: лонг и шорт живут одновременно и независимо;
+//  • ЛОНГ-сторона: BUY-лимитка ниже цены → исполнилась → тейк SELL-лимиткой на +tp % → закрылась → снова BUY;
+//  • ШОРТ-сторона: SELL-лимитка выше цены → исполнилась → тейк BUY-лимиткой на −tp % → закрылась → снова SELL;
+//    куда бы цена ни пошла, одна из сторон собирает тейки; вторая ждёт возврата цены;
+//  • ВЫХОД ТОЛЬКО В ПЛЮС: стопа нет. Позиция держится дольше maxHold мин — тейк опускается до минимального плюса (вход + комиссии);
+//  • 📉 фильтр OI (опция), ⚡ турбо (ближе вход, короче тейк).
 "use strict";
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, maxPos: 3, maxCoins: 6, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const DEF = { live: false, usdt: 5, lev: 10, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
 const TURBO = { off: 0.05, tp: 0.2, maxHold: 5 };
 const TURBO_LOSS_PCT = 3;
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
+const NUMS = ["usdt", "lev", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
 const FEE = 0.02;   // мейкер Bybit, % за сторону
 const MIN_PLUS = 2.5 * FEE;   // минимальный плюс выхода, % от входа: покрывает комиссии входа и выхода
 
@@ -82,7 +82,7 @@ function create(host) {
   const C = {};   // sym -> { hedge, lev, last, bid, ask }
   const coin = (sym) => C[sym] || (C[sym] = { sym, hedge: null, lev: false, last: 0, bid: 0, ask: 0 });
   let POS = {}, BUSY_SYMS = new Set(), OPEN = new Map();   // OPEN: orderId -> ордер с биржи
-  let ARMED = [], CAND = [], scanning = false, fastBusy = false, scanTimer = null, fastTimer = null, lastScanAt = 0, ACC = { eq: 0, avail: 0 };
+  let COIN = lsGet("hd.coin", ""), CAND = [], scanning = false, fastBusy = false, scanTimer = null, fastTimer = null, lastScanAt = 0, ACC = { eq: 0, avail: 0 };
   const posOf = (sym) => Object.values(POS).filter(p => p.sym === sym);
   const ourOpen = () => Object.keys(TRADES).length;
   async function hedgeOf(sym) {
@@ -91,11 +91,22 @@ function create(host) {
     return c.hedge;
   }
   const idxFor = (c, side) => (c.hedge ? (side === "Buy" ? 1 : 2) : 0);
+  // режим ХЕДЖ на монете (лонг и шорт одновременно). Bybit меняет режим только без позиций и ордеров по монете.
+  async function setHedge(sym) {
+    const c = coin(sym);
+    if (!isLive()) { c.hedge = true; return true; }
+    try { await post("/v5/position/switch-mode", { category: "linear", symbol: sym, mode: 3 }); c.hedge = true; return true; }
+    catch (e) {
+      if (e.code === 110025 || /not modified/i.test(e.message || "")) { c.hedge = true; return true; }
+      log(`${short(sym)}: не смог включить режим ХЕДЖ: ${e.message} — монету пропускаю`, "err"); return false;
+    }
+  }
   async function account() {
     try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (w.list || [])[0] || {}; ACC = { eq: +a.totalEquity || 0, avail: +a.totalAvailableBalance || 0 }; } catch (e) { /* прошлое значение */ }
     return ACC;
   }
-  const canOpen = () => ourOpen() < Math.round(CFG.maxPos) && (!isLive() || ACC.avail >= CFG.usdt * 1.1);
+  const canOpen = () => !isLive() || ACC.avail >= CFG.usdt * 1.1;
+  const ARMED_ = () => (COIN ? [COIN] : []);
 
   // ---------------- 1) скан: какие монеты держать на взводе ----------------
   async function scan() {
@@ -132,14 +143,19 @@ function create(host) {
       const money = !isLive() || ACC.avail >= CFG.usdt * 1.1;
       if (!money && !scan.noMoney) log(`Свободной маржи ${ACC.avail.toFixed(2)} USDT меньше залога на сделку ${CFG.usdt} — новые входы не ставлю`, "err");
       scan.noMoney = !money;
-      const next = good.filter(x => !BUSY_SYMS.has(x.sym) || TRADES[x.sym + "|Buy"] || TRADES[x.sym + "|Sell"]).slice(0, Math.round(CFG.maxCoins)).map(x => x.sym);
-      const removed = ARMED.filter(s => !next.includes(s)), added = next.filter(s => !ARMED.includes(s));
-      ARMED = next;
-      CAND = out.sort((a, b) => b.atr - a.atr).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, atr: x.atr, spread: x.spread, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: next.includes(x.sym), why: next.includes(x.sym) ? "" : why(x) || (BUSY_SYMS.has(x.sym) ? "чужая позиция" : "лимит") }));
+      const flat = !COIN || !Object.values(TRADES).some(t => t.sym === COIN);
+      const best = good[0];
+      if (flat && best && best.sym !== COIN) {
+        const old = COIN;
+        if (await setHedge(best.sym)) {
+          if (old) await dropEntry(old);
+          COIN = best.sym; lsSet("hd.coin", COIN);
+          log(`🎯 Монета: ${short(COIN)} — самая волатильная (минутная свеча ${best.atr.toFixed(2)}%, спред ${best.spread.toFixed(3)}%)${old ? " · вместо " + short(old) : ""} · режим ХЕДЖ`, "ok");
+        }
+      }
+      CAND = out.sort((a, b) => b.atr - a.atr).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, atr: x.atr, spread: x.spread, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: x.sym === COIN, why: x.sym === COIN ? "" : why(x) || (flat ? "не лучшая" : "держу " + short(COIN) + " — есть позиция") }));
       STAT.scans++; lastScanAt = now(); saveStat();
-      jlog("scan", { eq: ACC.eq, armed: next, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.atr.toFixed(2), +x.spread.toFixed(3), +x.ch1h.toFixed(2)]) });
-      if (added.length || removed.length) log(`Скан: на взводе ${next.length} монет → ${next.map(short).join(", ") || "—"}${added.length ? " · + " + added.map(short).join(", ") : ""}${removed.length ? " · − " + removed.map(short).join(", ") : ""}`, "ok");
-      for (const s of removed) await dropEntry(s);
+      jlog("scan", { eq: ACC.eq, coin: COIN, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.atr.toFixed(2), +x.spread.toFixed(3), +x.ch1h.toFixed(2)]) });
     } catch (e) { log("Скан: " + e.message, "err"); }
     finally { scanning = false; }
   }
@@ -150,15 +166,15 @@ function create(host) {
     const mid = (c.bid + c.ask) / 2;
     return { Buy: +rnd(Math.min(c.bid, mid * (1 - CFG.off / 100)), i.tick, "down"), Sell: +rnd(Math.max(c.ask, mid * (1 + CFG.off / 100)), i.tick, "up") };
   }
-  async function quote(sym) {
+  async function quote(sym, sides) {
     const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
     const e = ENTRY[sym] || (ENTRY[sym] = {});
-    if (!isLive()) { e.Buy = { px: T.Buy }; e.Sell = { px: T.Sell }; return; }
+    if (!isLive()) { for (const sd of sides) e[sd] = { px: T[sd] }; return; }
     OURS.add(sym); saveOurs();
-    await hedgeOf(sym);
+    if (!c.hedge) { if (!(await setHedge(sym))) return; }
     if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; }
     const drift = Math.max(+i.tick, ((T.Buy + T.Sell) / 2) * Math.max(0.02, CFG.off / 3) / 100);
-    for (const side of ["Buy", "Sell"]) {
+    for (const side of sides) {
       const px = T[side], o = e[side];
       if (o && o.id && !OPEN.has(o.id)) e[side] = null;   // исполнилась или биржа сняла PostOnly (цена прошла сквозь)
       const cur = e[side];
@@ -181,10 +197,11 @@ function create(host) {
     saveEntry();
   }
   async function cancel(sym, id) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: id }); } catch (e) { /* уже нет */ } OPEN.delete(id); }
-  async function dropEntry(sym) {
+  async function dropEntry(sym, only) {
     const e = ENTRY[sym]; if (!e) return;
-    for (const side of ["Buy", "Sell"]) if (e[side]) { if (e[side].id && isLive()) await cancel(sym, e[side].id); e[side] = null; }
-    delete ENTRY[sym]; saveEntry();
+    for (const side of ["Buy", "Sell"]) if ((!only || side === only) && e[side]) { if (e[side].id && isLive()) await cancel(sym, e[side].id); e[side] = null; }
+    if (!e.Buy && !e.Sell) delete ENTRY[sym];
+    saveEntry();
   }
 
   // ---------------- 3) позиции: тейк / мин. плюс — одна PostOnly-лимитка выхода ----------------
@@ -212,9 +229,9 @@ function create(host) {
       if (!tr) {
         tr = TRADES[key] = { sym: p.sym, side: p.side, open: now(), entry: p.avg, qty: p.size, maxPx: p.mark, minPx: p.mark, mode: "тейк", cfg: { off: CFG.off, tp: CFG.tp, maxHold: CFG.maxHold, turbo: !!CFG.turbo } };
         STAT.entries++; saveStat(); saveTrades();
-        log(`${short(p.sym)}: ${p.side === "Buy" ? "🟢 лонг" : "🔴 шорт"} ${p.size} @ ${fmt(p.avg)} — тейк +${CFG.tp}% лимиткой, выход только в плюс`, "ok");
+        log(`${short(p.sym)}: ${p.side === "Buy" ? "🟢 лонг" : "🔴 шорт"} ${p.size} @ ${fmt(p.avg)} — тейк ${p.side === "Buy" ? "+" : "−"}${CFG.tp}% лимиткой, выход только в плюс · другая сторона работает дальше`, "ok");
         jlog("entry", { sym: p.sym, side: p.side, px: p.avg, qty: p.size });
-        await dropEntry(p.sym);   // вторую лимитку входа снимаю
+        if (ENTRY[p.sym]) { ENTRY[p.sym][p.side] = null; saveEntry(); }   // эта сторона вошла; другая сторона продолжает работать
       }
       tr.entry = p.avg; tr.qty = p.size;
       const px = coin(p.sym).last || p.mark;
@@ -227,7 +244,7 @@ function create(host) {
   // выход только в плюс: стоп на бирже по позиции снимаю (если остался от старой версии)
   async function noStop(p, tr) {
     try { await post("/v5/position/trading-stop", { category: "linear", symbol: p.sym, tpslMode: "Full", stopLoss: "0", positionIdx: p.idx }); } catch (e) { /* стопа и не было */ }
-    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: p.sym, orderFilter: "StopOrder" })).list || []; for (const x of o) if (x.reduceOnly || /Stop/i.test(x.stopOrderType || "")) await cancel(p.sym, x.orderId); } catch (e) { /* нет */ }
+    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: p.sym, orderFilter: "StopOrder" })).list || []; for (const x of o) if (x.triggerPrice && +x.triggerPrice > 0 && /Stop/i.test(x.stopOrderType || "") && (!+x.positionIdx || +x.positionIdx === p.idx)) await cancel(p.sym, x.orderId); } catch (e) { /* нет */ }
     tr.slOff = true; saveTrades();
   }
   // цена лимитки выхода: тейк, а после maxHold мин — минимальный плюс. НИКОГДА не хуже входа + комиссии.
@@ -259,7 +276,7 @@ function create(host) {
     const tr = TRADES[key]; if (!tr) return;
     let pnl = null;
     try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => (x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
-    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy")) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
+    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy") && (!+x.positionIdx || +x.positionIdx === (tr.side === "Buy" ? 1 : 2))) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
     log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ +" + pnl.toFixed(3) + " USDT" : "🛑 " + pnl.toFixed(3) + " USDT"} (${word(tr.side)}, ${tr.mode}, ${hold.toFixed(1)} мин)`, pnl > 0 ? "ok" : "err");
@@ -292,7 +309,7 @@ function create(host) {
   // ---------------- циклы ----------------
   async function lastPrices() {
     const t = await pub("/v5/market/tickers", { category: "linear" });
-    for (const x of t.list || []) if (C[x.symbol] || ARMED.includes(x.symbol)) { const c = coin(x.symbol); c.last = +x.lastPrice; c.bid = +x.bid1Price; c.ask = +x.ask1Price; }
+    for (const x of t.list || []) if (C[x.symbol] || x.symbol === COIN) { const c = coin(x.symbol); c.last = +x.lastPrice; c.bid = +x.bid1Price; c.ask = +x.ask1Price; }
   }
   async function fast() {
     if (fastBusy) return; fastBusy = true;
@@ -301,16 +318,13 @@ function create(host) {
       if (isLive()) {
         await pollOrders();
         await pollPositions();
-        if (running) {
-          const ok = canOpen();
-          for (const s of ARMED) {
-            if (posOf(s).length || BUSY_SYMS.has(s)) { if (ENTRY[s]) await dropEntry(s); continue; }
-            if (!ok) { if (ENTRY[s]) await dropEntry(s); continue; }
-            try { await quote(s); } catch (e) { log(`${short(s)}: вход: ${e.message}`, "err"); }
-          }
+        if (running && COIN) {
+          const ok = canOpen(), free = ["Buy", "Sell"].filter(sd => !POS[COIN + "|" + sd]);
+          for (const sd of ["Buy", "Sell"]) if ((!ok || !free.includes(sd)) && ENTRY[COIN] && ENTRY[COIN][sd]) await dropEntry(COIN, sd);
+          if (ok && free.length) { try { await quote(COIN, free); } catch (e) { log(`${short(COIN)}: вход: ${e.message}`, "err"); } }
         }
         await refreshRealized();
-      } else if (running) for (const s of ARMED) { try { await quote(s); } catch (e) { /* следующий раз */ } }
+      } else if (running && COIN) { try { await quote(COIN, ["Buy", "Sell"]); } catch (e) { /* следующий раз */ } }
     } catch (e) { log("Опрос: " + e.message, "err"); }
     finally { fastBusy = false; }
   }
@@ -325,7 +339,7 @@ function create(host) {
     const ch = [];
     if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
-    CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.maxPos = Math.max(1, Math.min(30, Math.round(CFG.maxPos))); CFG.maxCoins = Math.max(1, Math.min(20, Math.round(CFG.maxCoins)));
+    CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev)));
     CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxSpread = Math.max(0.005, Math.min(1, +CFG.maxSpread || 0.08));
     CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
@@ -366,16 +380,15 @@ function create(host) {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("bo.running", true);
     if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
-    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: микро-ходы в обе стороны, только PostOnly-лимитки · до ${CFG.maxCoins} монет · до ${CFG.maxPos} позиций · залог ${CFG.usdt} USDT × ${CFG.lev} · вход ${CFG.off}% от цены · тейк +${CFG.tp}% · выход только в плюс · мин. плюс через ${CFG.maxHold} мин${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
+    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: хедж на одной самой волатильной монете — лонг и шорт одновременно, только PostOnly-лимитки · залог ${CFG.usdt} USDT × ${CFG.lev} на сторону · вход ${CFG.off}% от цены · тейк +${CFG.tp}% · выход только в плюс · мин. плюс через ${CFG.maxHold} мин${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
     jlog("start", { cfg: CFG });
     schedule();
     await scan().catch(() => {});
-    return "Бот запущен — микро-ходы лимитками 24/7";
+    return "Бот запущен — хедж на одной монете, тейки в обе стороны 24/7";
   }
   async function stop() {
     running = false; lsSet("bo.running", false); schedule();
     for (const s of Object.keys(ENTRY)) await dropEntry(s);
-    ARMED = [];
     log("СТОП: лимитки входа сняты. Открытые позиции бот доводит до выхода в плюс лимитками.", "info"); jlog("stop", {});
     return "Остановлен";
   }
@@ -409,7 +422,7 @@ function create(host) {
   const journalPath = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) ? path.join(JDIR, day + ".jsonl") : null;
 
   function view() {
-    const syms = [...new Set([...ARMED, ...Object.values(TRADES).map(t => t.sym)])];
+    const syms = [...new Set([...ARMED_(), ...Object.values(TRADES).map(t => t.sym)])];
     const rows = syms.map(s => {
       const e = ENTRY[s] || {}, ps = posOf(s), c = coin(s);
       return { sym: s, last: c.last, bid: c.bid, ask: c.ask, buy: e.Buy ? e.Buy.px : null, sell: e.Sell ? e.Sell.px : null,
@@ -418,14 +431,14 @@ function create(host) {
     const unreal = Object.values(POS).reduce((a, p) => a + (p.upnl || 0), 0), realized = STAT.realized || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: STAT.closed || 0 };
     return { turbo: { on: !!CFG.turbo, from: CFG.turboFrom || 0, pnl: CFG.turbo ? turboPnl() : 0, lossPct: TURBO_LOSS_PCT, preset: TURBO }, oi: { on: CFG.oiOn, pct: CFG.oiPct },
-      open: ourOpen(), pnl, acc: ACC, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
+      open: ourOpen(), coin: COIN, pnl, acc: ACC, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
   const wasRunning = running;
   (async () => {
     await dropOld();
     if (isLive()) { try { await pollOrders(); await pollPositions(); } catch (e) { /* следующий опрос */ } }
-    if (wasRunning && running) { log("Сервер перезапущен — бот продолжает микро-ходы лимитками", "ok"); schedule(); scan().catch(() => {}); } else if (!running) schedule();
+    if (wasRunning && running) { log("Сервер перезапущен — бот продолжает хедж на " + (short(COIN) || "—"), "ok"); schedule(); scan().catch(() => {}); } else if (!running) schedule();
   })();
   return { start, stop, setCfg, setTurbo, resetStats, view, days, journalPath };
 }

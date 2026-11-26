@@ -89,12 +89,11 @@
     <h2>Вход и выход (всё лимитками PostOnly)</h2>
     <div class="row"><label title="BUY-лимитка стоит на столько % ниже середины стакана, SELL — выше. 0 = прямо на лучшей цене стакана">Вход от цены, %</label><input type="number" id="off" min="0" max="2" step="0.01" /></div>
     <div class="row"><label title="Тейк лимиткой на столько % от входа">Тейк, %</label><input type="number" id="tp" min="0.06" max="5" step="0.05" /></div>
-    <div class="row"><label title="Цена ушла против на столько % — выход лимиткой по лучшей цене стакана, переставляется за ценой">Стоп, %</label><input type="number" id="sl" min="0.1" max="10" step="0.05" /></div>
-    <div class="row"><label title="Позиция висит дольше — тейк переносится в безубыток (вход + комиссии)">Безубыток через, мин</label><input type="number" id="maxHold" min="1" max="600" step="1" /></div>
+    <div class="row"><label title="Позиция висит дольше — тейк опускается до минимального плюса (вход + комиссии) и ждёт возврата цены">Мин. плюс через, мин</label><input type="number" id="maxHold" min="1" max="600" step="1" /></div>
 
     <button class="btn start" id="startBtn">▶ СТАРТ</button>
     <button class="btn stop" id="stopBtn" disabled>■ СТОП (снять лимитки входа)</button>
-    <div class="note">Маркета нет вообще — <b>все ордера PostOnly-лимитки</b> (только мейкер, комиссия 0.02%). Берутся самые «бешеные» монеты. У каждой стоят <b>BUY ниже цены и SELL выше цены</b>, каждые 3 с едут за ценой — куда бы цена ни дёрнулась, одна исполнится. Сразу ставится <b>тейк лимиткой</b>. Цена пошла против на «стоп» — выход лимиткой по лучшей цене стакана. Висит дольше «безубыток через» — тейк в безубыток. Страховка на бирже: стоп-лимит на 2× стоп (если сервер упадёт).</div>
+    <div class="note">Маркета нет вообще — <b>все ордера PostOnly-лимитки</b> (только мейкер, комиссия 0.02%). Берутся самые «бешеные» монеты. У каждой стоят <b>BUY ниже цены и SELL выше цены</b>, каждые 3 с едут за ценой — куда бы цена ни дёрнулась, одна исполнится. Сразу ставится <b>тейк лимиткой</b>. <b>Выход только в плюс</b>: стопа нет ни у бота, ни на бирже. Висит дольше «мин. плюс через» — тейк опускается до входа + комиссии и ждёт возврата цены. Пока открыто «позиций максимум», новых входов нет.</div>
     <button class="btn sec" id="resetBtn">Сбросить статистику</button>
     <div class="note">Торгует сервер 24/7 — страницу можно закрыть. Ключи — в Railway → Variables (BYBIT_API_KEY, BYBIT_API_SECRET), пароль страницы — UI_PASSWORD.</div>
   </aside>
@@ -136,7 +135,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "sl", "maxHold", "oiPct"];
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "maxHold", "oiPct"];
 const esc = (x) => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const f = (v) => v == null || !Number.isFinite(+v) || +v === 0 ? "—" : String(+(+v).toPrecision(6));
 const sh = (s) => s.replace(/USDT$/, "");
@@ -148,7 +147,7 @@ function fillCfg(c) {
   const a = document.activeElement;
   for (const k of NUMS) if ($(k) !== a) $(k).value = c[k];
   $("live").checked = !!c.live;
-  const turbo = !!c.turbo; for (const k of ["off", "tp", "sl", "maxHold"]) $(k).disabled = turbo;
+  const turbo = !!c.turbo; for (const k of ["off", "tp", "maxHold"]) $(k).disabled = turbo;
 }
 async function act(what, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
@@ -169,11 +168,11 @@ function render() {
   $("keysInfo").innerHTML = (S.keys ? "✅ ключи Bybit на сервере" : "❌ нет ключей: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET — только сигналы") + " · " + (S.env === "testnet" ? "TESTNET" : "MAINNET")
     + (S.password ? "" : '<br><span class="warn">⚠ задайте UI_PASSWORD в Railway → Variables, иначе кнопки не работают</span>');
   { const t = B.turbo || {}, p = t.preset || {}; $("turboBtn").textContent = "⚡ Турбо: " + (t.on ? "ВКЛ" : "ВЫКЛ"); lit($("turboBtn"), t.on);
-    const what = `вход ${p.off}% от цены · тейк +${p.tp}% · стоп −${p.sl}% · безубыток через ${p.maxHold} мин · само выкл при −${t.lossPct}% депозита`;
+    const what = `вход ${p.off}% от цены · тейк +${p.tp}% · мин. плюс через ${p.maxHold} мин · само выкл при −${t.lossPct}% депозита`;
     $("turboInfo").innerHTML = t.on ? `<span class="up">⚡ работает ${Math.round((Date.now() - t.from) / 60000)} мин · за турбо ${t.pnl >= 0 ? "+" : ""}${(+t.pnl || 0).toFixed(2)} USDT</span><br>${what}` : "Короче ходы: " + what; }
   { const oi = B.oi || {}; $("oiBtn").textContent = "📉 Вход только при росте OI: " + (oi.on ? "ВКЛ" : "ВЫКЛ"); lit($("oiBtn"), oi.on);
     $("oiInfo").innerHTML = oi.on ? `<span class="up">✓ вход только если открытый интерес за 15 мин растёт${oi.pct > 0 ? " на " + oi.pct + "%+" : ""}</span> ` : "выкл — вход при любом OI"; }
-  { const n = c.usdt * c.lev, win = n * (c.tp - 0.04) / 100, risk = n * (c.sl + 0.04) / 100; $("riskInfo").innerHTML = `позиция ≈ <b>${n.toFixed(0)} USDT</b> · тейк ≈ <b class="up">+${win.toFixed(2)}</b> · стоп ≈ <b class="dn">−${risk.toFixed(2)} USDT</b> · чтобы быть в плюсе, в тейк должно закрываться больше ${Math.ceil(risk / (win + risk) * 100)}% сделок`; }
+  { const n = c.usdt * c.lev, win = n * (c.tp - 0.04) / 100; $("riskInfo").innerHTML = `позиция ≈ <b>${n.toFixed(0)} USDT</b> · тейк ≈ <b class="up">+${win.toFixed(2)} USDT</b> · <b>стопа нет — выход только в плюс</b>; позиция против ждёт возврата цены`; }
   $("equity").textContent = S.acc.equity != null ? (+S.acc.equity).toFixed(2) + " (свободно " + (+S.acc.available || 0).toFixed(2) + ")" : (S.acc.err ? "ошибка" : "—");
   $("modeBadge").textContent = B.live ? "LIVE" : "СИГНАЛЫ"; $("modeBadge").className = "badge" + (B.live ? " live" : "");
   $("runBadge").textContent = B.running ? "РАБОТАЕТ 24/7" : "СТОП"; $("runBadge").className = "badge" + (B.running ? " on" : "");
@@ -181,7 +180,7 @@ function render() {
   $("coinsBody").innerHTML = B.rows.length ? B.rows.map(r => {
     const ba = `${f(r.bid)} / ${f(r.ask)}`;
     if (!r.pos.length) return `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td><span class="up">${f(r.buy)}</span> / <span class="dn">${f(r.sell)}</span></td><td class="mut" colspan="5">ждёт исполнения</td></tr>`;
-    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td>${f(p.exit)}</td><td class="${p.mode === "стоп" ? "dn" : "mut"}">${esc(p.mode)} · ${p.held} мин</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("");
+    return r.pos.map(p => `<tr><td><b>${esc(sh(r.sym))}</b></td><td>${f(r.last)}</td><td class="mut">${ba}</td><td class="mut">—</td><td>${p.side === "Buy" ? '<span class="up">LONG</span>' : '<span class="dn">SHORT</span>'} ${f(p.size)}</td><td>${f(p.avg)}</td><td>${f(p.exit)}</td><td class="mut">${esc(p.mode)} · ${p.held} мин</td><td class="${p.upnl >= 0 ? "up" : "dn"}">${p.upnl >= 0 ? "+" : ""}${(+p.upnl).toFixed(3)}</td></tr>`).join("");
   }).join("") : `<tr><td colspan="9" class="mut">${B.running ? "ищу подвижные монеты…" : "Нажмите «СТАРТ»"}</td></tr>`;
   { const P = B.pnl || {}, money = (v) => (v >= 0 ? "+" : "") + (+v || 0).toFixed(2) + " USDT";
     const set = (id, v) => { $(id).textContent = money(v); $(id).style.color = v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--text)"; $(id + "Box").className = "box" + (v > 0 ? " pos" : v < 0 ? " neg" : ""); };
@@ -199,12 +198,12 @@ async function load() { try { S = await fetch("/api/state", { cache: "no-store" 
 
 document.querySelectorAll("aside input[type=number]").forEach(el => { el.addEventListener("input", () => { DIRTY = true; }); el.addEventListener("change", () => act("save")); });
 $("live").addEventListener("change", () => { if ($("live").checked && !confirm("Включить LIVE — реальные ордера на Bybit?")) { $("live").checked = false; return; } act("save"); });
-$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nМикро-ходы в обе стороны только PostOnly-лимитками: до ${c.maxCoins} монет, до ${c.maxPos} позиций, залог ${c.usdt} USDT × плечо ${c.lev}, тейк +${c.tp}%, стоп −${c.sl}%.` : null); };
-$("stopBtn").onclick = () => act("stop", "Остановить? Лимитки входа снимутся, открытые позиции бот доведёт до выхода лимитками.");
+$("startBtn").onclick = () => { const c = readCfg(); act("start", c.live ? `Запустить с РЕАЛЬНЫМИ ордерами 24/7?\nМикро-ходы в обе стороны только PostOnly-лимитками: до ${c.maxCoins} монет, до ${c.maxPos} позиций, залог ${c.usdt} USDT × плечо ${c.lev}, тейк +${c.tp}%, выход только в плюс (без стопа).` : null); };
+$("stopBtn").onclick = () => act("stop", "Остановить? Лимитки входа снимутся, открытые позиции бот доведёт до выхода в плюс лимитками.");
 $("testBtn").onclick = () => act("test");
 $("resetBtn").onclick = () => act("reset", "Сбросить статистику?");
 $("oiBtn").onclick = () => act("oiOn");
-$("turboBtn").onclick = () => act("turbo", S && S.bot && S.bot.turbo && S.bot.turbo.on ? "" : "Включить ТУРБО? Вход ближе к цене, тейк и стоп короче; само выключится при −3% депозита.");
+$("turboBtn").onclick = () => act("turbo", S && S.bot && S.bot.turbo && S.bot.turbo.on ? "" : "Включить ТУРБО? Вход ближе к цене, тейк короче; само выключится при −3% депозита.");
 let DAYS = [];
 async function loadDays() { try { DAYS = (await fetch("/api/days", { cache: "no-store" }).then(r => r.json())).days || []; renderDays(); } catch (e) { /* следующий раз */ } }
 function renderDays() {

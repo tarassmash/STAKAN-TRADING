@@ -1,43 +1,45 @@
-// ЩУКИН НА ПРОБОЯХ — серверный движок, торгует 24/7.
-//  • раз в минуту: скан USDT-перпов Bybit — самые подвижные монеты (24ч / 1ч), оборот от minTurn млн $;
-//  • у каждой: диапазон последних lookback закрытых минутных свечей (максимум / минимум);
-//  • на бирже ставятся условные ЛИМИТНЫЕ ордера на ПРОБОЙ (лимит не дальше entrySlip % за уровнем) в обе стороны: BUY выше максимума, SELL ниже минимума (+buf %);
-//  • пробой исполнен: второй ордер снимается, на бирже сразу СТОП-ЛИМИТ за пробитым уровнем (stopBuf %);
-//    трейлинг ведёт бот (с +trailStart % от входа, отступ trailGap %), выход — ЛИМИТКОЙ, которая переставляется за ценой. Маркета на выходе нет;
-//  • 📉 фильтр OI (опция): входить только если открытый интерес монеты за 15 мин растёт (пробой на новых деньгах);
-//  • ⚡ турбо: короткий диапазон, близкий стоп и быстрый трейлинг; само выключается при минусе 3 % депозита;
-//  • без доборов, без сеток, без усреднения. LIVE выкл — бот только показывает сигналы, ордеров нет.
+// ЩУКИН · МИКРО-ХОДЫ — серверный движок, торгует 24/7. ТОЛЬКО PostOnly-лимитки (всегда мейкер), маркета нет вообще.
+//  • раз в минуту: скан USDT-перпов Bybit — самые «бешеные» монеты (крупные минутные свечи), оборот от minTurn млн $, узкий спред;
+//  • у каждой монеты на взводе стоят ДВЕ лимитки PostOnly: BUY ниже цены и SELL выше цены (на off % от середины стакана),
+//    каждые 3 с переставляются за ценой — куда бы цена ни дёрнулась, одна из них исполнится;
+//  • исполнилась одна — вторая снимается, сразу ставится тейк лимиткой PostOnly на +tp % от входа;
+//  • цена пошла против на sl % — выход лимиткой PostOnly по лучшей цене стакана, переставляется за ценой, пока не исполнится;
+//  • держим дольше maxHold мин — тейк переносится в безубыток (вход + комиссии);
+//  • страховка на случай, если сервер упадёт: стоп-лимит на бирже на 2 × sl % от входа (тоже лимитный ордер);
+//  • 📉 фильтр OI (опция): ставить вход, только если открытый интерес за 15 мин растёт;
+//  • ⚡ турбо: ближе вход, короче тейк и стоп; само выключается при минусе 3 % депозита.
 "use strict";
 const fs = require("fs");
 const path = require("path");
 
-const DEF = { live: false, usdt: 5, lev: 10, maxPos: 5, maxCoins: 8, minTurn: 5, maxCand: 60, lookback: 15, buf: 0.1, entrySlip: 0.2, minRange: 0.8, maxRange: 10, minAtr: 0.25, stopBuf: 0.5, trailStart: 1, trailGap: 0.5, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
-// ⚡ ТУРБО на пробоях: диапазон 5 мин, вход ближе, стоп ближе, трейлинг раньше и плотнее
-const TURBO = { lookback: 5, buf: 0.05, minRange: 0.4, maxRange: 8, stopBuf: 0.3, trailStart: 0.5, trailGap: 0.3 };
-const TURBO_LOSS_PCT = 3;   // турбо выключается само при минусе 3 % депозита с момента включения
-const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "buf", "entrySlip", "minRange", "maxRange", "minAtr", "stopBuf", "trailStart", "trailGap", "oiPct"];
+const DEF = { live: false, usdt: 5, lev: 10, maxPos: 3, maxCoins: 6, minTurn: 5, maxCand: 60, lookback: 15, minAtr: 0.25, maxSpread: 0.08, off: 0.1, tp: 0.35, sl: 0.6, maxHold: 15, oiOn: false, oiPct: 0, turbo: false, turboSave: null, turboFrom: 0 };
+const TURBO = { off: 0.05, tp: 0.2, sl: 0.4, maxHold: 5 };
+const TURBO_LOSS_PCT = 3;
+const NUMS = ["usdt", "lev", "maxPos", "maxCoins", "minTurn", "maxCand", "lookback", "minAtr", "maxSpread", "off", "tp", "sl", "maxHold", "oiPct"];
+const FEE = 0.02;   // мейкер Bybit, % за сторону
+const HARD = 2;     // страховочный стоп-лимит на бирже = HARD × sl
 
 function create(host) {
   const { bx, lsGet, lsSet, keys } = host;
   const now = () => Date.now(), sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  // ---------------- 📒 журнал: строка JSON на событие, файл на день UTC (на томе) ----------------
+  // ---------------- 📒 журнал ----------------
   const JDIR = path.join(host.dataDir || ".", "journal");
   try { fs.mkdirSync(JDIR, { recursive: true }); } catch (e) { /* read-only */ }
   const dayOf = (t) => new Date(t || Date.now()).toISOString().slice(0, 10);
   function jlog(type, data) { fs.appendFile(path.join(JDIR, dayOf() + ".jsonl"), JSON.stringify(Object.assign({ t: now(), type, live: isLive() }, data)) + "\n", () => {}); }
 
-  const old = lsGet("vg.cfg", {});
-  const CFG = Object.assign({}, DEF, { live: !!old.live, oiOn: !!old.oiOn, oiPct: +old.oiPct || 0 }, lsGet("bo.cfg", {}));
-  const saveCfg = () => lsSet("bo.cfg", CFG);
-  if (!lsGet("bo.crazy1", false)) { if (CFG.maxRange === 6) CFG.maxRange = 10; if (CFG.maxCand === 40) CFG.maxCand = 60; if (CFG.turboSave && CFG.turboSave.maxRange === 6) CFG.turboSave.maxRange = 10; if (CFG.turbo && CFG.maxRange === 4) CFG.maxRange = 8; saveCfg(); lsSet("bo.crazy1", true); }   // «бешеные» монеты: шире диапазон, больше кандидатов
+  const prev = lsGet("bo.cfg", {});
+  const CFG = Object.assign({}, DEF, lsGet("mk.cfg", null) || { live: !!prev.live, usdt: +prev.usdt || DEF.usdt, lev: +prev.lev || DEF.lev, minTurn: prev.minTurn != null ? +prev.minTurn : DEF.minTurn, oiOn: !!prev.oiOn, oiPct: +prev.oiPct || 0 });
+  const saveCfg = () => lsSet("mk.cfg", CFG);
+  saveCfg();
   const STAT = Object.assign({ scans: 0, entries: 0, wins: 0, losses: 0, since: 0, realized: 0, closed: 0, realDone: 0, closedDone: 0, doneUntil: 0 }, lsGet("bo.stat", {}));
   const saveStat = () => lsSet("bo.stat", STAT);
-  const OURS = new Set(lsGet("bo.syms", []));    // монеты, на которых этот бот ставил ордера пробоя
+  const OURS = new Set(lsGet("bo.syms", []));
   const saveOurs = () => lsSet("bo.syms", [...OURS]);
-  const TRADES = lsGet("bo.trades", {});         // "SYM|Buy" -> открытая сделка
-  const saveTrades = () => lsSet("bo.trades", TRADES);
-  const ENTRY = lsGet("bo.entry", {});           // sym -> { Buy: {id, trig, qty}, Sell: {...}, hi, lo }
-  const saveEntry = () => lsSet("bo.entry", ENTRY);
+  const TRADES = lsGet("mk.trades", {});         // "SYM|Buy" -> открытая сделка
+  const saveTrades = () => lsSet("mk.trades", TRADES);
+  const ENTRY = lsGet("mk.entry", {});           // sym -> { Buy: {id, px, qty}, Sell: {...} }
+  const saveEntry = () => lsSet("mk.entry", ENTRY);
   let running = !!lsGet("bo.running", false);
   const LOG = lsGet("bo.log", []);
   let logSaved = 0;
@@ -75,12 +77,12 @@ function create(host) {
   const isLive = () => !!(CFG.live && keys());
   const word = (side) => (side === "Buy" ? "лонг" : "шорт");
   const short = (s) => s.replace(/USDT$/, "");
+  const linkId = (k) => "mk_" + k + now() + Math.floor(Math.random() * 1e4);
 
   // ---------------- состояние ----------------
-  const C = {};   // sym -> { hedge, lev, last }
-  const coin = (sym) => C[sym] || (C[sym] = { sym, hedge: null, lev: false, last: 0 });
-  let POS = {};   // "SYM|Side" -> позиция с биржи
-  let BUSY_SYMS = new Set();   // монеты с ЛЮБОЙ позицией на счёте (в т.ч. не этого бота) — туда пробой не ставлю
+  const C = {};   // sym -> { hedge, lev, last, bid, ask }
+  const coin = (sym) => C[sym] || (C[sym] = { sym, hedge: null, lev: false, last: 0, bid: 0, ask: 0 });
+  let POS = {}, BUSY_SYMS = new Set(), OPEN = new Map();   // OPEN: orderId -> ордер с биржи
   let ARMED = [], CAND = [], scanning = false, fastBusy = false, scanTimer = null, fastTimer = null, lastScanAt = 0, ACC = { eq: 0, avail: 0 };
   const posOf = (sym) => Object.values(POS).filter(p => p.sym === sym);
   const ourOpen = () => Object.keys(TRADES).length;
@@ -94,13 +96,15 @@ function create(host) {
     try { const w = await priv("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED" }); const a = (w.list || [])[0] || {}; ACC = { eq: +a.totalEquity || 0, avail: +a.totalAvailableBalance || 0 }; } catch (e) { /* прошлое значение */ }
     return ACC;
   }
+  const canOpen = () => ourOpen() < Math.round(CFG.maxPos) && (!isLive() || ACC.avail >= CFG.usdt * 1.1);
 
-  // ---------------- 1) скан: диапазоны, кандидаты, ордера пробоя ----------------
+  // ---------------- 1) скан: какие монеты держать на взводе ----------------
   async function scan() {
     if (scanning || !running) return; scanning = true;
     try {
       const t = await pub("/v5/market/tickers", { category: "linear" });
       const mv = (x) => Math.max(Math.abs(+x.price24hPcnt || 0) * 100 / 4, +x.prevPrice1h > 0 ? Math.abs(+x.lastPrice / +x.prevPrice1h - 1) * 100 : 0);
+      const spr = (x) => +x.bid1Price > 0 ? (+x.ask1Price / +x.bid1Price - 1) * 100 : 99;
       const pool = (t.list || []).filter(x => x.symbol.endsWith("USDT") && +x.turnover24h >= CFG.minTurn * 1e6 && +x.lastPrice > 0)
         .sort((a, b) => mv(b) - mv(a)).slice(0, Math.max(10, Math.round(CFG.maxCand)));
       const out = [];
@@ -108,88 +112,92 @@ function create(host) {
         const part = await Promise.all(pool.slice(i, i + 10).map(async (x) => {
           try {
             const k = await pub("/v5/market/kline", { category: "linear", symbol: x.symbol, interval: "1", limit: Math.round(CFG.lookback) + 1 });
-            const rows = (k.list || []).slice(1).map(r => ({ h: +r[2], l: +r[3] }));   // без текущей свечи
-            const atr = rows.reduce((a, r) => a + (r.h / r.l - 1) * 100, 0) / Math.max(1, rows.length);   // средняя минутная свеча, % — насколько монета «бешеная»
+            const rows = (k.list || []).slice(1).map(r => ({ h: +r[2], l: +r[3] }));
             if (rows.length < Math.round(CFG.lookback)) return null;
-            const hi = Math.max(...rows.map(r => r.h)), lo = Math.min(...rows.map(r => r.l)), range = (hi / lo - 1) * 100, last = +x.lastPrice;
+            const atr = rows.reduce((a, r) => a + (r.h / r.l - 1) * 100, 0) / rows.length;
+            const hi = Math.max(...rows.map(r => r.h)), lo = Math.min(...rows.map(r => r.l)), last = +x.lastPrice;
             let oi = null;
             if (CFG.oiOn) { try { const o = await pub("/v5/market/open-interest", { category: "linear", symbol: x.symbol, intervalTime: "5min", limit: 4 }); const l = (o.list || []).map(r => +r.openInterest); if (l.length >= 2 && l[l.length - 1] > 0) oi = (l[0] / l[l.length - 1] - 1) * 100; } catch (e) { /* нет данных */ } }
-            return { sym: x.symbol, hi, lo, range, atr, last, ch1h: +x.prevPrice1h > 0 ? (last / +x.prevPrice1h - 1) * 100 : 0, turn: +x.turnover24h, oi, mv: mv(x) };
+            return { sym: x.symbol, hi, lo, range: (hi / lo - 1) * 100, atr, spread: spr(x), last, ch1h: +x.prevPrice1h > 0 ? (last / +x.prevPrice1h - 1) * 100 : 0, turn: +x.turnover24h, oi };
           } catch (e) { return null; }
         }));
         out.push(...part.filter(Boolean));
       }
       for (const x of out) coin(x.sym).last = x.last;
-      // годится: диапазон не слишком узкий (шум) и не слишком широкий (уже улетела), цена внутри диапазона, OI растёт (если фильтр ВКЛ)
       const oiOK = (x) => !CFG.oiOn || (x.oi != null && x.oi > 0 && x.oi >= Math.max(0, CFG.oiPct || 0));
-      const blockedOI = [];
-      const good = out.filter(x => {
-        if (x.atr < CFG.minAtr) return false;
-        if (x.range < CFG.minRange || x.range > CFG.maxRange) return false;
-        if (x.last >= x.hi || x.last <= x.lo) return false;
-        if (!oiOK(x)) { blockedOI.push(short(x.sym) + (x.oi == null ? " (нет OI)" : ` OI ${x.oi >= 0 ? "+" : ""}${x.oi.toFixed(2)}%`)); return false; }
-        return true;
-      }).sort((a, b) => b.atr - a.atr);   // самые «бешеные» (крупные минутные свечи) — первыми
-      if (CFG.oiOn) { const key = blockedOI.slice(0, 8).join(", "); if (key !== (scan.oiLogged ?? "")) { scan.oiLogged = key; if (key) log(`📉 Фильтр OI: открытый интерес не растёт — пробой не ставлю: ${key}${blockedOI.length > 8 ? " …" : ""}`, "info"); } }
+      // монета годится: «бешеная» (минутная свеча ≥ minAtr) и минутная свеча больше тейка — дрожит достаточно; спред узкий
+      const why = (x) => x.atr < CFG.minAtr ? "спокойная" : x.atr < CFG.tp ? "свеча < тейка" : x.spread > CFG.maxSpread ? "спред" : !oiOK(x) ? "OI" : "";
+      const good = out.filter(x => !why(x)).sort((a, b) => b.atr - a.atr);
       if (isLive()) await account();
       turboGuard(ACC.eq);
-      // сколько монет держать «на взводе»: до maxCoins, пока открытых позиций меньше maxPos и хватает свободной маржи
-      const slots = Math.max(0, Math.round(CFG.maxPos) - ourOpen());
       const money = !isLive() || ACC.avail >= CFG.usdt * 1.1;
-      const want = slots > 0 && money ? good.filter(x => !posOf(x.sym).length && !BUSY_SYMS.has(x.sym)).slice(0, Math.round(CFG.maxCoins)) : [];
-      if (!money && !scan.noMoney) log(`Свободной маржи ${ACC.avail.toFixed(2)} USDT меньше залога на сделку ${CFG.usdt} — новые пробои не ставлю`, "err");
+      if (!money && !scan.noMoney) log(`Свободной маржи ${ACC.avail.toFixed(2)} USDT меньше залога на сделку ${CFG.usdt} — новые входы не ставлю`, "err");
       scan.noMoney = !money;
-      if (!slots && !scan.full) log(`Открыто ${ourOpen()} позиций из ${CFG.maxPos} — новые пробои не ставлю, веду открытые`, "info");
-      scan.full = !slots;
-      const next = want.map(x => x.sym), removed = ARMED.filter(s => !next.includes(s)), added = next.filter(s => !ARMED.includes(s));
+      const next = good.filter(x => !BUSY_SYMS.has(x.sym) || TRADES[x.sym + "|Buy"] || TRADES[x.sym + "|Sell"]).slice(0, Math.round(CFG.maxCoins)).map(x => x.sym);
+      const removed = ARMED.filter(s => !next.includes(s)), added = next.filter(s => !ARMED.includes(s));
       ARMED = next;
-      CAND = out.sort((a, b) => b.atr - a.atr).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, atr: x.atr, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: next.includes(x.sym), why: next.includes(x.sym) ? "" : x.atr < CFG.minAtr ? "спокойная" : x.range < CFG.minRange ? "узкий" : x.range > CFG.maxRange ? "широкий" : (x.last >= x.hi || x.last <= x.lo) ? "уже вне" : !oiOK(x) ? "OI" : posOf(x.sym).length ? "позиция" : "лимит" }));
+      CAND = out.sort((a, b) => b.atr - a.atr).slice(0, 15).map(x => ({ sym: x.sym, range: x.range, atr: x.atr, spread: x.spread, hi: x.hi, lo: x.lo, last: x.last, ch1h: x.ch1h, oi: x.oi, turn: x.turn, armed: next.includes(x.sym), why: next.includes(x.sym) ? "" : why(x) || (BUSY_SYMS.has(x.sym) ? "чужая позиция" : "лимит") }));
       STAT.scans++; lastScanAt = now(); saveStat();
-      jlog("scan", { eq: ACC.eq, armed: next, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.range.toFixed(2), +x.atr.toFixed(2), +x.ch1h.toFixed(2)]) });
+      jlog("scan", { eq: ACC.eq, armed: next, open: Object.keys(TRADES), top: out.slice(0, 10).map(x => [x.sym, +x.atr.toFixed(2), +x.spread.toFixed(3), +x.ch1h.toFixed(2)]) });
       if (added.length || removed.length) log(`Скан: на взводе ${next.length} монет → ${next.map(short).join(", ") || "—"}${added.length ? " · + " + added.map(short).join(", ") : ""}${removed.length ? " · − " + removed.map(short).join(", ") : ""}`, "ok");
       for (const s of removed) await dropEntry(s);
-      for (const x of want) { try { await arm(x); } catch (e) { log(`${short(x.sym)}: ордера пробоя: ${e.message}`, "err"); } }
     } catch (e) { log("Скан: " + e.message, "err"); }
     finally { scanning = false; }
   }
 
-  // ---------------- 2) условные маркет-ордера пробоя: BUY над максимумом, SELL под минимумом ----------------
-  async function arm(x) {
-    const sym = x.sym, i = await inst(sym), c = coin(sym);
-    const levels = { Buy: +rnd(x.hi * (1 + CFG.buf / 100), i.tick, "up"), Sell: +rnd(x.lo * (1 - CFG.buf / 100), i.tick, "down") };
-    const e = ENTRY[sym] || (ENTRY[sym] = {}); e.hi = x.hi; e.lo = x.lo;
-    if (!isLive()) { e.Buy = { trig: levels.Buy }; e.Sell = { trig: levels.Sell }; saveEntry(); return; }
+  // ---------------- 2) входы: две PostOnly-лимитки вокруг цены, едут за ценой ----------------
+  function targets(sym, i) {
+    const c = coin(sym); if (!(c.bid > 0 && c.ask > 0)) return null;
+    const mid = (c.bid + c.ask) / 2;
+    return { Buy: +rnd(Math.min(c.bid, mid * (1 - CFG.off / 100)), i.tick, "down"), Sell: +rnd(Math.max(c.ask, mid * (1 + CFG.off / 100)), i.tick, "up") };
+  }
+  async function quote(sym) {
+    const i = await inst(sym), c = coin(sym), T = targets(sym, i); if (!T) return;
+    const e = ENTRY[sym] || (ENTRY[sym] = {});
+    if (!isLive()) { e.Buy = { px: T.Buy }; e.Sell = { px: T.Sell }; return; }
     OURS.add(sym); saveOurs();
     await hedgeOf(sym);
     if (!c.lev) { const lev = String(Math.min(CFG.lev, i.maxLev)); try { await post("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: lev, sellLeverage: lev }); } catch (er) { if (er.code !== 110043) log(`${short(sym)}: плечо: ${er.message}`, "err"); } c.lev = true; }
+    const drift = Math.max(+i.tick, ((T.Buy + T.Sell) / 2) * Math.max(0.02, CFG.off / 3) / 100);
     for (const side of ["Buy", "Sell"]) {
-      const trig = levels[side], qty = qtyFor(i, trig), o = e[side];
-      const price = rnd(trig * (1 + (side === "Buy" ? 1 : -1) * CFG.entrySlip / 100), i.tick, side === "Buy" ? "down" : "up");   // лимит входа: не дальше entrySlip % за уровнем
-      if (o && o.id && Math.abs(o.trig - trig) < +i.tick / 2 && Math.abs(o.qty / qty - 1) < 0.1) continue;
-      if (o && o.id) {
-        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: o.id, triggerPrice: String(trig), price, qty: String(qty) }); Object.assign(o, { trig, qty }); }
-        catch (er) { await cancel(sym, o.id); e[side] = null; }   // ордер мог уже сработать — новый поставлю только на следующем скане, если позиции нет
+      const px = T[side], o = e[side];
+      if (o && o.id && !OPEN.has(o.id)) e[side] = null;   // исполнилась или биржа сняла PostOnly (цена прошла сквозь)
+      const cur = e[side];
+      if (cur && cur.id) {
+        if (Math.abs(cur.px - px) < drift) continue;
+        try { await post("/v5/order/amend", { category: "linear", symbol: sym, orderId: cur.id, price: String(px) }); cur.px = px; }
+        catch (er) { await cancel(sym, cur.id); e[side] = null; }
         continue;
       }
+      const qty = qtyFor(i, px);
       try {
-        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", price, timeInForce: "GTC", qty: String(qty), triggerPrice: String(trig), triggerDirection: side === "Buy" ? 1 : 2, triggerBy: "LastPrice", positionIdx: idxFor(c, side), orderLinkId: "bo_" + now() + Math.floor(Math.random() * 1e4) });
-        e[side] = { id: r.orderId, trig, qty };
+        const r = await post("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Limit", price: String(px), timeInForce: "PostOnly", qty: String(qty), positionIdx: idxFor(c, side), orderLinkId: linkId("e") });
+        e[side] = { id: r.orderId, px, qty };
+        OPEN.set(r.orderId, { orderId: r.orderId });   // до следующего опроса считаю живой
       } catch (er) {
-        if (er.code === 10001 && /position idx/i.test(er.message || "")) { c.hedge = !c.hedge; log(`${short(sym)}: режим позиций Bybit другой — переключаюсь, повтор на следующем скане`, "info"); }
-        else log(`${short(sym)}: ордер пробоя ${side === "Buy" ? "↑" : "↓"} @ ${trig}: ${er.message}`, "err");
+        if (er.code === 10001 && /position idx/i.test(er.message || "")) { c.hedge = !c.hedge; log(`${short(sym)}: режим позиций Bybit другой — переключаюсь`, "info"); }
+        else log(`${short(sym)}: вход ${side === "Buy" ? "BUY" : "SELL"} @ ${px}: ${er.message}`, "err");
       }
     }
     saveEntry();
   }
-  async function cancel(sym, id) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: id }); } catch (e) { /* уже нет */ } }
-  async function dropEntry(sym, keepSide) {
+  async function cancel(sym, id) { try { await post("/v5/order/cancel", { category: "linear", symbol: sym, orderId: id }); } catch (e) { /* уже нет */ } OPEN.delete(id); }
+  async function dropEntry(sym) {
     const e = ENTRY[sym]; if (!e) return;
-    for (const side of ["Buy", "Sell"]) if (side !== keepSide && e[side]) { if (e[side].id && isLive()) await cancel(sym, e[side].id); e[side] = null; }
-    if (!e.Buy && !e.Sell) delete ENTRY[sym];
-    saveEntry();
+    for (const side of ["Buy", "Sell"]) if (e[side]) { if (e[side].id && isLive()) await cancel(sym, e[side].id); e[side] = null; }
+    delete ENTRY[sym]; saveEntry();
   }
 
-  // ---------------- 3) позиции: новая — снять второй ордер, поставить стоп и трейлинг; закрытая — в журнал ----------------
+  // ---------------- 3) позиции: тейк, стоп, безубыток — одна PostOnly-лимитка выхода ----------------
+  async function pollOrders() {
+    const m = new Map(); let cursor;
+    for (let page = 0; page < 5; page++) {
+      const r = await priv("GET", "/v5/order/realtime", { category: "linear", settleCoin: "USDT", limit: 50, cursor });
+      for (const o of r.list || []) m.set(o.orderId, o);
+      cursor = r.nextPageCursor; if (!cursor) break;
+    }
+    OPEN = m;
+  }
   async function pollPositions() {
     const r = await priv("GET", "/v5/position/list", { category: "linear", settleCoin: "USDT" });
     const seen = {}, busy = new Set();
@@ -197,90 +205,77 @@ function create(host) {
       if (!(+p.size > 0)) continue;
       busy.add(p.symbol);
       if (!OURS.has(p.symbol)) continue;
-      const key = p.symbol + "|" + p.side;
-      seen[key] = { sym: p.symbol, side: p.side, size: +p.size, avg: +p.avgPrice, upnl: +p.unrealisedPnl || 0, idx: +p.positionIdx || 0, sl: +p.stopLoss || 0, ts: +p.trailingStop || 0, mark: +p.markPrice || 0 };
-      if (!coin(p.symbol).last) coin(p.symbol).last = +p.markPrice;   // цена — последняя сделка (тикер), марк только если её нет
+      seen[p.symbol + "|" + p.side] = { sym: p.symbol, side: p.side, size: +p.size, avg: +p.avgPrice, upnl: +p.unrealisedPnl || 0, idx: +p.positionIdx || 0, mark: +p.markPrice || 0 };
     }
     POS = seen; BUSY_SYMS = busy;
     for (const [key, p] of Object.entries(seen)) {
       let tr = TRADES[key];
       if (!tr) {
-        const e = ENTRY[p.sym] || {};
-        tr = TRADES[key] = { sym: p.sym, side: p.side, open: now(), entry: p.avg, level: p.side === "Buy" ? e.hi : e.lo, qty: p.size, maxPx: p.mark, minPx: p.mark, protected: false, cfg: { lookback: CFG.lookback, buf: CFG.buf, stopBuf: CFG.stopBuf, trailStart: CFG.trailStart, trailGap: CFG.trailGap, turbo: !!CFG.turbo } };
+        tr = TRADES[key] = { sym: p.sym, side: p.side, open: now(), entry: p.avg, qty: p.size, maxPx: p.mark, minPx: p.mark, mode: "тейк", cfg: { off: CFG.off, tp: CFG.tp, sl: CFG.sl, maxHold: CFG.maxHold, turbo: !!CFG.turbo } };
         STAT.entries++; saveStat(); saveTrades();
-        log(`${short(p.sym)}: 🚀 пробой ${p.side === "Buy" ? "ВВЕРХ → лонг" : "ВНИЗ → шорт"} ${p.size} @ ${fmt(p.avg)} (уровень ${fmt(tr.level)})`, "ok");
-        jlog("entry", { sym: p.sym, side: p.side, px: p.avg, level: tr.level, qty: p.size });
-        await dropEntry(p.sym, null);   // второй ордер (и повтор этого) снимаю
-        ARMED = ARMED.filter(s => s !== p.sym);
+        log(`${short(p.sym)}: ${p.side === "Buy" ? "🟢 лонг" : "🔴 шорт"} ${p.size} @ ${fmt(p.avg)} — тейк +${CFG.tp}%, стоп −${CFG.sl}% (всё лимитками PostOnly)`, "ok");
+        jlog("entry", { sym: p.sym, side: p.side, px: p.avg, qty: p.size });
+        await dropEntry(p.sym);   // вторую лимитку входа снимаю
       }
-      tr.maxPx = Math.max(tr.maxPx, p.mark); tr.minPx = Math.min(tr.minPx, p.mark);
-      if (!tr.protected) await protect(p, tr);
-      else await manage(p, tr);
+      tr.entry = p.avg; tr.qty = p.size;
+      const px = coin(p.sym).last || p.mark;
+      tr.maxPx = Math.max(tr.maxPx, px); tr.minPx = Math.min(tr.minPx, px);
+      if (!tr.hard) await hardStop(p, tr);
+      await manage(p, tr);
     }
     for (const key of Object.keys(TRADES)) if (!seen[key]) await closeTrade(key);
   }
-  // стоп за пробитым уровнем — ЛИМИТНЫЙ (условная лимитка на бирже); трейлинг ведёт бот и выходит тоже ЛИМИТКОЙ. Маркета нет.
-  const SL_SLIP = 0.3;   // лимит стопа на 0.3 % хуже цены срабатывания — чтобы лимитка исполнилась на резком движении
-  async function protect(p, tr) {
+  // страховка, если сервер упадёт: стоп-ЛИМИТ на бирже на HARD × sl от входа
+  async function hardStop(p, tr) {
     const i = await inst(p.sym), L = p.side === "Buy", d = L ? 1 : -1;
-    const level = tr.level || p.avg;
-    const sl = rnd(level * (1 - d * CFG.stopBuf / 100), i.tick, L ? "down" : "up");
-    const slLim = rnd(+sl * (1 - d * SL_SLIP / 100), i.tick, L ? "down" : "up");
-    tr.sl = +sl; tr.slLim = +slLim; saveTrades();
-    const mark = coin(p.sym).last || p.mark;
-    if (L ? mark <= +sl : mark >= +sl) { log(`${short(p.sym)}: цена уже вернулась за уровень — выхожу лимиткой`, "err"); tr.protected = true; saveTrades(); return exitLimit(p, tr, "стоп"); }
-    try {
-      await post("/v5/position/trading-stop", { category: "linear", symbol: p.sym, tpslMode: "Partial", stopLoss: sl, slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: slLim, slSize: String(p.size), positionIdx: p.idx });
-      tr.protected = true; saveTrades();
-      log(`${short(p.sym)}: 🛡 стоп-лимит ${sl} → лимитка ${slLim} (за уровнем ${fmt(level)}, −${(Math.abs(p.avg / sl - 1) * 100).toFixed(2)}% от входа) · трейлинг ${CFG.trailGap}% с +${CFG.trailStart}% — выход лимиткой`, "info");
-    } catch (e) {
-      if (e.code === 34040) { tr.protected = true; saveTrades(); return; }
-      tr.tries = (tr.tries || 0) + 1; saveTrades();
-      log(`${short(p.sym)}: стоп: ${e.message}${tr.tries >= 3 ? " — стоп на бирже не встал, бот сам выйдет лимиткой при касании " + sl : ""}`, "err");
-      if (tr.tries >= 3) { tr.protected = true; saveTrades(); }
-    }
+    const sl = rnd(p.avg * (1 - d * HARD * CFG.sl / 100), i.tick, L ? "down" : "up"), lim = rnd(+sl * (1 - d * 0.3 / 100), i.tick, L ? "down" : "up");
+    try { await post("/v5/position/trading-stop", { category: "linear", symbol: p.sym, tpslMode: "Partial", stopLoss: sl, slTriggerBy: "LastPrice", slOrderType: "Limit", slLimitPrice: lim, slSize: String(p.size), positionIdx: p.idx }); tr.hard = +sl; }
+    catch (e) { tr.hardTries = (tr.hardTries || 0) + 1; if (e.code === 34040 || tr.hardTries >= 3) tr.hard = +sl; if (tr.hardTries >= 3) log(`${short(p.sym)}: страховочный стоп не встал: ${e.message}`, "err"); }
+    saveTrades();
   }
-  // выход ЛИМИТКОЙ reduce-only по текущей цене; не исполнилась — каждые 3 с переставляется за ценой
-  async function exitLimit(p, tr, why) {
-    const i = await inst(p.sym), L = p.side === "Buy", px = coin(p.sym).last || p.mark;
-    const price = rnd(px, i.tick, L ? "down" : "up");
-    if (tr.exitId) {
-      if (Math.abs(+price - tr.exitPx) < +i.tick / 2) return;
-      try { await post("/v5/order/amend", { category: "linear", symbol: p.sym, orderId: tr.exitId, price, qty: String(p.size) }); tr.exitPx = +price; saveTrades(); return; }
-      catch (e) { tr.exitId = null; }   // исполнилась / снята — ставлю заново
-    }
-    try {
-      const r = await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Limit", qty: String(p.size), price, timeInForce: "GTC", reduceOnly: true, positionIdx: p.idx, orderLinkId: "bo_x" + now() + Math.floor(Math.random() * 1e4) });
-      if (!tr.exitId && !tr.exitLogged) { tr.exitLogged = true; log(`${short(p.sym)}: 💰 ${why}: выход лимиткой ${L ? "SELL" : "BUY"} ${p.size} @ ${price} — веду за ценой, пока не исполнится`, why === "стоп" ? "err" : "ok"); }
-      tr.exitId = r.orderId; tr.exitPx = +price; saveTrades();
-    } catch (e) { log(`${short(p.sym)}: выход лимиткой: ${e.message}`, "err"); }
+  // куда ставить лимитку выхода: тейк / безубыток / стоп (лучшая мейкерская цена стакана)
+  function exitPrice(p, tr, i) {
+    const L = p.side === "Buy", d = L ? 1 : -1, c = coin(p.sym), px = c.last || p.mark;
+    const adverse = -d * (px / tr.entry - 1) * 100, held = (now() - tr.open) / 60000;
+    let mode = tr.mode;
+    if (adverse >= CFG.sl) mode = "стоп";
+    else if (mode !== "стоп" && held >= CFG.maxHold) mode = "безубыток";
+    if (mode !== tr.mode) { tr.mode = mode; log(`${short(p.sym)}: ${mode === "стоп" ? "🛑 цена против на " + adverse.toFixed(2) + "% — выхожу лимиткой по лучшей цене стакана" : "⏱ держу " + held.toFixed(0) + " мин — тейк в безубыток"}`, mode === "стоп" ? "err" : "info"); saveTrades(); }
+    const best = L ? c.ask : c.bid;   // мейкер: продаю по аску / покупаю по биду
+    let want;
+    if (mode === "стоп") want = best || px;
+    else { const goal = tr.entry * (1 + d * (mode === "безубыток" ? 2.5 * FEE : CFG.tp) / 100); want = best ? (L ? Math.max(goal, best) : Math.min(goal, best)) : goal; }
+    return rnd(want, i.tick, L ? "up" : "down");
   }
-  // каждые 3 с: трейлинг (бот), запасной стоп (если стоп-лимит на бирже не исполнился), ведение лимитки выхода
   async function manage(p, tr) {
-    const L = p.side === "Buy", d = L ? 1 : -1, px = coin(p.sym).last || p.mark; if (!px) return;
-    const best = L ? tr.maxPx : tr.minPx;
-    if (!tr.trailOn && d * (best / tr.entry - 1) * 100 >= CFG.trailStart) { tr.trailOn = true; saveTrades(); log(`${short(p.sym)}: 🎯 трейлинг включён: ${L ? "максимум" : "минимум"} ${fmt(best)} (+${CFG.trailStart}% от входа), выход на откате ${CFG.trailGap}% — лимиткой`, "ok"); }
-    if (tr.trailOn) tr.trailLvl = best * (1 - d * CFG.trailGap / 100);
-    if (tr.exitId) return exitLimit(p, tr, tr.exitWhy || "выход");
-    if (tr.trailOn && (L ? px <= tr.trailLvl : px >= tr.trailLvl)) { tr.exitWhy = "трейлинг"; return exitLimit(p, tr, "трейлинг"); }
-    if (tr.sl && (L ? px <= tr.slLim : px >= tr.slLim)) {   // цена ушла дальше лимита стопа — стоп-лимит может не исполниться, догоняю лимиткой
-      if (!tr.slAt) { tr.slAt = now(); saveTrades(); return; }
-      if (now() - tr.slAt > 5000) { tr.exitWhy = "стоп"; return exitLimit(p, tr, "стоп"); }
-    } else if (tr.slAt) { tr.slAt = 0; saveTrades(); }
+    if (!isLive()) return;
+    const i = await inst(p.sym), L = p.side === "Buy";
+    const price = exitPrice(p, tr, i);
+    const o = tr.exitId && OPEN.get(tr.exitId);
+    if (o) {
+      const left = o.leavesQty != null ? +o.leavesQty : +o.qty;
+      if (Math.abs(left - p.size) > 1e-12) { await cancel(p.sym, tr.exitId); tr.exitId = null; }   // позиция выросла / частично закрылась — переставляю на весь размер
+      else if (Math.abs(+price - tr.exitPx) < +i.tick / 2) return;
+      else { try { await post("/v5/order/amend", { category: "linear", symbol: p.sym, orderId: tr.exitId, price }); tr.exitPx = +price; saveTrades(); return; } catch (e) { await cancel(p.sym, tr.exitId); tr.exitId = null; } }
+    }
+    try {
+      const r = await post("/v5/order/create", { category: "linear", symbol: p.sym, side: L ? "Sell" : "Buy", orderType: "Limit", qty: String(p.size), price, timeInForce: "PostOnly", reduceOnly: true, positionIdx: p.idx, orderLinkId: linkId("x") });
+      tr.exitId = r.orderId; tr.exitPx = +price; OPEN.set(r.orderId, { orderId: r.orderId, qty: String(p.size), leavesQty: String(p.size) }); saveTrades();
+    } catch (e) { log(`${short(p.sym)}: лимитка выхода: ${e.message}`, "err"); }
   }
   async function closeTrade(key) {
     const tr = TRADES[key]; if (!tr) return;
     let pnl = null;
     try { const r = await priv("GET", "/v5/position/closed-pnl", { category: "linear", symbol: tr.sym, startTime: tr.open - 60000, limit: 50 }); pnl = (r.list || []).filter(x => (x.side === "Buy" ? "Sell" : "Buy") === tr.side || !x.side).reduce((a, x) => a + (+x.closedPnl || 0), 0); } catch (e) { pnl = null; }
-    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy")) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }   // хвосты: стоп-лимит / лимитка выхода
+    try { const o = (await priv("GET", "/v5/order/realtime", { category: "linear", symbol: tr.sym })).list || []; for (const x of o) if (x.reduceOnly && x.side === (tr.side === "Buy" ? "Sell" : "Buy")) await cancel(tr.sym, x.orderId); } catch (e) { /* ничего */ }
     const hold = (now() - tr.open) / 60000, L = tr.side === "Buy";
     if (pnl != null) { if (pnl > 0) STAT.wins++; else STAT.losses++; }
-    log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ закрыто в плюс " + "+" + pnl.toFixed(2) + " USDT" : "🛑 закрыто в минус " + pnl.toFixed(2) + " USDT"} (${word(tr.side)}, ${hold.toFixed(0)} мин)`, pnl > 0 ? "ok" : "err");
+    log(`${short(tr.sym)}: ${pnl == null ? "позиция закрыта" : pnl > 0 ? "✅ +" + pnl.toFixed(3) + " USDT" : "🛑 " + pnl.toFixed(3) + " USDT"} (${word(tr.side)}, ${tr.mode}, ${hold.toFixed(1)} мин)`, pnl > 0 ? "ok" : "err");
     jlog("trade", Object.assign({}, tr, { close: now(), holdMin: +hold.toFixed(1), best: +((L ? tr.maxPx / tr.entry - 1 : 1 - tr.minPx / tr.entry) * 100).toFixed(2), adverse: +((L ? 1 - tr.minPx / tr.entry : tr.maxPx / tr.entry - 1) * 100).toFixed(2), pnl: pnl == null ? null : +pnl.toFixed(4) }));
     delete TRADES[key]; saveTrades(); saveStat();
   }
 
-  // ---------------- заработано с запуска: закрытый PnL с Bybit (за вычетом комиссий) по монетам бота ----------------
+  // ---------------- заработано с запуска ----------------
   let realAt = 0;
   async function refreshRealized() {
     if (!STAT.since || now() - realAt < 30000) return; realAt = now();
@@ -305,17 +300,25 @@ function create(host) {
   // ---------------- циклы ----------------
   async function lastPrices() {
     const t = await pub("/v5/market/tickers", { category: "linear" });
-    for (const x of t.list || []) if (C[x.symbol]) C[x.symbol].last = +x.lastPrice;
+    for (const x of t.list || []) if (C[x.symbol] || ARMED.includes(x.symbol)) { const c = coin(x.symbol); c.last = +x.lastPrice; c.bid = +x.bid1Price; c.ask = +x.ask1Price; }
   }
   async function fast() {
     if (fastBusy) return; fastBusy = true;
     try {
       await lastPrices();
-      if (isLive()) { await pollPositions(); await refreshRealized(); }
-      else if (running) for (const s of ARMED) {   // без LIVE: только сигналы
-        const e = ENTRY[s], p = coin(s).last; if (!e || !p) continue;
-        for (const side of ["Buy", "Sell"]) if (e[side] && (side === "Buy" ? p >= e[side].trig : p <= e[side].trig)) { log(`[СИГНАЛ] ${short(s)}: пробой ${side === "Buy" ? "вверх" : "вниз"} @ ${fmt(p)} (уровень ${e[side].trig}) — LIVE выкл, ордера нет`, "ok"); e[side] = null; }
-      }
+      if (isLive()) {
+        await pollOrders();
+        await pollPositions();
+        if (running) {
+          const ok = canOpen();
+          for (const s of ARMED) {
+            if (posOf(s).length || BUSY_SYMS.has(s)) { if (ENTRY[s]) await dropEntry(s); continue; }
+            if (!ok) { if (ENTRY[s]) await dropEntry(s); continue; }
+            try { await quote(s); } catch (e) { log(`${short(s)}: вход: ${e.message}`, "err"); }
+          }
+        }
+        await refreshRealized();
+      } else if (running) for (const s of ARMED) { try { await quote(s); } catch (e) { /* следующий раз */ } }
     } catch (e) { log("Опрос: " + e.message, "err"); }
     finally { fastBusy = false; }
   }
@@ -328,14 +331,14 @@ function create(host) {
   // ---------------- команды ----------------
   function setCfg(o) {
     const ch = [];
-    if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }   // пока турбо ВКЛ, его параметры с формы не перетираются
+    if (CFG.turbo && !o._turbo) { o = Object.assign({}, o); for (const k of Object.keys(TURBO)) delete o[k]; }
     for (const k of NUMS) if (k in DEF && o[k] != null && o[k] !== "" && Number.isFinite(Number(o[k])) && Number(o[k]) !== CFG[k]) { CFG[k] = Number(o[k]); ch.push(k); }
-    CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.maxPos = Math.max(1, Math.min(30, Math.round(CFG.maxPos))); CFG.maxCoins = Math.max(1, Math.min(40, Math.round(CFG.maxCoins)));
-    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.buf = Math.max(0, Math.min(2, CFG.buf)); CFG.entrySlip = Math.max(0.01, Math.min(2, +CFG.entrySlip || 0.2)); CFG.minRange = Math.max(0.1, CFG.minRange); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxRange = Math.max(CFG.minRange + 0.1, CFG.maxRange);
-    CFG.stopBuf = Math.max(0.05, Math.min(10, CFG.stopBuf)); CFG.trailStart = Math.max(0, Math.min(20, CFG.trailStart)); CFG.trailGap = Math.max(0.05, Math.min(10, CFG.trailGap)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
+    CFG.usdt = Math.max(1, CFG.usdt); CFG.lev = Math.max(1, Math.min(50, Math.round(CFG.lev))); CFG.maxPos = Math.max(1, Math.min(30, Math.round(CFG.maxPos))); CFG.maxCoins = Math.max(1, Math.min(20, Math.round(CFG.maxCoins)));
+    CFG.lookback = Math.max(3, Math.min(120, Math.round(CFG.lookback))); CFG.minAtr = Math.max(0, Math.min(5, +CFG.minAtr || 0)); CFG.maxSpread = Math.max(0.005, Math.min(1, +CFG.maxSpread || 0.08));
+    CFG.off = Math.max(0, Math.min(2, +CFG.off || 0)); CFG.tp = Math.max(0.06, Math.min(5, +CFG.tp || 0.35)); CFG.sl = Math.max(0.1, Math.min(10, +CFG.sl || 0.6)); CFG.maxHold = Math.max(1, Math.min(600, +CFG.maxHold || 15)); CFG.oiPct = Math.max(0, Math.min(50, +CFG.oiPct || 0));
     if (ch.includes("lev")) for (const c of Object.values(C)) c.lev = false;
     if (typeof o.live === "boolean" && o.live !== CFG.live) { CFG.live = o.live; ch.push("live"); log(CFG.live ? "⚠ LIVE включён: реальные ордера" : "LIVE выключен: только сигналы", CFG.live ? "err" : "info"); }
-    if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); scan.oiLogged = null; log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: пробой только если открытый интерес за 15 мин растёт${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""}` : "📉 Фильтр OI ВЫКЛ", "info"); }
+    if (typeof o.oiOn === "boolean" && o.oiOn !== CFG.oiOn) { CFG.oiOn = o.oiOn; ch.push("oiOn"); log(CFG.oiOn ? `📉 Фильтр OI ВКЛ: вход только если открытый интерес за 15 мин растёт${CFG.oiPct > 0 ? " на " + CFG.oiPct + "% и больше" : ""}` : "📉 Фильтр OI ВЫКЛ", "info"); }
     saveCfg();
     if (ch.length) jlog("cfg", { changed: ch, cfg: CFG });
     return ch;
@@ -351,7 +354,7 @@ function create(host) {
       const save = {}; for (const k of Object.keys(TURBO)) save[k] = CFG[k];
       CFG.turboSave = save; CFG.turbo = true; CFG.turboFrom = now();
       setCfg(Object.assign({ _turbo: true }, TURBO));
-      log(`⚡ ТУРБО ВКЛ: диапазон ${TURBO.lookback} мин, вход +${TURBO.buf}% за уровнем, стоп ${TURBO.stopBuf}% за уровнем, трейлинг с +${TURBO.trailStart}% отступ ${TURBO.trailGap}% · авто-выкл при −${TURBO_LOSS_PCT}% депозита`, "ok");
+      log(`⚡ ТУРБО ВКЛ: вход ${TURBO.off}% от цены, тейк +${TURBO.tp}%, стоп −${TURBO.sl}%, безубыток через ${TURBO.maxHold} мин · авто-выкл при −${TURBO_LOSS_PCT}% депозита`, "ok");
       jlog("turbo", { on: true, save });
       return "⚡ Турбо включено";
     }
@@ -371,33 +374,32 @@ function create(host) {
     if (CFG.live && !keys()) return "Нет BYBIT_API_KEY / BYBIT_API_SECRET в Railway → Variables";
     running = true; lsSet("bo.running", true);
     if (!STAT.since) { STAT.since = now(); STAT.doneUntil = STAT.since; saveStat(); }
-    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: пробои диапазона ${CFG.lookback} мин в обе стороны на ${CFG.maxCoins} монетах · залог ${CFG.usdt} USDT × плечо ${CFG.lev} · до ${CFG.maxPos} позиций · стоп ${CFG.stopBuf}% за уровнем · трейлинг с +${CFG.trailStart}%, отступ ${CFG.trailGap}%${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
+    log(`СТАРТ ${isLive() ? "LIVE" : "(только сигналы)"}: микро-ходы в обе стороны, только PostOnly-лимитки · до ${CFG.maxCoins} монет · до ${CFG.maxPos} позиций · залог ${CFG.usdt} USDT × ${CFG.lev} · вход ${CFG.off}% от цены · тейк +${CFG.tp}% · стоп −${CFG.sl}% · безубыток через ${CFG.maxHold} мин${CFG.oiOn ? " · фильтр OI" : ""}${CFG.turbo ? " · ⚡ турбо" : ""}`, "ok");
     jlog("start", { cfg: CFG });
     schedule();
-    if (isLive()) { try { await pollPositions(); } catch (e) { /* следующий опрос */ } }
-    scan().catch(() => {});
-    return "Бот запущен — торгует пробои на сервере 24/7";
+    await scan().catch(() => {});
+    return "Бот запущен — микро-ходы лимитками 24/7";
   }
   async function stop() {
     running = false; lsSet("bo.running", false); schedule();
     for (const s of Object.keys(ENTRY)) await dropEntry(s);
     ARMED = [];
-    log("СТОП: ордера пробоя сняты. Открытые позиции остаются со стопом и трейлингом на бирже.", "info"); jlog("stop", {});
+    log("СТОП: лимитки входа сняты. Открытые позиции бот доводит до выхода лимитками (тейк / стоп).", "info"); jlog("stop", {});
     return "Остановлен";
   }
   function resetStats() { Object.assign(STAT, { scans: 0, entries: 0, wins: 0, losses: 0, since: running ? now() : 0, realized: 0, closed: 0, realDone: 0, closedDone: 0, doneUntil: running ? now() : 0 }); realAt = 0; saveStat(); return "Статистика сброшена"; }
-  // разово: заявки сеток прежней стратегии (vg_e…) снимаются; её позиции бот не трогает
-  async function dropOldGrids() {
-    if (!keys() || lsGet("bo.oldDropped", false)) return;
+  // разово: снять старые условные ордера пробоя (bo_…) — они исполнялись как тейкер
+  async function dropOld() {
+    if (!keys() || lsGet("mk.oldDropped", false)) return;
     try {
       const orders = (await priv("GET", "/v5/order/realtime", { category: "linear", settleCoin: "USDT", limit: 50 })).list || [];
-      let n = 0; for (const o of orders) if (/^vg_e/.test(o.orderLinkId || "")) { await cancel(o.symbol, o.orderId); n++; }
-      log(`Новая стратегия «пробои»: снято ${n} заявок сеток прежней стратегии. Её открытые позиции бот не трогает — их тейки и стопы остаются на бирже.`, "ok");
+      let n = 0; for (const o of orders) if (/^bo_/.test(o.orderLinkId || "") && !o.reduceOnly) { await cancel(o.symbol, o.orderId); n++; }
+      log(`Новая стратегия «микро-ходы»: маркета и условных ордеров больше нет, только PostOnly-лимитки. Снято старых ордеров пробоя: ${n}.`, "ok");
     } catch (e) { log("Переход: " + e.message, "err"); return; }
-    lsSet("bo.oldDropped", true);
+    lsSet("mk.oldDropped", true);
   }
 
-  // ---------------- 📒 дни: сделки и PnL по дням ----------------
+  // ---------------- 📒 дни ----------------
   const DAYC = {};
   function readDay(day) {
     const f = path.join(JDIR, day + ".jsonl"); let st;
@@ -417,9 +419,9 @@ function create(host) {
   function view() {
     const syms = [...new Set([...ARMED, ...Object.values(TRADES).map(t => t.sym)])];
     const rows = syms.map(s => {
-      const e = ENTRY[s] || {}, ps = posOf(s);
-      return { sym: s, last: coin(s).last, hi: e.hi, lo: e.lo, up: e.Buy ? e.Buy.trig : null, dn: e.Sell ? e.Sell.trig : null,
-        pos: ps.map(p => { const tr = TRADES[p.sym + "|" + p.side] || {}; return { side: p.side, size: p.size, avg: p.avg, upnl: p.upnl, sl: tr.sl || p.sl, trail: tr.trailOn ? tr.trailLvl : null, exit: tr.exitPx || null }; }) };
+      const e = ENTRY[s] || {}, ps = posOf(s), c = coin(s);
+      return { sym: s, last: c.last, bid: c.bid, ask: c.ask, buy: e.Buy ? e.Buy.px : null, sell: e.Sell ? e.Sell.px : null,
+        pos: ps.map(p => { const tr = TRADES[p.sym + "|" + p.side] || {}; return { side: p.side, size: p.size, avg: p.avg, upnl: p.upnl, exit: tr.exitPx || null, mode: tr.mode || "", held: tr.open ? Math.round((now() - tr.open) / 60000) : 0 }; }) };
     });
     const unreal = Object.values(POS).reduce((a, p) => a + (p.upnl || 0), 0), realized = STAT.realized || 0;
     const pnl = { since: STAT.since, realized: +realized.toFixed(4), unreal: +unreal.toFixed(4), total: +(realized + unreal).toFixed(4), closed: STAT.closed || 0 };
@@ -427,11 +429,11 @@ function create(host) {
       open: ourOpen(), pnl, acc: ACC, running, live: isLive(), cfg: CFG, stat: STAT, rows, cand: CAND, nextScan: running && lastScanAt ? Math.max(0, Math.round((lastScanAt + 60000 - now()) / 1000)) : null, log: LOG.slice(0, 200) };
   }
 
+  const wasRunning = running;
   (async () => {
-    await dropOldGrids();
-    if (isLive()) { try { await pollPositions(); } catch (e) { /* следующий опрос */ } }
-    if (running) log("Сервер перезапущен — бот продолжает торговать пробои", "ok");
-    schedule(); if (running) scan().catch(() => {});
+    await dropOld();
+    if (isLive()) { try { await pollOrders(); await pollPositions(); } catch (e) { /* следующий опрос */ } }
+    if (wasRunning && running) { log("Сервер перезапущен — бот продолжает микро-ходы лимитками", "ok"); schedule(); scan().catch(() => {}); } else if (!running) schedule();
   })();
   return { start, stop, setCfg, setTurbo, resetStats, view, days, journalPath };
 }

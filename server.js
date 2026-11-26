@@ -111,7 +111,7 @@ async function act(b) {
   if (what === "start") return await BOT.start();
   if (what === "stop") return await BOT.stop();
   if (what === "reset") return BOT.resetStats();
-  if (what === "oiOn") { const on = !BOT.view().cfg.oiOn; BOT.setCfg({ oiOn: on }); return on ? "📉 Пробой только когда открытый интерес монеты растёт" : "📉 Фильтр OI выключен"; }
+  if (what === "oiOn") { const on = !BOT.view().cfg.oiOn; BOT.setCfg({ oiOn: on }); return on ? "📉 Вход только когда открытый интерес монеты растёт" : "📉 Фильтр OI выключен"; }
   if (what === "turbo") return BOT.setTurbo(!BOT.view().cfg.turbo);
   if (what === "test") { await bx("/v5/market/time"); if (!HAS_KEYS) return "Public OK (нет ключей — только сигналы)"; await refreshAccount(); if (ACC.err) throw new Error(ACC.err); return `Связь OK · баланс ${(ACC.equity || 0).toFixed(2)} USDT, свободно ${(ACC.available || 0).toFixed(2)}`; }
   return "неизвестная команда";
@@ -134,7 +134,7 @@ http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/healthz") return json(200, { ok: true });
-    if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Shukin Breakout"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
+    if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Shukin"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
     if (url.pathname === "/api/state") return json(200, state());
     if (url.pathname === "/api/days") return json(200, { days: BOT.days() });
     if (url.pathname === "/api/journal") {   // the detailed journal of a day: one JSON per line
@@ -153,7 +153,7 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(UI);
   } catch (e) { return json(500, { error: String(e && e.message || e) }); }
-}).listen(PORT, "0.0.0.0", () => log(`SHUKIN BREAKOUT :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
+}).listen(PORT, "0.0.0.0", () => log(`SHUKIN MICRO :${PORT} · ${ENV} · Bybit keys ${HAS_KEYS ? "yes" : "NO"} · ${PASSWORD ? "password on" : "NO UI_PASSWORD (buttons locked)"} · storage ${STORE}`));
 
 // 24/7: a stray error is logged, the server keeps running (and Railway restarts it if it ever stops)
 process.on("unhandledRejection", (e) => log("unhandledRejection", e && e.message || e));

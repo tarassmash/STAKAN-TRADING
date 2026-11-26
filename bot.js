@@ -177,7 +177,8 @@ function create(host) {
     // Обе пустые — обе лимитки на один объём, и залог на сторону не больше 45 % депозита, чтобы ОБЕ стороны точно влезли в маржу.
     const mid = (T.Buy + T.Sell) / 2, mine = (sd) => POS[sym + "|" + sd], other = (sd) => POS[sym + "|" + (sd === "Buy" ? "Sell" : "Buy")];
     const lot = isLive() && ACC.eq > 0 ? Math.min(CFG.usdt, ACC.eq * 0.45) : CFG.usdt;
-    const base = (e.Buy && !mine("Buy") && !mine("Sell") && e.Buy.qty) || (e.Sell && !mine("Buy") && !mine("Sell") && e.Sell.qty) || qtyFor(i, mid, lot);
+    const capQ = qtyFor(i, mid, lot), locked = !mine("Buy") && !mine("Sell") && ((e.Buy && e.Buy.qty) || (e.Sell && e.Sell.qty));
+    const base = locked ? Math.min(locked, capQ) : capQ;   // обе стороны одного объёма и никогда больше лимита — иначе хедж потом не влезет в маржу
     const qtyOf = (sd) => {
       const m = mine(sd), o = other(sd);
       if (o) return +rnd(Math.max(0, o.size - (m ? m.size : 0)), i.step, "down");   // догнать другую сторону до точно такого же объёма
